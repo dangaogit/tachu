@@ -1,0 +1,6 @@
+graph LR
+    Context[上下文输入] --> Discovery[语义发现面]
+    Discovery --> Index[(向量化索引)]
+    Index --> Candidates[候选集]
+    Candidates --> Gate[确定性执行闸门]
+    Gate -- 显式引用/白名单/权限检查 --> Execution[执行面]

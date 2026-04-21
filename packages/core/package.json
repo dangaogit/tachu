@@ -1,0 +1,66 @@
+{
+  "name": "@tachu/core",
+  "version": "1.0.0-alpha.1",
+  "description": "Agentic engine core (alpha) — descriptor registry, 9-phase execution pipeline, prompt assembler, task scheduler, safety & observability modules, with built-in direct-answer and tool-use (agentic loop) sub-flows.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "README_ZH.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "tachu",
+    "agent",
+    "agentic",
+    "llm",
+    "ai",
+    "engine",
+    "registry",
+    "scheduler",
+    "dag",
+    "orchestrator",
+    "bun",
+    "typescript"
+  ],
+  "author": "Tachu Contributors",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/dangaogit/tachu#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dangaogit/tachu.git",
+    "directory": "packages/core"
+  },
+  "bugs": {
+    "url": "https://github.com/dangaogit/tachu/issues"
+  },
+  "engines": {
+    "bun": ">=1.3.12"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "dependencies": {
+    "gray-matter": "catalog:",
+    "tiktoken": "catalog:"
+  },
+  "scripts": {
+    "build": "bun run clean && bunx tsc -p tsconfig.build.json && bun ../../scripts/copy-md-assets.ts",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist",
+    "bench": "bun test ./benchmarks/scheduler.bench.ts ./benchmarks/vector-store.bench.ts ./benchmarks/prompt-assembler.bench.ts",
+    "test": "bun test",
+    "test:coverage": "bun test --coverage"
+  }
+}

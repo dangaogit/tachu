@@ -1,0 +1,12 @@
+graph TD
+    subgraph "业务层"
+        A[业务规则 / 业务工具 / 自定义 Adapter / 领域技能 / Agent / 预定义 Plan 模板]
+    end
+    subgraph "引擎扩展库 (官方)"
+        B[通用 Provider Adapter / 常用 Tools / 执行后端封装 / 通用规则 / 向量数据库 Adapter / 输入转换器等]
+    end
+    subgraph "引擎核心"
+        C[协议定义 / 主干流程 / 生命周期 / 会话 / 记忆 / 安全 / 路由 / 状态]
+    end
+    A --> B
+    B --> C

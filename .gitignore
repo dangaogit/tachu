@@ -1,0 +1,66 @@
+# ───────── OS ─────────
+.DS_Store
+Thumbs.db
+
+# ───────── Dependencies ─────────
+node_modules/
+
+# ───────── Build output ─────────
+dist/
+*.tsbuildinfo
+
+# ───────── Test / coverage ─────────
+coverage/
+*.lcov
+
+# ───────── Local AI workspace ─────────
+.cursor/
+
+# ───────── Logs ─────────
+*.log
+logs/
+
+# ───────── Environment / secrets ─────────
+.env
+.env.*
+!.env.example
+
+# ───────── Tachu runtime data ─────────
+.tachu/archive/
+.tachu/memory.jsonl
+**/.tachu/archive/
+
+# Repo-root Tachu workspace created by `tachu init` during local smoke-tests;
+# this repository is Tachu itself and should never commit its own runtime data.
+/.tachu/
+/tachu.config.ts
+
+# ───────── Pack / publish artifacts ─────────
+*.tgz
+*.tar.gz
+npm-debug.log*
+.npm/
+
+# ───────── Editors ─────────
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ───────── Draft / local docs ─────────
+docs-draft-*
+
+# Tachu
+.tachu/sessions/
+.tachu/archive.jsonl
+.tachu/events.jsonl
+.tachu/vectors.json
+
+# ───────── Web Fetch Server ─────────
+packages/web-fetch-server/dist/
+packages/web-fetch-server/.cache/
+packages/web-fetch-server/coverage/
+# Playwright 下载的 Chromium 缓存（默认在 ~/.cache/ms-playwright，但某些容器场景会落到这里）
+packages/web-fetch-server/.ms-playwright/
+
+reports

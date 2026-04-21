@@ -1,0 +1,7 @@
+graph LR
+    Chat[实时对话] --> Limit{接近上限?}
+    Limit -- 是 --> Compress[压缩策略执行]
+    Compress --> Archive[归档原始内容]
+    Archive --> Window[保持窗口可用]
+    Limit -- 超限 --> LongTerm[归档 / 向量化]
+    LongTerm --> Storage[(长期存储)]

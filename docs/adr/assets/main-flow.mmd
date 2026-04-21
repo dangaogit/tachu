@@ -1,0 +1,21 @@
+graph TD
+    Start[业务请求] --> Session[会话管理]
+    Session --> Safety[最小安全准入]
+    Safety --> Intent[意图分析 LLM]
+    Intent -- 简单 --> Simple[直接回答]
+    Intent -- 复杂 --> PreCheck[前置校验]
+    Simple --> Output[输出规范]
+    PreCheck --> Split[任务拆分]
+    Split -- Plan 模式 --> PlanLoop[规划循环]
+    Split -- 模板 --> Template[按模板执行]
+    Split -- 动态 --> Dynamic[LLM 动态拆分]
+    PlanLoop --> GraphCheck[依赖图校验]
+    Template --> GraphCheck
+    Dynamic --> GraphCheck
+    GraphCheck --> Execute[子任务执行]
+    Execute --> Validate[结果验证]
+    Validate -- 通过 --> Summary[执行总结]
+    Validate -- 不通过 --> Retry[重试/重规划]
+    Retry --> Split
+    Summary --> Output
+    Output --> End[结果输出]

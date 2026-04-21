@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>JSON-LD Fixture</title>
+    <meta property="og:title" content="OG Title Example" />
+    <meta property="og:description" content="Open Graph description for fixture testing." />
+    <meta
+      property="og:image"
+      content="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "Article",
+        "headline": "Fixture Article Headline",
+        "author": {
+          "@type": "Person",
+          "name": "Fixture Author"
+        }
+      }
+    </script>
+    <script type="application/ld+json">
+      { this is not valid JSON and should be ignored by consumers that parse strictly
+    </script>
+  </head>
+  <body>
+    <main>
+      <p>Page body for JSON-LD and Open Graph fixture tests.</p>
+    </main>
+  </body>
+</html>

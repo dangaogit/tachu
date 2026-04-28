@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { DEFAULT_ADAPTER_CALL_CONTEXT } from "@tachu/core";
 import { AnthropicProviderAdapter } from "../../src/providers/anthropic";
 import { OpenAIProviderAdapter } from "../../src/providers/openai";
 
@@ -76,7 +77,7 @@ describe("OpenAIProviderAdapter", () => {
         toolChoice: { function: { name: "read_file" } },
         responseFormat: { type: "json_object" },
       } as unknown as Parameters<OpenAIProviderAdapter["chat"]>[0],
-      undefined,
+      DEFAULT_ADAPTER_CALL_CONTEXT,
     );
 
     expect(response.content).toBe("hello");
@@ -116,10 +117,13 @@ describe("OpenAIProviderAdapter", () => {
       },
     };
 
-    const response = await adapter.chat({
-      model: "gpt-4o-mini",
-      messages: [{ role: "user", content: "fetch it" }],
-    });
+    const response = await adapter.chat(
+      {
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: "fetch it" }],
+      },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
     expect(response.content).toBe("");
     expect(response.finishReason).toBe("tool_calls");
     expect(response.toolCalls).toEqual([
@@ -155,10 +159,13 @@ describe("OpenAIProviderAdapter", () => {
       },
     };
     await expect(
-      adapter.chat({
-        model: "gpt-4o-mini",
-        messages: [{ role: "user", content: "break it" }],
-      }),
+      adapter.chat(
+        {
+          model: "gpt-4o-mini",
+          messages: [{ role: "user", content: "break it" }],
+        },
+        DEFAULT_ADAPTER_CALL_CONTEXT,
+      ),
     ).rejects.toMatchObject({ code: "PROVIDER_TOOL_ARGUMENTS_INVALID", retryable: true });
   });
 
@@ -179,18 +186,21 @@ describe("OpenAIProviderAdapter", () => {
         },
       },
     };
-    await adapter.chat({
-      model: "gpt-4o-mini",
-      messages: [
-        { role: "user", content: "do x" },
-        {
-          role: "assistant",
-          content: "",
-          toolCalls: [{ id: "call_1", name: "fetch_url", arguments: { url: "https://x" } }],
-        },
-        { role: "tool", toolCallId: "call_1", content: "fetched body" },
-      ],
-    });
+    await adapter.chat(
+      {
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "user", content: "do x" },
+          {
+            role: "assistant",
+            content: "",
+            toolCalls: [{ id: "call_1", name: "fetch_url", arguments: { url: "https://x" } }],
+          },
+          { role: "tool", toolCallId: "call_1", content: "fetched body" },
+        ],
+      },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
     const wireMessages = capturedBody?.messages as Array<Record<string, unknown>>;
     const assistant = wireMessages?.[1];
     expect(assistant?.role).toBe("assistant");
@@ -217,10 +227,13 @@ describe("OpenAIProviderAdapter", () => {
       },
     };
     await expect(
-      adapter.chat({
-        model: "gpt-4o-mini",
-        messages: [{ role: "user", content: "hi" }],
-      }),
+      adapter.chat(
+        {
+          model: "gpt-4o-mini",
+          messages: [{ role: "user", content: "hi" }],
+        },
+        DEFAULT_ADAPTER_CALL_CONTEXT,
+      ),
     ).rejects.toMatchObject({ code: "PROVIDER_RATE_LIMITED", retryable: true });
   });
 
@@ -250,10 +263,13 @@ describe("OpenAIProviderAdapter", () => {
       },
     };
     await expect(
-      adapter.chat({
-        model: "gpt-4o-mini",
-        messages: [{ role: "user", content: "hi" }],
-      }),
+      adapter.chat(
+        {
+          model: "gpt-4o-mini",
+          messages: [{ role: "user", content: "hi" }],
+        },
+        DEFAULT_ADAPTER_CALL_CONTEXT,
+      ),
     ).rejects.toMatchObject({ code: "TIMEOUT_PROVIDER_REQUEST", retryable: true });
   });
 
@@ -293,10 +309,13 @@ describe("OpenAIProviderAdapter", () => {
     };
 
     const chunks = await collectStream(
-      adapter.chatStream({
-        model: "gpt-4o-mini",
-        messages: [{ role: "user", content: "stream" }],
-      }),
+      adapter.chatStream(
+        {
+          model: "gpt-4o-mini",
+          messages: [{ role: "user", content: "stream" }],
+        },
+        DEFAULT_ADAPTER_CALL_CONTEXT,
+      ),
     );
     const textDelta = chunks.find((item) => item.type === "text-delta");
     expect(textDelta).toBeDefined();
@@ -379,7 +398,7 @@ describe("AnthropicProviderAdapter", () => {
         tools: [{ name: "search", description: "search", inputSchema: { type: "object" } }],
         toolChoice: { function: { name: "search" } },
       } as unknown as Parameters<AnthropicProviderAdapter["chat"]>[0],
-      undefined,
+      DEFAULT_ADAPTER_CALL_CONTEXT,
     );
     expect(result.content).toBe("done");
     expect(result.content.includes("tool_use")).toBe(false);
@@ -408,18 +427,21 @@ describe("AnthropicProviderAdapter", () => {
         countTokens: async () => ({ input_tokens: 1 }),
       },
     };
-    await adapter.chat({
-      model: "claude-3-5-sonnet-latest",
-      messages: [
-        { role: "user", content: "x" },
-        {
-          role: "assistant",
-          content: "",
-          toolCalls: [{ id: "toolu_1", name: "fetch_url", arguments: { url: "https://x" } }],
-        },
-        { role: "tool", toolCallId: "toolu_1", content: "fetched" },
-      ],
-    });
+    await adapter.chat(
+      {
+        model: "claude-3-5-sonnet-latest",
+        messages: [
+          { role: "user", content: "x" },
+          {
+            role: "assistant",
+            content: "",
+            toolCalls: [{ id: "toolu_1", name: "fetch_url", arguments: { url: "https://x" } }],
+          },
+          { role: "tool", toolCallId: "toolu_1", content: "fetched" },
+        ],
+      },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
     const wireMessages = capturedBody?.messages as Array<Record<string, unknown>>;
     const assistant = wireMessages?.[1] as { role: string; content: Array<Record<string, unknown>> };
     expect(assistant.role).toBe("assistant");
@@ -447,10 +469,13 @@ describe("AnthropicProviderAdapter", () => {
       },
     };
     await expect(
-      adapter.chat({
-        model: "claude-3-5-sonnet-latest",
-        messages: [{ role: "user", content: "hi" }],
-      }),
+      adapter.chat(
+        {
+          model: "claude-3-5-sonnet-latest",
+          messages: [{ role: "user", content: "hi" }],
+        },
+        DEFAULT_ADAPTER_CALL_CONTEXT,
+      ),
     ).rejects.toMatchObject({ code: "PROVIDER_UPSTREAM_ERROR", retryable: true });
   });
 
@@ -465,10 +490,13 @@ describe("AnthropicProviderAdapter", () => {
       },
     };
     await expect(
-      adapter.chat({
-        model: "claude-3-5-sonnet-latest",
-        messages: [{ role: "user", content: "auth" }],
-      }),
+      adapter.chat(
+        {
+          model: "claude-3-5-sonnet-latest",
+          messages: [{ role: "user", content: "auth" }],
+        },
+        DEFAULT_ADAPTER_CALL_CONTEXT,
+      ),
     ).rejects.toMatchObject({ code: "PROVIDER_AUTH_FAILED" });
   });
 
@@ -509,10 +537,13 @@ describe("AnthropicProviderAdapter", () => {
     };
 
     const chunks = await collectStream(
-      adapter.chatStream({
-        model: "claude-3-5-sonnet-latest",
-        messages: [{ role: "user", content: "stream" }],
-      }),
+      adapter.chatStream(
+        {
+          model: "claude-3-5-sonnet-latest",
+          messages: [{ role: "user", content: "stream" }],
+        },
+        DEFAULT_ADAPTER_CALL_CONTEXT,
+      ),
     );
     const textChunk = chunks.find((c) => c.type === "text-delta");
     expect(textChunk && textChunk.type === "text-delta" && textChunk.delta).toBe("hello");

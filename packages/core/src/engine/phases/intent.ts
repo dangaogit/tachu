@@ -449,7 +449,7 @@ const buildIntentMessages = async (
   const messages: Message[] = [{ role: "system", content: INTENT_SYSTEM_PROMPT }];
 
   try {
-    const window = await env.memorySystem.load(state.context.sessionId);
+    const window = await env.memorySystem.load(state.context.sessionId, env.adapterContext);
     const history = window.entries
       .map(memoryEntryToMessage)
       .filter((m): m is Message => m !== null)
@@ -493,7 +493,7 @@ const callIntentLLM = async (
   });
 
   try {
-    const response = await adapter.chat({ model, messages }, signal);
+    const response = await adapter.chat({ model, messages }, env.adapterContext, signal);
     // D1-LOW-04：把真实 usage 回流到 orchestrator，以覆盖此前仅用 Prompt 估算 token 的逻辑。
     env.onProviderUsage?.(response.usage);
     const parsed = parseIntentJson(response.content);

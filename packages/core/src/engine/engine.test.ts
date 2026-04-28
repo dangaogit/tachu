@@ -6,6 +6,7 @@ import {
   type EngineConfig,
   type ProviderAdapter,
 } from "../index";
+import type { AdapterCallContext } from "../types/context";
 
 const config: EngineConfig = {
   registry: { descriptorPaths: [], enableVectorIndexing: false },
@@ -151,14 +152,14 @@ describe("Engine", () => {
       async listAvailableModels() {
         return [];
       },
-      async chat(request: ChatRequest): Promise<ChatResponse> {
+      async chat(request: ChatRequest, _ctx: AdapterCallContext): Promise<ChatResponse> {
         const lastUser = [...request.messages].reverse().find((m) => m.role === "user")?.content;
         return {
           content: `echo:${lastUser ?? ""}`,
           usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
         };
       },
-      async *chatStream(request: ChatRequest) {
+      async *chatStream(request: ChatRequest, _ctx: AdapterCallContext) {
         const lastUser = [...request.messages].reverse().find((m) => m.role === "user")?.content;
         const text = typeof lastUser === "string" ? lastUser : "";
         yield { type: "text-delta", delta: `echo:${text}` };

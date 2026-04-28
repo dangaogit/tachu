@@ -1,4 +1,5 @@
 import { ProviderError } from "../errors";
+import type { AdapterCallContext } from "../types/context";
 import type { GeneratedImage, Message, ToolCallRequest, ToolDefinition } from "../types";
 
 /**
@@ -148,16 +149,26 @@ export interface ProviderAdapter {
    * 非流式对话调用。
    *
    * @param request 对话请求
+   * @param ctx 租户 / 会话 / 链路上下文
    * @param signal 可选取消信号
    */
-  chat(request: ChatRequest, signal?: AbortSignal): Promise<ChatResponse>;
+  chat(
+    request: ChatRequest,
+    ctx: AdapterCallContext,
+    signal?: AbortSignal,
+  ): Promise<ChatResponse>;
   /**
    * 流式对话调用。
    *
    * @param request 对话请求
+   * @param ctx 租户 / 会话 / 链路上下文
    * @param signal 可选取消信号
    */
-  chatStream(request: ChatRequest, signal?: AbortSignal): AsyncIterable<ChatStreamChunk>;
+  chatStream(
+    request: ChatRequest,
+    ctx: AdapterCallContext,
+    signal?: AbortSignal,
+  ): AsyncIterable<ChatStreamChunk>;
   /**
    * 可选 token 计数能力。
    *
@@ -212,7 +223,11 @@ export class NoopProvider implements ProviderAdapter {
     return DEFAULT_MODELS;
   }
 
-  async chat(request: ChatRequest, signal?: AbortSignal): Promise<ChatResponse> {
+  async chat(
+    request: ChatRequest,
+    _ctx: AdapterCallContext,
+    signal?: AbortSignal,
+  ): Promise<ChatResponse> {
     if (signal?.aborted) {
       throw ProviderError.callFailed(this.name, signal.reason);
     }
@@ -233,9 +248,10 @@ export class NoopProvider implements ProviderAdapter {
 
   async *chatStream(
     request: ChatRequest,
+    ctx: AdapterCallContext,
     signal?: AbortSignal,
   ): AsyncIterable<ChatStreamChunk> {
-    const response = await this.chat(request, signal);
+    const response = await this.chat(request, ctx, signal);
     for (const char of response.content) {
       if (signal?.aborted) {
         throw ProviderError.callFailed(this.name, signal.reason);

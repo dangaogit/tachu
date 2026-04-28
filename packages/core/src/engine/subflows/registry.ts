@@ -5,6 +5,7 @@ import type {
   StreamChunk,
   ToolCallRecord,
 } from "../../types";
+import type { AdapterCallContext } from "../../types/context";
 import type { MemorySystem } from "../../modules/memory";
 import type { ModelRouter } from "../../modules/model-router";
 import type { ProviderAdapter, ChatUsage } from "../../modules/provider";
@@ -55,6 +56,8 @@ export interface InternalSubflowContext {
   signal: AbortSignal;
   traceId: string;
   sessionId: string;
+  /** Provider / Memory 调用上下文（来自 `adapterCallContextFromExecution`）。 */
+  adapterContext: AdapterCallContext;
   /**
    * 由主干阶段（`Engine.runStream` Phase 6 预热阶段）预先组装好的 Prompt。
    *
@@ -149,6 +152,7 @@ export class InternalSubflowRegistry {
           signal: ctx.signal,
           traceId: ctx.traceId,
           sessionId: ctx.sessionId,
+          adapterContext: ctx.adapterContext,
           ...(ctx.prebuiltPrompt !== undefined
             ? { prebuiltPrompt: ctx.prebuiltPrompt }
             : {}),
@@ -191,6 +195,7 @@ export class InternalSubflowRegistry {
         signal: ctx.signal,
         traceId: ctx.traceId,
         sessionId: ctx.sessionId,
+        adapterContext: ctx.adapterContext,
         prebuiltPrompt: ctx.prebuiltPrompt,
         ...(ctx.onProviderUsage !== undefined
           ? { onProviderUsage: ctx.onProviderUsage }

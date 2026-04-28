@@ -1,6 +1,8 @@
 import { appendFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { EngineConfig, Message } from "../types";
+import type { AdapterCallContext } from "../types/context";
+import { DEFAULT_ADAPTER_CALL_CONTEXT } from "../types/context";
 import type { ModelRouter } from "./model-router";
 import type { ProviderAdapter } from "./provider";
 import type { Tokenizer } from "../prompt/tokenizer";
@@ -40,16 +42,18 @@ export interface MemorySystem {
    * 加载会话对应的上下文窗口。
    *
    * @param sessionId 会话 ID
+   * @param ctx 租户 / 链路上下文（适配器侧隔离与可观测性）
    * @returns 会话当前上下文窗口
    */
-  load(sessionId: string): Promise<ContextWindow>;
+  load(sessionId: string, ctx: AdapterCallContext): Promise<ContextWindow>;
   /**
    * 向会话追加一条记忆条目，并在达到阈值时触发压缩。
    *
    * @param sessionId 会话 ID
    * @param entry 新增记忆条目
+   * @param ctx 租户 / 链路上下文
    */
-  append(sessionId: string, entry: MemoryEntry): Promise<void>;
+  append(sessionId: string, entry: MemoryEntry, ctx: AdapterCallContext): Promise<void>;
   /**
    * 对会话上下文执行压缩。
    *
@@ -151,6 +155,7 @@ export class HeadMiddleTailCompression implements CompressionStrategy {
  */
 export class InMemoryMemorySystem implements MemorySystem {
   private readonly windows = new Map<string, ContextWindow>();
+  private readonly adapterCtxBySession = new Map<string, AdapterCallContext>();
   private readonly fallbackCompressor: CompressionStrategy;
 
   constructor(
@@ -167,9 +172,17 @@ export class InMemoryMemorySystem implements MemorySystem {
   }
 
   /**
+   * 返回最近一次 `load`/`append` 写入的适配器上下文；供持久化实现或内部压缩路径复用。
+   */
+  resolveAdapterContext(sessionId: string): AdapterCallContext {
+    return this.adapterCtxBySession.get(sessionId) ?? DEFAULT_ADAPTER_CALL_CONTEXT;
+  }
+
+  /**
    * @inheritdoc
    */
-  async load(sessionId: string): Promise<ContextWindow> {
+  async load(sessionId: string, ctx: AdapterCallContext): Promise<ContextWindow> {
+    this.adapterCtxBySession.set(sessionId, ctx);
     const existing = this.windows.get(sessionId);
     if (existing) {
       return existing;
@@ -186,8 +199,8 @@ export class InMemoryMemorySystem implements MemorySystem {
   /**
    * @inheritdoc
    */
-  async append(sessionId: string, entry: MemoryEntry): Promise<void> {
-    const window = await this.load(sessionId);
+  async append(sessionId: string, entry: MemoryEntry, ctx: AdapterCallContext): Promise<void> {
+    const window = await this.load(sessionId, ctx);
     window.entries.push(entry);
     const counted = this.tokenizer.count(String(entry.content));
     window.tokenCount += counted;
@@ -214,11 +227,11 @@ export class InMemoryMemorySystem implements MemorySystem {
    * @param sessionId 会话 ID
    * @param entries 历史条目（通常来自持久化存储的反序列化结果）
    */
-  async hydrate(sessionId: string, entries: MemoryEntry[]): Promise<void> {
+  async hydrate(sessionId: string, entries: MemoryEntry[], ctx?: AdapterCallContext): Promise<void> {
     if (entries.length === 0) {
       return;
     }
-    const window = await this.load(sessionId);
+    const window = await this.load(sessionId, ctx ?? DEFAULT_ADAPTER_CALL_CONTEXT);
     const sorted = [...entries].sort((a, b) => a.timestamp - b.timestamp);
     for (const entry of sorted) {
       window.entries.push(entry);
@@ -234,19 +247,20 @@ export class InMemoryMemorySystem implements MemorySystem {
    */
   async clear(sessionId: string): Promise<void> {
     this.windows.delete(sessionId);
+    this.adapterCtxBySession.delete(sessionId);
   }
 
   /**
    * @inheritdoc
    */
   async compress(sessionId: string): Promise<void> {
-    const window = await this.load(sessionId);
+    const window = await this.load(sessionId, this.resolveAdapterContext(sessionId));
     if (window.entries.length === 0) {
       return;
     }
 
     await this.archive(sessionId);
-    window.entries = await this.compressEntries(window.entries, window.limit);
+    window.entries = await this.compressEntries(sessionId, window.entries, window.limit);
     window.tokenCount = await this.computeTokenCount(window.entries);
   }
 
@@ -254,7 +268,10 @@ export class InMemoryMemorySystem implements MemorySystem {
    * @inheritdoc
    */
   async recall(sessionId: string, query: string, topK = 5): Promise<MemoryEntry[]> {
-    const results = await this.vectorStore.search(query, topK);
+    const results = await this.vectorStore.search(
+      { query, topK },
+      this.resolveAdapterContext(sessionId),
+    );
     return results.map((item) => ({
       role: "system",
       content: item.metadata.content ?? "",
@@ -268,7 +285,7 @@ export class InMemoryMemorySystem implements MemorySystem {
    * @inheritdoc
    */
   async archive(sessionId: string): Promise<void> {
-    const window = await this.load(sessionId);
+    const window = await this.load(sessionId, this.resolveAdapterContext(sessionId));
     if (window.entries.length === 0) {
       return;
     }
@@ -296,7 +313,7 @@ export class InMemoryMemorySystem implements MemorySystem {
    * @inheritdoc
    */
   async getSize(sessionId: string): Promise<{ entries: number; tokens: number }> {
-    const window = await this.load(sessionId);
+    const window = await this.load(sessionId, this.resolveAdapterContext(sessionId));
     return { entries: window.entries.length, tokens: window.tokenCount };
   }
 
@@ -310,7 +327,7 @@ export class InMemoryMemorySystem implements MemorySystem {
     sessionId: string,
     options?: { keepHead?: number; keepTail?: number },
   ): Promise<void> {
-    const window = await this.load(sessionId);
+    const window = await this.load(sessionId, this.resolveAdapterContext(sessionId));
     if (window.entries.length === 0) {
       return;
     }
@@ -319,11 +336,12 @@ export class InMemoryMemorySystem implements MemorySystem {
     if (window.entries.length <= keepHead + keepTail) {
       return;
     }
-    window.entries = await this.trimEntries(window.entries, keepHead, keepTail);
+    window.entries = await this.trimEntries(sessionId, window.entries, keepHead, keepTail);
     window.tokenCount = await this.computeTokenCount(window.entries);
   }
 
   private async trimEntries(
+    sessionId: string,
     entries: MemoryEntry[],
     keepHead: number,
     keepTail: number,
@@ -337,7 +355,7 @@ export class InMemoryMemorySystem implements MemorySystem {
     if (middle.length === 0) {
       return [...anchored, ...head, ...tail].sort((a, b) => a.timestamp - b.timestamp);
     }
-    const summary = await this.summarizeMiddleWithProvider(middle);
+    const summary = await this.summarizeMiddleWithProvider(sessionId, middle);
     const summaryEntry: MemoryEntry = summary
       ? {
           role: "system",
@@ -357,7 +375,11 @@ export class InMemoryMemorySystem implements MemorySystem {
     return [...anchored, ...head, summaryEntry, ...tail].sort((a, b) => a.timestamp - b.timestamp);
   }
 
-  private async compressEntries(entries: MemoryEntry[], targetTokens: number): Promise<MemoryEntry[]> {
+  private async compressEntries(
+    sessionId: string,
+    entries: MemoryEntry[],
+    targetTokens: number,
+  ): Promise<MemoryEntry[]> {
     if (entries.length <= this.config.memory.headKeep + this.config.memory.tailKeep) {
       return entries;
     }
@@ -378,7 +400,7 @@ export class InMemoryMemorySystem implements MemorySystem {
       return [...anchored, ...head, ...tail].sort((a, b) => a.timestamp - b.timestamp);
     }
 
-    const summary = await this.summarizeMiddleWithProvider(middle);
+    const summary = await this.summarizeMiddleWithProvider(sessionId, middle);
     if (!summary) {
       return this.fallbackCompressor.compress(entries, targetTokens);
     }
@@ -392,7 +414,10 @@ export class InMemoryMemorySystem implements MemorySystem {
     return [...anchored, ...head, summaryEntry, ...tail].sort((a, b) => a.timestamp - b.timestamp);
   }
 
-  private async summarizeMiddleWithProvider(middle: MemoryEntry[]): Promise<string | null> {
+  private async summarizeMiddleWithProvider(
+    sessionId: string,
+    middle: MemoryEntry[],
+  ): Promise<string | null> {
     const route =
       this.tryResolveModelRoute("compress") ??
       this.tryResolveModelRoute("fast-cheap");
@@ -414,22 +439,25 @@ export class InMemoryMemorySystem implements MemorySystem {
     }
 
     try {
-      const response = await provider.chat({
-        model: route.model,
-        messages: [
-          {
-            role: "system",
-            content:
-              "你是记忆压缩器。请将会话中段压缩为最多 180 字的事实摘要，保留目标、关键决策、约束与未完成事项，不要编造内容。",
-          },
-          {
-            role: "user",
-            content: middleText,
-          },
-        ],
-        temperature: 0,
-        maxTokens: 256,
-      });
+      const response = await provider.chat(
+        {
+          model: route.model,
+          messages: [
+            {
+              role: "system",
+              content:
+                "你是记忆压缩器。请将会话中段压缩为最多 180 字的事实摘要，保留目标、关键决策、约束与未完成事项，不要编造内容。",
+            },
+            {
+              role: "user",
+              content: middleText,
+            },
+          ],
+          temperature: 0,
+          maxTokens: 256,
+        },
+        this.resolveAdapterContext(sessionId),
+      );
       const content = response.content.trim();
       return content.length > 0 ? content.slice(0, 2_000) : null;
     } catch {

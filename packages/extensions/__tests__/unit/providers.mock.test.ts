@@ -1,14 +1,18 @@
 import { describe, expect, it } from "bun:test";
 import type { ChatFinishReason, ToolCallRequest } from "@tachu/core";
+import { DEFAULT_ADAPTER_CALL_CONTEXT } from "@tachu/core";
 import { MockProviderAdapter } from "../../src/providers/mock";
 
 describe("MockProviderAdapter", () => {
   it("returns deterministic chat response", async () => {
     const provider = new MockProviderAdapter();
-    const response = await provider.chat({
-      model: "mock-chat",
-      messages: [{ role: "user", content: "hello" }],
-    });
+    const response = await provider.chat(
+      {
+        model: "mock-chat",
+        messages: [{ role: "user", content: "hello" }],
+      },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
     expect(response.content).toBe("mock:hello");
     expect(response.finishReason).toBe("stop");
     expect(response.toolCalls).toBeUndefined();
@@ -20,10 +24,13 @@ describe("MockProviderAdapter", () => {
     let output = "";
     let finished = false;
     let finishReason: ChatFinishReason | undefined;
-    for await (const chunk of provider.chatStream({
-      model: "mock-chat",
-      messages: [{ role: "user", content: "abc" }],
-    })) {
+    for await (const chunk of provider.chatStream(
+      {
+        model: "mock-chat",
+        messages: [{ role: "user", content: "abc" }],
+      },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    )) {
       if (chunk.type === "text-delta") {
         output += chunk.delta;
       } else if (chunk.type === "finish") {
@@ -55,36 +62,48 @@ describe("MockProviderAdapter", () => {
       ],
     });
 
-    const step1 = await provider.chat({
-      model: "mock-chat",
-      messages: [{ role: "user", content: "do a thing" }],
-    });
+    const step1 = await provider.chat(
+      {
+        model: "mock-chat",
+        messages: [{ role: "user", content: "do a thing" }],
+      },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
     expect(step1.toolCalls).toEqual([readFile]);
     expect(step1.finishReason).toBe("tool_calls");
 
-    const step2 = await provider.chat({
-      model: "mock-chat",
-      messages: [
-        { role: "user", content: "do a thing" },
-        { role: "assistant", content: "", toolCalls: [readFile] },
-        { role: "tool", toolCallId: "call-1", content: "file body" },
-      ],
-    });
+    const step2 = await provider.chat(
+      {
+        model: "mock-chat",
+        messages: [
+          { role: "user", content: "do a thing" },
+          { role: "assistant", content: "", toolCalls: [readFile] },
+          { role: "tool", toolCallId: "call-1", content: "file body" },
+        ],
+      },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
     expect(step2.content).toBe("intermediate");
     expect(step2.toolCalls).toEqual([fetchUrl]);
 
-    const step3 = await provider.chat({
-      model: "mock-chat",
-      messages: [{ role: "user", content: "next" }],
-    });
+    const step3 = await provider.chat(
+      {
+        model: "mock-chat",
+        messages: [{ role: "user", content: "next" }],
+      },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
     expect(step3.content).toBe("final answer");
     expect(step3.finishReason).toBe("stop");
     expect(step3.toolCalls).toBeUndefined();
 
-    const afterExhaustion = await provider.chat({
-      model: "mock-chat",
-      messages: [{ role: "user", content: "extra" }],
-    });
+    const afterExhaustion = await provider.chat(
+      {
+        model: "mock-chat",
+        messages: [{ role: "user", content: "extra" }],
+      },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
     expect(afterExhaustion.content).toBe("mock:extra");
   });
 
@@ -100,10 +119,13 @@ describe("MockProviderAdapter", () => {
     const events: string[] = [];
     let completedCall: ToolCallRequest | undefined;
     let finishReason: ChatFinishReason | undefined;
-    for await (const chunk of provider.chatStream({
-      model: "mock-chat",
-      messages: [{ role: "user", content: "list current dir" }],
-    })) {
+    for await (const chunk of provider.chatStream(
+      {
+        model: "mock-chat",
+        messages: [{ role: "user", content: "list current dir" }],
+      },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    )) {
       events.push(chunk.type);
       if (chunk.type === "tool-call-complete") {
         completedCall = chunk.call;

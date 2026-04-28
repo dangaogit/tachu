@@ -24,7 +24,7 @@ Tachu ships as a Bun-native TypeScript monorepo with three packages: the zero-de
 
 ## Project Status
 
-**Current release:** `1.0.0-alpha.1` on the `alpha` dist-tag.
+**Current release:** `1.0.0-alpha.2` on the `alpha` dist-tag.
 
 This is the **first public alpha** — most infrastructure is in place, but several LLM-backed stages are still stubbed. The table below is the single source of truth; every claim made elsewhere in this README must be cross-checked against it.
 
@@ -228,7 +228,7 @@ bun add -g @tachu/cli@alpha
 After global installation, verify with:
 
 ```bash
-tachu --version   # expect 1.0.0-alpha.1 or newer
+tachu --version   # expect 1.0.0-alpha.2 or newer
 ```
 
 ---
@@ -937,7 +937,11 @@ The contract is enforced by `packages/core/src/engine/phases/fallback-contract.t
 Tachu follows a `1.0.0-alpha.n` → `1.0.0-beta.n` → `1.0.0` release lane. Each
 cut-line below is a real, shippable deliverable with tests, not a wish list.
 
-### 1.0.0-alpha.1 — First public alpha (current)
+### 1.0.0-alpha.2 — Adapter call context (current)
+
+- [x] `AdapterCallContext` on `ProviderAdapter` / `VectorStore` / `MemorySystem`; engine and phases pass execution-derived context (trace id; optional tenant / scope identifiers).
+
+### 1.0.0-alpha.1 — First public alpha
 
 - [x] 9-phase pipeline, descriptor registry, prompt assembler, scheduler and 8 core modules
 - [x] OpenAI / Anthropic / Qwen / Mock provider adapters with

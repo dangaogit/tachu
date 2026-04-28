@@ -1,6 +1,6 @@
 {
   "name": "@tachu/cli",
-  "version": "1.0.0-alpha.1",
+  "version": "1.0.0-alpha.2",
   "description": "Tachu CLI (alpha) — tachu init/run/chat commands with streaming renderer, interactive session persistence, descriptor scanning and config loader. Reference implementation of @tachu/core.",
   "type": "module",
   "main": "./dist/index.js",

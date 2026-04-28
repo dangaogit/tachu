@@ -249,7 +249,7 @@ const tryLLMFallbackSummary = async (
 
   const signal = buildFallbackAbortSignal(env.activeAbortSignal, FALLBACK_LLM_TIMEOUT_MS);
   try {
-    const response = await adapter.chat({ model, messages }, signal);
+    const response = await adapter.chat({ model, messages }, env.adapterContext, signal);
     env.onProviderUsage?.(response.usage);
     const raw = typeof response.content === "string" ? response.content.trim() : "";
     safeEmit(env, {

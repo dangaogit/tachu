@@ -3,6 +3,7 @@ import { createTiktokenTokenizer, type Tokenizer } from "@tachu/core";
 import {
   ProviderError,
   TimeoutError,
+  type AdapterCallContext,
   type ChatFinishReason,
   type ChatRequest,
   type ChatResponse,
@@ -371,7 +372,11 @@ export class OpenAIProviderAdapter implements ProviderAdapter {
    * @param signal 可选取消信号
    * @returns 对话响应
    */
-  async chat(request: ChatRequest, signal?: AbortSignal): Promise<ChatResponse> {
+  async chat(
+    request: ChatRequest,
+    _ctx: AdapterCallContext,
+    signal?: AbortSignal,
+  ): Promise<ChatResponse> {
     const extended = request as ExtendedChatRequest;
     const timeout = withAbortTimeout(signal, this.timeoutMs);
     try {
@@ -440,6 +445,7 @@ export class OpenAIProviderAdapter implements ProviderAdapter {
    */
   async *chatStream(
     request: ChatRequest,
+    _ctx: AdapterCallContext,
     signal?: AbortSignal,
   ): AsyncIterable<ChatStreamChunk> {
     const extended = request as ExtendedChatRequest;

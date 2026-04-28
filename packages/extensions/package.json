@@ -1,6 +1,6 @@
 {
   "name": "@tachu/extensions",
-  "version": "1.0.0-alpha.1",
+  "version": "1.0.0-alpha.2",
   "description": "Tachu extensions (alpha) — OpenAI/Anthropic/Mock providers, 7 built-in tools, execution backends, MCP adapters (stdio+SSE), vector stores (local/Qdrant), observability emitters, input transformers and common rules.",
   "type": "module",
   "main": "./dist/index.js",

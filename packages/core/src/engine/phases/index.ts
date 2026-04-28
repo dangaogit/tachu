@@ -1,4 +1,5 @@
 import type { EngineConfig } from "../../types";
+import type { AdapterCallContext } from "../../types/context";
 import type {
   HookRegistry,
   MemorySystem,
@@ -32,6 +33,8 @@ export interface PhaseEnvironment {
   hooks: HookRegistry;
   scheduler: TaskScheduler;
   activeAbortSignal: AbortSignal;
+  /** 本轮 `ExecutionContext` 导出的 Provider / Memory / Vector 调用上下文。 */
+  adapterContext: AdapterCallContext;
   onProviderUsage?: (usage: {
     promptTokens: number;
     completionTokens: number;

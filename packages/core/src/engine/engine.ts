@@ -38,6 +38,7 @@ import type {
   StreamChunk,
   ToolCallRecord,
 } from "../types";
+import { adapterCallContextFromExecution } from "../types/context";
 import {
   createDefaultEngineConfig,
   envelopeNeedsTextToImage,
@@ -547,6 +548,7 @@ export class Engine {
           signal,
           traceId: context.traceId,
           sessionId: context.sessionId,
+          adapterContext: adapterCallContextFromExecution(context),
           ...(prebuiltPrompt !== undefined ? { prebuiltPrompt } : {}),
           ...(onProviderUsage !== undefined ? { onProviderUsage } : {}),
           registry: this.registry,
@@ -651,6 +653,7 @@ export class Engine {
     const generatedImagesBucket: GeneratedImage[] = [];
     this.activeRunGeneratedImages.set(normalizedContext.traceId, generatedImagesBucket);
 
+    const adapterContext = adapterCallContextFromExecution(normalizedContext);
     const phaseEnv: PhaseEnvironment = {
       config: this.config,
       registry: this.registry as DescriptorRegistry,
@@ -664,6 +667,7 @@ export class Engine {
       hooks: this.hooks,
       scheduler: this.scheduler,
       activeAbortSignal: activeSignal,
+      adapterContext,
       onProviderUsage: usageSink,
     };
 
@@ -765,7 +769,10 @@ export class Engine {
           activeRules: this.registry.list("rule"),
           activeSkills: this.registry.list("skill"),
           availableTools: this.registry.list("tool"),
-          contextWindow: await this.memorySystem.load(normalizedContext.sessionId),
+          contextWindow: await this.memorySystem.load(
+            normalizedContext.sessionId,
+            adapterContext,
+          ),
           recalledEntries: recalledEntries.map((entry) => ({
             content:
               typeof entry.content === "string"
@@ -919,12 +926,16 @@ export class Engine {
       });
       yield* this.emitPhaseEnd("output", normalizedContext);
       yield { type: "done", output };
-      await this.memorySystem.append(normalizedContext.sessionId, {
-        role: "assistant",
-        content: typeof output.content === "string" ? output.content : JSON.stringify(output.content),
-        timestamp: Date.now(),
-        anchored: false,
-      });
+      await this.memorySystem.append(
+        normalizedContext.sessionId,
+        {
+          role: "assistant",
+          content: typeof output.content === "string" ? output.content : JSON.stringify(output.content),
+          timestamp: Date.now(),
+          anchored: false,
+        },
+        adapterContext,
+      );
     } catch (error) {
       const wrapped =
         error instanceof EngineError

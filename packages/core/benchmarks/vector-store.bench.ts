@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { performance } from "node:perf_hooks";
-import { InMemoryVectorStore } from "../src";
+import { DEFAULT_ADAPTER_CALL_CONTEXT, InMemoryVectorStore } from "../src";
 
 test("vector store benchmark 10k upsert + 1k search", async () => {
   const store = new InMemoryVectorStore({ indexLimit: 20_000 });
@@ -13,7 +13,10 @@ test("vector store benchmark 10k upsert + 1k search", async () => {
   const loops = 1_000;
   let total = 0;
   for (let i = 0; i < loops; i += 1) {
-    const found = await store.search("sample 42", 10);
+    const found = await store.search(
+      { query: "sample 42", topK: 10 },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
     total += found.length;
   }
   const elapsed = performance.now() - started;

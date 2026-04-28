@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import {
+  DEFAULT_ADAPTER_CALL_CONTEXT,
   InMemoryMemorySystem,
   InMemoryVectorStore,
   DefaultModelRouter,
@@ -26,6 +27,8 @@ import {
 } from "@tachu/core";
 
 import { FsMemorySystem, sanitizeSessionId } from "./fs-memory-system";
+
+const AC = DEFAULT_ADAPTER_CALL_CONTEXT;
 
 const tokenizer: Tokenizer = {
   count: (text) => Math.max(1, Math.ceil(text.length / 4)),
@@ -94,22 +97,30 @@ describe("FsMemorySystem", () => {
     const config = makeConfig(join(root, "archive.jsonl"));
 
     const mem1 = makeFsMemory(persistDir, config);
-    await mem1.append("sess-A", {
-      role: "user",
-      content: "第一条",
-      timestamp: 1_000,
-      anchored: false,
-    });
-    await mem1.append("sess-A", {
-      role: "assistant",
-      content: "第二条",
-      timestamp: 2_000,
-      anchored: false,
-    });
+    await mem1.append(
+      "sess-A",
+      {
+        role: "user",
+        content: "第一条",
+        timestamp: 1_000,
+        anchored: false,
+      },
+      AC,
+    );
+    await mem1.append(
+      "sess-A",
+      {
+        role: "assistant",
+        content: "第二条",
+        timestamp: 2_000,
+        anchored: false,
+      },
+      AC,
+    );
 
     // 模拟进程重启：全新内存实例 + 全新 FsMemorySystem
     const mem2 = makeFsMemory(persistDir, config);
-    const window = await mem2.load("sess-A");
+    const window = await mem2.load("sess-A", AC);
     expect(window.entries.map((e) => e.content)).toEqual(["第一条", "第二条"]);
     expect(window.entries[0]!.role).toBe("user");
     expect(window.entries[1]!.role).toBe("assistant");
@@ -123,22 +134,30 @@ describe("FsMemorySystem", () => {
     const config = makeConfig(join(root, "archive.jsonl"));
 
     const mem = makeFsMemory(persistDir, config);
-    await mem.append("sess-B", {
-      role: "user",
-      content: "a",
-      timestamp: 100,
-      anchored: false,
-    });
-    await mem.append("sess-B", {
-      role: "assistant",
-      content: "b",
-      timestamp: 200,
-      anchored: false,
-    });
+    await mem.append(
+      "sess-B",
+      {
+        role: "user",
+        content: "a",
+        timestamp: 100,
+        anchored: false,
+      },
+      AC,
+    );
+    await mem.append(
+      "sess-B",
+      {
+        role: "assistant",
+        content: "b",
+        timestamp: 200,
+        anchored: false,
+      },
+      AC,
+    );
 
-    const first = await mem.load("sess-B");
-    const second = await mem.load("sess-B");
-    const third = await mem.load("sess-B");
+    const first = await mem.load("sess-B", AC);
+    const second = await mem.load("sess-B", AC);
+    const third = await mem.load("sess-B", AC);
 
     expect(first.entries.length).toBe(2);
     expect(second.entries.length).toBe(2);
@@ -158,27 +177,43 @@ describe("FsMemorySystem", () => {
 
     const mem = makeFsMemory(persistDir, config);
     const now = Date.now();
-    await mem.append("sess-C", { role: "user", content: "head-msg", timestamp: now, anchored: false });
-    await mem.append("sess-C", {
-      role: "assistant",
-      content: "middle-one with some context long enough",
-      timestamp: now + 1,
-      anchored: false,
-    });
-    await mem.append("sess-C", {
-      role: "user",
-      content: "middle-two with more context here",
-      timestamp: now + 2,
-      anchored: false,
-    });
-    await mem.append("sess-C", {
-      role: "assistant",
-      content: "tail-msg final answer",
-      timestamp: now + 3,
-      anchored: false,
-    });
+    await mem.append(
+      "sess-C",
+      { role: "user", content: "head-msg", timestamp: now, anchored: false },
+      AC,
+    );
+    await mem.append(
+      "sess-C",
+      {
+        role: "assistant",
+        content: "middle-one with some context long enough",
+        timestamp: now + 1,
+        anchored: false,
+      },
+      AC,
+    );
+    await mem.append(
+      "sess-C",
+      {
+        role: "user",
+        content: "middle-two with more context here",
+        timestamp: now + 2,
+        anchored: false,
+      },
+      AC,
+    );
+    await mem.append(
+      "sess-C",
+      {
+        role: "assistant",
+        content: "tail-msg final answer",
+        timestamp: now + 3,
+        anchored: false,
+      },
+      AC,
+    );
 
-    const window = await mem.load("sess-C");
+    const window = await mem.load("sess-C", AC);
     // 压缩后应含至少一条系统摘要
     expect(window.entries.some((e) => e.role === "system" && String(e.content).includes("摘要"))).toBe(
       true,
@@ -199,12 +234,16 @@ describe("FsMemorySystem", () => {
     // 先手工写一个包含脏行的 jsonl
     const mem = makeFsMemory(persistDir, config);
     const filePath = mem.pathFor("sess-D");
-    await mem.append("sess-D", {
-      role: "user",
-      content: "good",
-      timestamp: 1,
-      anchored: false,
-    });
+    await mem.append(
+      "sess-D",
+      {
+        role: "user",
+        content: "good",
+        timestamp: 1,
+        anchored: false,
+      },
+      AC,
+    );
     // 尾巴追加一行坏数据（非法 JSON）
     await appendFile(filePath, "not-a-json-line\n", "utf8");
     await appendFile(
@@ -214,7 +253,7 @@ describe("FsMemorySystem", () => {
     );
 
     const mem2 = makeFsMemory(persistDir, config);
-    const window = await mem2.load("sess-D");
+    const window = await mem2.load("sess-D", AC);
     expect(window.entries.map((e) => e.content)).toEqual(["good", "also good"]);
 
     await rm(root, { recursive: true, force: true });
@@ -227,12 +266,16 @@ describe("FsMemorySystem", () => {
 
     const mem = makeFsMemory(persistDir, config);
     const ts = Date.now();
-    await mem.append("sess-E", {
-      role: "user",
-      content: "raw-1",
-      timestamp: ts,
-      anchored: false,
-    });
+    await mem.append(
+      "sess-E",
+      {
+        role: "user",
+        content: "raw-1",
+        timestamp: ts,
+        anchored: false,
+      },
+      AC,
+    );
 
     const mem2 = makeFsMemory(persistDir, config);
     const raw = await mem2.readRaw("sess-E");
@@ -240,7 +283,7 @@ describe("FsMemorySystem", () => {
     expect(raw[0]!.content).toBe("raw-1");
 
     // 尚未触发过 hydrate —— 再次 load 也能正确返回所有 entries
-    const window = await mem2.load("sess-E");
+    const window = await mem2.load("sess-E", AC);
     expect(window.entries.length).toBe(1);
 
     await rm(root, { recursive: true, force: true });
@@ -252,19 +295,23 @@ describe("FsMemorySystem", () => {
     const config = makeConfig(join(root, "archive.jsonl"));
 
     const mem = makeFsMemory(persistDir, config);
-    await mem.append("sess-F", {
-      role: "user",
-      content: "to-be-cleared",
-      timestamp: 1,
-      anchored: false,
-    });
+    await mem.append(
+      "sess-F",
+      {
+        role: "user",
+        content: "to-be-cleared",
+        timestamp: 1,
+        anchored: false,
+      },
+      AC,
+    );
     const filePath = mem.pathFor("sess-F");
     expect(existsSync(filePath)).toBe(true);
 
     await mem.clear("sess-F");
     expect(existsSync(filePath)).toBe(false);
 
-    const window = await mem.load("sess-F");
+    const window = await mem.load("sess-F", AC);
     expect(window.entries.length).toBe(0);
 
     await rm(root, { recursive: true, force: true });
@@ -300,13 +347,17 @@ describe("FsMemorySystem", () => {
     const config = makeConfig(join(root, "archive.jsonl"));
 
     const mem1 = makeFsMemory(persistDir, config);
-    await mem1.append("alpha", { role: "user", content: "A1", timestamp: 1, anchored: false });
-    await mem1.append("beta", { role: "user", content: "B1", timestamp: 1, anchored: false });
-    await mem1.append("alpha", { role: "assistant", content: "A2", timestamp: 2, anchored: false });
+    await mem1.append("alpha", { role: "user", content: "A1", timestamp: 1, anchored: false }, AC);
+    await mem1.append("beta", { role: "user", content: "B1", timestamp: 1, anchored: false }, AC);
+    await mem1.append(
+      "alpha",
+      { role: "assistant", content: "A2", timestamp: 2, anchored: false },
+      AC,
+    );
 
     const mem2 = makeFsMemory(persistDir, config);
-    const a = await mem2.load("alpha");
-    const b = await mem2.load("beta");
+    const a = await mem2.load("alpha", AC);
+    const b = await mem2.load("beta", AC);
     expect(a.entries.map((e) => e.content)).toEqual(["A1", "A2"]);
     expect(b.entries.map((e) => e.content)).toEqual(["B1"]);
 

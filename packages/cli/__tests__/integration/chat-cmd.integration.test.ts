@@ -9,7 +9,7 @@ import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
-import { createDefaultEngineConfig, type MemorySystem } from "@tachu/core";
+import { createDefaultEngineConfig, DEFAULT_ADAPTER_CALL_CONTEXT, type MemorySystem } from "@tachu/core";
 import { MockProviderAdapter } from "@tachu/extensions";
 import { createEngine } from "../../src/engine-factory";
 import { scanDescriptors } from "../../src/config-loader/descriptor-scanner";
@@ -92,20 +92,28 @@ describe("tachu chat 集成测试", () => {
     const session = createEmptySession("export-session");
     await store.save(session);
 
-    await memory.append(session.id, {
-      role: "user",
-      content: "hello chat",
-      timestamp: Date.now(),
-      anchored: false,
-    });
-    await memory.append(session.id, {
-      role: "assistant",
-      content: "hi there",
-      timestamp: Date.now(),
-      anchored: false,
-    });
+    await memory.append(
+      session.id,
+      {
+        role: "user",
+        content: "hello chat",
+        timestamp: Date.now(),
+        anchored: false,
+      },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
+    await memory.append(
+      session.id,
+      {
+        role: "assistant",
+        content: "hi there",
+        timestamp: Date.now(),
+        anchored: false,
+      },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
 
-    const window = await memory.load(session.id);
+    const window = await memory.load(session.id, DEFAULT_ADAPTER_CALL_CONTEXT);
     const exportPath = join(tmpDir, "chat-export.md");
     await store.export("export-session", exportPath, window.entries);
 
@@ -131,41 +139,53 @@ describe("tachu chat 集成测试", () => {
     // 第一次进程：写入两条消息
     const engine1 = await createMockEngine(tachyDir);
     const mem1 = engine1.getMemorySystem();
-    await mem1.append(sessionId, {
-      role: "user",
-      content: "first message",
-      timestamp: Date.now(),
-      anchored: false,
-    });
-    await mem1.append(sessionId, {
-      role: "assistant",
-      content: "first reply",
-      timestamp: Date.now(),
-      anchored: false,
-    });
+    await mem1.append(
+      sessionId,
+      {
+        role: "user",
+        content: "first message",
+        timestamp: Date.now(),
+        anchored: false,
+      },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
+    await mem1.append(
+      sessionId,
+      {
+        role: "assistant",
+        content: "first reply",
+        timestamp: Date.now(),
+        anchored: false,
+      },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
     await engine1.dispose();
 
     // 第二次进程：新 engine，能从磁盘 hydrate 回历史
     const engine2 = await createMockEngine(tachyDir);
     const mem2 = engine2.getMemorySystem();
-    const window2 = await mem2.load(sessionId);
+    const window2 = await mem2.load(sessionId, DEFAULT_ADAPTER_CALL_CONTEXT);
     expect(window2.entries.length).toBe(2);
     const loaded = await store.load(sessionId);
     expect(loaded).not.toBeNull();
     expect(loaded!.budget.tokensUsed).toBe(42);
 
-    await mem2.append(sessionId, {
-      role: "user",
-      content: "second message",
-      timestamp: Date.now(),
-      anchored: false,
-    });
+    await mem2.append(
+      sessionId,
+      {
+        role: "user",
+        content: "second message",
+        timestamp: Date.now(),
+        anchored: false,
+      },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
     await engine2.dispose();
 
     // 第三次进程：验证三条消息均已持久化
     const engine3 = await createMockEngine(tachyDir);
     const mem3 = engine3.getMemorySystem();
-    const window3 = await mem3.load(sessionId);
+    const window3 = await mem3.load(sessionId, DEFAULT_ADAPTER_CALL_CONTEXT);
     expect(window3.entries.length).toBe(3);
     await engine3.dispose();
   });
@@ -181,12 +201,16 @@ describe("tachu chat 集成测试", () => {
     session.budget.toolCallsUsed = 2;
     await store.save(session);
 
-    await memory.append(session.id, {
-      role: "user",
-      content: "msg 1",
-      timestamp: Date.now(),
-      anchored: false,
-    });
+    await memory.append(
+      session.id,
+      {
+        role: "user",
+        content: "msg 1",
+        timestamp: Date.now(),
+        anchored: false,
+      },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
 
     const loaded = await store.load("stats-session");
     const size = await memory.getSize("stats-session");

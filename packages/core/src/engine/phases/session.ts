@@ -16,13 +16,14 @@ export const runSessionPhase = async (
   env: PhaseEnvironment,
 ): Promise<SessionPhaseOutput> => {
   await env.sessionManager.resolve(context.sessionId);
-  await env.memorySystem.load(context.sessionId);
+  await env.memorySystem.load(context.sessionId, env.adapterContext);
   await env.memorySystem.append(
     context.sessionId,
     messageToMemoryEntry({
       role: "user",
       content: typeof input.content === "string" ? input.content : JSON.stringify(input.content),
     }),
+    env.adapterContext,
   );
   await env.runtimeState.update(context.sessionId, { currentPhase: "session" });
   return { input, context };

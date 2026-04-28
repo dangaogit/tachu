@@ -1,6 +1,7 @@
 import {
   ProviderError,
   TimeoutError,
+  type AdapterCallContext,
   type ChatFinishReason,
   type ChatRequest,
   type ChatResponse,
@@ -526,7 +527,11 @@ export class QwenProviderAdapter implements ProviderAdapter {
     }
   }
 
-  async chat(request: ChatRequest, signal?: AbortSignal): Promise<ChatResponse> {
+  async chat(
+    request: ChatRequest,
+    ctx: AdapterCallContext,
+    signal?: AbortSignal,
+  ): Promise<ChatResponse> {
     if (isWanxImageModel(request.model)) {
       return this.chatImageSynthesis(request as QwenChatRequest, signal);
     }
@@ -537,11 +542,12 @@ export class QwenProviderAdapter implements ProviderAdapter {
       ...request,
       messages: normalizeMessagesForDashScopeOpenAi(request.model, request.messages),
     };
-    return this.inner.chat(normalized, signal);
+    return this.inner.chat(normalized, ctx, signal);
   }
 
   async *chatStream(
     request: ChatRequest,
+    ctx: AdapterCallContext,
     signal?: AbortSignal,
   ): AsyncIterable<ChatStreamChunk> {
     if (
@@ -568,7 +574,7 @@ export class QwenProviderAdapter implements ProviderAdapter {
       ...request,
       messages: normalizeMessagesForDashScopeOpenAi(request.model, request.messages),
     };
-    yield* this.inner.chatStream(normalized, signal);
+    yield* this.inner.chatStream(normalized, ctx, signal);
   }
 
   async countTokens(messages: Message[], model: string): Promise<number> {

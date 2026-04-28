@@ -5,6 +5,7 @@ import {
   Engine,
   InMemorySessionManager,
   InMemoryVectorStore,
+  type AdapterCallContext,
   type ChatFinishReason,
   type ChatRequest,
   type ChatResponse,
@@ -57,7 +58,11 @@ class ScriptedMockProvider implements ProviderAdapter {
     ];
   }
 
-  async chat(request: ChatRequest, signal?: AbortSignal): Promise<ChatResponse> {
+  async chat(
+    request: ChatRequest,
+    _ctx: AdapterCallContext,
+    signal?: AbortSignal,
+  ): Promise<ChatResponse> {
     if (signal?.aborted) throw signal.reason ?? new Error("aborted");
     const scripted = this.replies[this.index];
     if (scripted) {
@@ -69,9 +74,10 @@ class ScriptedMockProvider implements ProviderAdapter {
 
   async *chatStream(
     request: ChatRequest,
+    ctx: AdapterCallContext,
     signal?: AbortSignal,
   ): AsyncIterable<ChatStreamChunk> {
-    const response = await this.chat(request, signal);
+    const response = await this.chat(request, ctx, signal);
     for (const ch of response.content) yield { type: "text-delta", delta: ch };
     yield { type: "finish", finishReason: response.finishReason ?? "stop", usage: response.usage };
   }

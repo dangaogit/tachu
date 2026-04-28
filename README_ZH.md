@@ -26,7 +26,7 @@ Tachu 以 Bun 原生 TypeScript Monorepo 形式发布，包含三个包：零依
 
 ## 项目状态（Project Status）
 
-**当前发布版本：** `1.0.0-alpha.1`（`alpha` dist-tag）
+**当前发布版本：** `1.0.0-alpha.2`（`alpha` dist-tag）
 
 这是一次**架构骨架**发布——基础设施基本就绪，但几个依赖 LLM 的阶段仍是占位实现。下表是唯一的事实来源；README 其他位置的任何声称都必须能在这张表里找到对应。
 
@@ -227,7 +227,7 @@ bun add -g @tachu/cli@alpha
 安装完成后验证：
 
 ```bash
-tachu --version   # 预期输出 1.0.0-alpha.1 或更新
+tachu --version   # 预期输出 1.0.0-alpha.2 或更新
 ```
 
 ---
@@ -929,7 +929,11 @@ Tachu 保证 **用户看到的每一次响应都是可读的自然语言答复**
 
 Tachu 按 `1.0.0-alpha.n` → `1.0.0-beta.n` → `1.0.0` 三条通道演进。下面每个里程碑都对应真实、可发布、有测试的交付物，不是愿望清单。
 
-### 1.0.0-alpha.1 —— 首个公开 alpha（当前）
+### 1.0.0-alpha.2 —— 适配器调用上下文（当前）
+
+- [x] `ProviderAdapter` / `VectorStore` / `MemorySystem` 接入 `AdapterCallContext`；引擎与各阶段下传执行上下文（trace；可选租户 / 作用域标识）。
+
+### 1.0.0-alpha.1 —— 首个公开 alpha
 
 - [x] 9 阶段主干、Registry、Prompt 组装、调度器、8 个核心模块
 - [x] OpenAI / Anthropic / Qwen / Mock Provider Adapter，`apiKey` / `baseURL` / `organization` / `timeoutMs` 可通过 env、`tachu.config.ts` 或 CLI flag 配置

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { ProviderError } from "../errors";
+import { DEFAULT_ADAPTER_CALL_CONTEXT } from "../types/context";
 import { NoopProvider } from "./provider";
 
 describe("NoopProvider", () => {
@@ -8,18 +9,24 @@ describe("NoopProvider", () => {
     const models = await provider.listAvailableModels();
     expect(models).toHaveLength(3);
 
-    const response = await provider.chat({
-      model: "dev-small",
-      messages: [{ role: "user", content: "hello" }],
-    });
+    const response = await provider.chat(
+      {
+        model: "dev-small",
+        messages: [{ role: "user", content: "hello" }],
+      },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
     expect(response.content).toContain("[noop]");
 
     const chunks: string[] = [];
     let finished = false;
-    for await (const chunk of provider.chatStream({
-      model: "dev-small",
-      messages: [{ role: "user", content: "stream me" }],
-    })) {
+    for await (const chunk of provider.chatStream(
+      {
+        model: "dev-small",
+        messages: [{ role: "user", content: "stream me" }],
+      },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    )) {
       if (chunk.type === "text-delta") {
         chunks.push(chunk.delta);
       } else if (chunk.type === "finish") {
@@ -47,6 +54,7 @@ describe("NoopProvider", () => {
           model: "dev-small",
           messages: [{ role: "user", content: "hello" }],
         },
+        DEFAULT_ADAPTER_CALL_CONTEXT,
         controller.signal,
       ),
     ).rejects.toBeInstanceOf(ProviderError);

@@ -1,6 +1,7 @@
 import * as readline from "node:readline/promises";
 import { randomUUID } from "node:crypto";
 import type { Engine, MemoryEntry } from "@tachu/core";
+import { DEFAULT_ADAPTER_CALL_CONTEXT } from "@tachu/core";
 import { setInteractivePrompter } from "./approval";
 import { loadConfig } from "./config-loader/config-file";
 import { colorize, shouldDisableColor } from "./renderer/color";
@@ -132,7 +133,7 @@ export async function runInteractiveChatReadline(
 
   const loadHistory = async (id: string): Promise<MemoryEntry[]> => {
     try {
-      const window = await memorySystem.load(id);
+      const window = await memorySystem.load(id, DEFAULT_ADAPTER_CALL_CONTEXT);
       return [...window.entries];
     } catch {
       return [];

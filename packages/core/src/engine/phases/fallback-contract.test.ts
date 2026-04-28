@@ -35,6 +35,7 @@ import type {
   StepStatus,
   ValidationResult,
 } from "../../types";
+import { DEFAULT_ADAPTER_CALL_CONTEXT } from "../../types/context";
 
 import { ensureFallbackText, runOutputPhase, sanitizeInternalTerms } from "./output";
 import { runValidationPhase } from "./validation";
@@ -87,6 +88,7 @@ const buildEnv = (): PhaseEnvironment =>
     hooks: {} as never,
     scheduler: {} as never,
     activeAbortSignal: new AbortController().signal,
+    adapterContext: DEFAULT_ADAPTER_CALL_CONTEXT,
   }) satisfies PhaseEnvironment;
 
 const buildValidationState = (overrides: {

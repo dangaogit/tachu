@@ -12,6 +12,8 @@ import type {
 import { DescriptorRegistry } from "../../registry";
 import { createTiktokenTokenizer } from "../../prompt";
 import type { EngineConfig, Message } from "../../types";
+import type { AdapterCallContext } from "../../types/context";
+import { DEFAULT_ADAPTER_CALL_CONTEXT } from "../../types/context";
 import { createDefaultEngineConfig } from "../../utils";
 import { InMemoryVectorStore } from "../../vector";
 import { executeToolUse, TOOL_USE_CONSTANTS, type ToolUseContext } from "./tool-use";
@@ -43,7 +45,7 @@ const createScriptedProvider = (responses: ChatResponse[]): {
         },
       ];
     },
-    async chat(req: ChatRequest): Promise<ChatResponse> {
+    async chat(req: ChatRequest, _ctx: AdapterCallContext): Promise<ChatResponse> {
       calls.push({
         messages: req.messages.map((m) => ({ ...m })),
         toolsCount: req.tools?.length ?? 0,
@@ -55,7 +57,10 @@ const createScriptedProvider = (responses: ChatResponse[]): {
       cursor += 1;
       return response;
     },
-    async *chatStream(): AsyncIterable<ChatStreamChunk> {
+    async *chatStream(
+      _req: ChatRequest,
+      _ctx: AdapterCallContext,
+    ): AsyncIterable<ChatStreamChunk> {
       yield { type: "finish", finishReason: "stop" };
     },
     async countTokens(): Promise<number> {
@@ -153,6 +158,7 @@ const buildCtx = (args: {
     signal,
     traceId: "trace-1",
     sessionId: "session-1",
+    adapterContext: DEFAULT_ADAPTER_CALL_CONTEXT,
     prebuiltPrompt: {
       messages: [
         { role: "system", content: "[assembler] global system instruction" },
@@ -418,10 +424,13 @@ describe("executeToolUse (ADR-0002 Agentic Loop)", () => {
           },
         ];
       },
-      async chat(): Promise<ChatResponse> {
+      async chat(_req: ChatRequest, _ctx: AdapterCallContext): Promise<ChatResponse> {
         throw new Error("402 status code (no body)");
       },
-      async *chatStream(): AsyncIterable<ChatStreamChunk> {
+      async *chatStream(
+        _req: ChatRequest,
+        _ctx: AdapterCallContext,
+      ): AsyncIterable<ChatStreamChunk> {
         yield { type: "finish", finishReason: "stop" };
       },
       async countTokens(): Promise<number> {

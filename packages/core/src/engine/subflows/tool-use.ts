@@ -19,6 +19,7 @@ import type {
   ToolCallRequest,
   ToolDefinition,
 } from "../../types";
+import type { AdapterCallContext } from "../../types/context";
 import type { TaskExecutor } from "../scheduler";
 
 /**
@@ -45,6 +46,7 @@ export interface ToolUseContext {
   signal: AbortSignal;
   traceId: string;
   sessionId: string;
+  adapterContext: AdapterCallContext;
   prebuiltPrompt: AssembledPrompt;
   onProviderUsage?: (usage: ChatUsage) => void;
   onToolLoopEvent?: (chunk: StreamChunk) => void;
@@ -257,7 +259,7 @@ const buildFallbackMessages = async (
 ): Promise<Message[]> => {
   const messages: Message[] = [{ role: "system", content: TOOL_USE_SYSTEM_PROMPT }];
   try {
-    const window = await ctx.memorySystem.load(ctx.sessionId);
+    const window = await ctx.memorySystem.load(ctx.sessionId, ctx.adapterContext);
     const history = window.entries
       .map(memoryEntryToMessage)
       .filter((m): m is Message => m !== null)
@@ -746,6 +748,7 @@ export const executeToolUse = async (
           messages: conversation,
           ...(tools.length > 0 ? { tools } : {}),
         },
+        ctx.adapterContext,
         llmSignal,
       );
     } catch (error) {

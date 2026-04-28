@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { DEFAULT_ADAPTER_CALL_CONTEXT } from "../types/context";
 import { InMemoryVectorStore } from "./in-memory-store";
 
 describe("InMemoryVectorStore", () => {
@@ -6,7 +7,7 @@ describe("InMemoryVectorStore", () => {
     const store = new InMemoryVectorStore();
     await store.upsert("1", "hello world", { tag: "a" });
     await store.upsert("2", "another text", { tag: "b" });
-    const results = await store.search("hello", 1);
+    const results = await store.search({ query: "hello", topK: 1 }, DEFAULT_ADAPTER_CALL_CONTEXT);
     expect(results.length).toBe(1);
     expect(results[0]?.id).toBe("1");
   });

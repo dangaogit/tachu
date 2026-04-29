@@ -1,6 +1,14 @@
 import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { InMemoryVectorStore, type VectorSearchResult, type VectorStore } from "@tachu/core";
+import {
+  InMemoryVectorStore,
+  type AdapterCallContext,
+  type VectorHit,
+  type VectorPayloadFilter,
+  type VectorSearchQuery,
+  type VectorStore,
+  type SparseVector,
+} from "@tachu/core";
 
 interface LocalFsVectorStoreOptions {
   filePath?: string;
@@ -80,13 +88,33 @@ export class LocalFsVectorStore implements VectorStore {
   /**
    * 相似度检索。
    *
-   * @param query 查询向量或文本
-   * @param topK 返回数量
+   * @param query 查询请求
+   * @param ctx 链路上下文
+   * @param signal 取消信号
    * @returns 检索结果
    */
-  async search(query: number[] | string, topK: number): Promise<VectorSearchResult[]> {
+  async search(
+    query: VectorSearchQuery,
+    ctx: AdapterCallContext,
+    signal?: AbortSignal,
+  ): Promise<VectorHit[]> {
     await this.initPromise;
-    return this.store.search(query, topK);
+    return this.store.search(query, ctx, signal);
+  }
+
+  /**
+   * @inheritdoc
+   */
+  async hybridSearch(
+    denseVector: number[],
+    sparseVector: SparseVector | null,
+    k: number,
+    filters: VectorPayloadFilter,
+    ctx: AdapterCallContext,
+    signal?: AbortSignal,
+  ): Promise<VectorHit[]> {
+    await this.initPromise;
+    return this.store.hybridSearch(denseVector, sparseVector, k, filters, ctx, signal);
   }
 
   /**

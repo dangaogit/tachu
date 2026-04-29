@@ -12,7 +12,7 @@
     },
     "packages/cli": {
       "name": "@tachu/cli",
-      "version": "1.0.0-alpha.1",
+      "version": "1.0.0-alpha.2",
       "bin": {
         "tachu": "./bin/tachu.mjs",
       },
@@ -35,7 +35,7 @@
     },
     "packages/core": {
       "name": "@tachu/core",
-      "version": "1.0.0-alpha.1",
+      "version": "1.0.0-alpha.2",
       "dependencies": {
         "gray-matter": "catalog:",
         "tiktoken": "catalog:",
@@ -43,7 +43,7 @@
     },
     "packages/extensions": {
       "name": "@tachu/extensions",
-      "version": "1.0.0-alpha.1",
+      "version": "1.0.0-alpha.2",
       "dependencies": {
         "@anthropic-ai/sdk": "catalog:",
         "@modelcontextprotocol/sdk": "catalog:",
@@ -59,7 +59,7 @@
     },
     "packages/web-fetch-server": {
       "name": "@tachu/web-fetch-server",
-      "version": "1.0.0-alpha.1",
+      "version": "1.0.0-alpha.2",
       "bin": {
         "tachu-web-fetch-server": "./src/bin/tachu-web-fetch-server.ts",
       },

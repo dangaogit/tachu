@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
-import { createDefaultEngineConfig } from "@tachu/core";
+import { createDefaultEngineConfig, DEFAULT_ADAPTER_CALL_CONTEXT } from "@tachu/core";
 import { MockProviderAdapter } from "@tachu/extensions";
 import { createEngine } from "./engine-factory";
 import { FsSessionStore, createEmptySession } from "./session-store/fs-session-store";
@@ -163,12 +163,16 @@ describe("runInteractiveChat slash 命令", () => {
   it("/history 有消息时显示消息", async () => {
     const { store, engine } = await makeEnv();
     const session = createEmptySession(randomUUID());
-    await engine.getMemorySystem().append(session.id, {
-      role: "user",
-      content: "test message",
-      timestamp: Date.now(),
-      anchored: false,
-    });
+    await engine.getMemorySystem().append(
+      session.id,
+      {
+        role: "user",
+        content: "test message",
+        timestamp: Date.now(),
+        anchored: false,
+      },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
     const out = await runWithInput(["/history\n", "/exit\n"], engine, store, session);
     expect(out).toContain("test message");
     await engine.dispose();
@@ -177,12 +181,16 @@ describe("runInteractiveChat slash 命令", () => {
   it("/reset 清空消息", async () => {
     const { store, engine } = await makeEnv();
     const session = createEmptySession(randomUUID());
-    await engine.getMemorySystem().append(session.id, {
-      role: "user",
-      content: "msg to clear",
-      timestamp: Date.now(),
-      anchored: false,
-    });
+    await engine.getMemorySystem().append(
+      session.id,
+      {
+        role: "user",
+        content: "msg to clear",
+        timestamp: Date.now(),
+        anchored: false,
+      },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
     const out = await runWithInput(["/reset\n", "/exit\n"], engine, store, session);
     expect(out).toContain("已重置");
     const size = await engine.getMemorySystem().getSize(session.id);
@@ -230,12 +238,16 @@ describe("runInteractiveChat slash 命令", () => {
   it("/export 带路径导出 Markdown", async () => {
     const { store, engine, dir } = await makeEnv();
     const session = createEmptySession(randomUUID());
-    await engine.getMemorySystem().append(session.id, {
-      role: "user",
-      content: "hello",
-      timestamp: Date.now(),
-      anchored: false,
-    });
+    await engine.getMemorySystem().append(
+      session.id,
+      {
+        role: "user",
+        content: "hello",
+        timestamp: Date.now(),
+        anchored: false,
+      },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
     const exportPath = join(dir, "out.md");
     await store.save(session);
     const out = await runWithInput(
@@ -268,12 +280,16 @@ describe("runInteractiveChat slash 命令", () => {
   it("/clear 与 /reset 等价，都清空当前 session 记忆", async () => {
     const { store, engine } = await makeEnv();
     const session = createEmptySession(randomUUID());
-    await engine.getMemorySystem().append(session.id, {
-      role: "user",
-      content: "hello",
-      timestamp: Date.now(),
-      anchored: false,
-    });
+    await engine.getMemorySystem().append(
+      session.id,
+      {
+        role: "user",
+        content: "hello",
+        timestamp: Date.now(),
+        anchored: false,
+      },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
     session.budget = { tokensUsed: 10, toolCallsUsed: 1, wallTimeMs: 123 };
     await store.save(session);
     const out = await runWithInput(["/clear\n", "/exit\n"], engine, store, session);

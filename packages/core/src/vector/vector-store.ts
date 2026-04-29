@@ -1,3 +1,5 @@
+import type { AdapterCallContext } from "../types/context";
+
 /**
  * 向量化输入。
  */
@@ -14,6 +16,29 @@ export interface VectorSearchResult {
   id: string;
   score: number;
   metadata: Record<string, unknown>;
+}
+
+/** {@link VectorSearchResult} 的语义别名（与设计文档 VectorHit 对齐）。 */
+export type VectorHit = VectorSearchResult;
+
+/**
+ * 单次向量检索请求（合并原 `search(query, topK)` 参数）。
+ */
+export interface VectorSearchQuery {
+  query: number[] | string;
+  topK: number;
+}
+
+/** 稀疏向量（例如 BM25／SPLADE 等非稠密表征）。 */
+export interface SparseVector {
+  indices: number[];
+  values: number[];
+}
+
+/** hybridSearch 阶段的 payload 过滤意向（具体语义由远端实现解释）。 */
+export interface VectorPayloadFilter {
+  must?: Record<string, unknown>;
+  should?: Record<string, unknown>;
 }
 
 /**
@@ -56,11 +81,29 @@ export interface VectorStore {
   /**
    * 按向量或文本检索 topK 最相似条目。
    *
-   * @param query 查询向量或原文本（实现负责向量化）
-   * @param topK 返回的最相似条目数量上限
-   * @returns 按相似度降序排列的结果数组
+   * @param query 检索请求（向量或原文本由实现侧负责向量化）
+   * @param ctx 租户 / 链路上下文（适配器可用于隔离与 span 维度）
    */
-  search(query: number[] | string, topK: number): Promise<VectorSearchResult[]>;
+  search(
+    query: VectorSearchQuery,
+    ctx: AdapterCallContext,
+    signal?: AbortSignal,
+  ): Promise<VectorHit[]>;
+
+  /**
+   * 稠密 + 稀疏混合检索（可选能力；不支持时可抛错）。
+   *
+   * @param denseVector 稠密查询向量
+   * @param sparseVector 稀疏分支；null 表示仅稠密路径
+   */
+  hybridSearch(
+    denseVector: number[],
+    sparseVector: SparseVector | null,
+    k: number,
+    filters: VectorPayloadFilter,
+    ctx: AdapterCallContext,
+    signal?: AbortSignal,
+  ): Promise<VectorHit[]>;
   /** 删除指定 ID 条目；不存在时为 no-op。 */
   delete(id: string): Promise<void>;
   /** 清空所有条目。 */

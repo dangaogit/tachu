@@ -1,6 +1,6 @@
 {
   "name": "@tachu/web-fetch-server",
-  "version": "1.0.0-alpha.1",
+  "version": "1.0.0-alpha.2",
   "description": "Tachu Web Fetch & Search rendering server (alpha) — Bun.serve + Playwright driven remote renderer that powers @tachu/extensions' web-fetch and web-search tools. NOT published to npm; deploy via Docker or `bunx git+...`.",
   "private": true,
   "type": "module",

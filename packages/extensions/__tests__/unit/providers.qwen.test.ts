@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { DEFAULT_ADAPTER_CALL_CONTEXT } from "@tachu/core";
 import {
   coerceStringContentToTextPartsForDashScopeQwenImage,
   mergeSystemIntoLastUserForDashScope,
@@ -54,10 +55,13 @@ describe("QwenProviderAdapter", () => {
       timeoutMs: 5000,
       imageTaskPollIntervalMs: 1,
     });
-    const res = await adapter.chat({
-      model: "wanx-v1",
-      messages: [{ role: "user", content: "一只猫" }],
-    });
+    const res = await adapter.chat(
+      {
+        model: "wanx-v1",
+        messages: [{ role: "user", content: "一只猫" }],
+      },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
     expect(res.content).toContain("https://example.com/a.png");
     expect(res.content).toContain("![generated-1]");
     expect(res.usage.completionTokens).toBe(1);
@@ -102,10 +106,13 @@ describe("QwenProviderAdapter", () => {
     });
 
     const adapter = new QwenProviderAdapter({ apiKey: "k" });
-    const res = await adapter.chat({
-      model: "wan2.7-image",
-      messages: [{ role: "user", content: "生成一只小猫图片" }],
-    });
+    const res = await adapter.chat(
+      {
+        model: "wan2.7-image",
+        messages: [{ role: "user", content: "生成一只小猫图片" }],
+      },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
 
     expect(captured.url).toContain("/api/v1/services/aigc/multimodal-generation/generation");
     expect(captured.headers["X-DashScope-Async"]).toBeUndefined();
@@ -147,19 +154,22 @@ describe("QwenProviderAdapter", () => {
       );
     });
     const adapter = new QwenProviderAdapter({ apiKey: "k" });
-    await adapter.chat({
-      model: "wan2.7-image",
-      messages: [{ role: "user", content: "cat" }],
-      ...({
-        qwenImage: {
-          size: "2048*2048",
-          n: 1,
-          watermark: false,
-          promptExtend: true,
-          seed: 42,
-        },
-      } as Record<string, unknown>),
-    });
+    await adapter.chat(
+      {
+        model: "wan2.7-image",
+        messages: [{ role: "user", content: "cat" }],
+        ...({
+          qwenImage: {
+            size: "2048*2048",
+            n: 1,
+            watermark: false,
+            promptExtend: true,
+            seed: 42,
+          },
+        } as Record<string, unknown>),
+      },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
     const parameters = (captured as { parameters: Record<string, unknown> }).parameters;
     expect(parameters.size).toBe("2048*2048");
     expect(parameters.n).toBe(1);
@@ -184,21 +194,24 @@ describe("QwenProviderAdapter", () => {
       );
     });
     const adapter = new QwenProviderAdapter({ apiKey: "k" });
-    await adapter.chat({
-      model: "wan2.7-image",
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "text", text: "重绘" },
-            { type: "image_url", image_url: { url: "https://a/a.png" } },
-          ],
-        },
-      ],
-      ...({
-        qwenImage: { refImages: ["https://a/a.png", "https://b/b.png"] },
-      } as Record<string, unknown>),
-    });
+    await adapter.chat(
+      {
+        model: "wan2.7-image",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "重绘" },
+              { type: "image_url", image_url: { url: "https://a/a.png" } },
+            ],
+          },
+        ],
+        ...({
+          qwenImage: { refImages: ["https://a/a.png", "https://b/b.png"] },
+        } as Record<string, unknown>),
+      },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
     const content = (captured as {
       input: { messages: Array<{ content: Array<{ text?: string; image?: string }> }> };
     }).input.messages[0]!.content;
@@ -212,10 +225,13 @@ describe("QwenProviderAdapter", () => {
     globalThis.fetch = mock(async () => new Response("no key", { status: 401 }));
     const adapter = new QwenProviderAdapter({ apiKey: "k" });
     await expect(
-      adapter.chat({
-        model: "wan2.7-image",
-        messages: [{ role: "user", content: "cat" }],
-      }),
+      adapter.chat(
+        {
+          model: "wan2.7-image",
+          messages: [{ role: "user", content: "cat" }],
+        },
+        DEFAULT_ADAPTER_CALL_CONTEXT,
+      ),
     ).rejects.toMatchObject({ code: "PROVIDER_AUTH_FAILED" });
   });
 
@@ -224,10 +240,13 @@ describe("QwenProviderAdapter", () => {
     globalThis.fetch = fetchSpy;
     const adapter = new QwenProviderAdapter({ apiKey: "k" });
     await expect(
-      adapter.chat({
-        model: "wan2.7-image",
-        messages: [{ role: "user", content: "   " }],
-      }),
+      adapter.chat(
+        {
+          model: "wan2.7-image",
+          messages: [{ role: "user", content: "   " }],
+        },
+        DEFAULT_ADAPTER_CALL_CONTEXT,
+      ),
     ).rejects.toMatchObject({ code: "PROVIDER_INVALID_INPUT" });
     expect(fetchSpy).not.toHaveBeenCalled();
   });

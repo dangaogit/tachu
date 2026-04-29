@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import type { MemoryEntry, MemorySystem } from "@tachu/core";
+import { DEFAULT_ADAPTER_CALL_CONTEXT } from "@tachu/core";
 
 import { SessionStoreError } from "../errors";
 
@@ -403,7 +404,7 @@ export async function migrateLegacyMessages(
       timestamp: msg.timestamp,
       anchored: false,
     };
-    await memorySystem.append(id, entry);
+    await memorySystem.append(id, entry, DEFAULT_ADAPTER_CALL_CONTEXT);
     migrated += 1;
   }
   return migrated;

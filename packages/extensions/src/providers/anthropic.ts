@@ -2,6 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import {
   ProviderError,
   TimeoutError,
+  type AdapterCallContext,
   type ChatFinishReason,
   type ChatRequest,
   type ChatResponse,
@@ -390,7 +391,11 @@ export class AnthropicProviderAdapter implements ProviderAdapter {
    * @param signal 可选取消信号
    * @returns 对话响应
    */
-  async chat(request: ChatRequest, signal?: AbortSignal): Promise<ChatResponse> {
+  async chat(
+    request: ChatRequest,
+    _ctx: AdapterCallContext,
+    signal?: AbortSignal,
+  ): Promise<ChatResponse> {
     const extended = request as ExtendedChatRequest;
     const mapped = toAnthropicMessages(request.messages);
     const timeout = withAbortTimeout(signal, this.timeoutMs);
@@ -465,6 +470,7 @@ export class AnthropicProviderAdapter implements ProviderAdapter {
    */
   async *chatStream(
     request: ChatRequest,
+    _ctx: AdapterCallContext,
     signal?: AbortSignal,
   ): AsyncIterable<ChatStreamChunk> {
     const extended = request as ExtendedChatRequest;

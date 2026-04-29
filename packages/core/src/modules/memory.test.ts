@@ -3,6 +3,8 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { EngineConfig } from "../types";
+import type { AdapterCallContext } from "../types/context";
+import { DEFAULT_ADAPTER_CALL_CONTEXT } from "../types/context";
 import type { Tokenizer } from "../prompt";
 import { InMemoryVectorStore } from "../vector";
 import { InMemoryMemorySystem } from "./memory";
@@ -63,7 +65,7 @@ class SummaryProvider implements ProviderAdapter {
     ];
   }
 
-  async chat(request: ChatRequest): Promise<ChatResponse> {
+  async chat(request: ChatRequest, _ctx: AdapterCallContext): Promise<ChatResponse> {
     this.calls += 1;
     const source = request.messages.at(-1)?.content ?? "";
     return {
@@ -72,7 +74,7 @@ class SummaryProvider implements ProviderAdapter {
     };
   }
 
-  async *chatStream() {
+  async *chatStream(_req: ChatRequest, _ctx: AdapterCallContext) {
     yield { type: "finish" as const, finishReason: "stop" as const };
   }
 }
@@ -96,24 +98,40 @@ describe("InMemoryMemorySystem", () => {
     );
 
     const now = Date.now();
-    await memory.append("s1", { role: "user", content: "head", timestamp: now, anchored: false });
-    await memory.append("s1", {
-      role: "assistant",
-      content: "middle one with context",
-      timestamp: now + 1,
-      anchored: false,
-    });
-    await memory.append("s1", {
-      role: "user",
-      content: "middle two with context",
-      timestamp: now + 2,
-      anchored: false,
-    });
-    await memory.append("s1", { role: "assistant", content: "tail", timestamp: now + 3, anchored: false });
+    await memory.append(
+      "s1",
+      { role: "user", content: "head", timestamp: now, anchored: false },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
+    await memory.append(
+      "s1",
+      {
+        role: "assistant",
+        content: "middle one with context",
+        timestamp: now + 1,
+        anchored: false,
+      },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
+    await memory.append(
+      "s1",
+      {
+        role: "user",
+        content: "middle two with context",
+        timestamp: now + 2,
+        anchored: false,
+      },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
+    await memory.append(
+      "s1",
+      { role: "assistant", content: "tail", timestamp: now + 3, anchored: false },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
 
     await memory.compress("s1");
 
-    const window = await memory.load("s1");
+    const window = await memory.load("s1", DEFAULT_ADAPTER_CALL_CONTEXT);
     const summary = window.entries.find(
       (entry) => entry.role === "system" && String(entry.content).includes("provider-summary:"),
     );
@@ -135,24 +153,40 @@ describe("InMemoryMemorySystem", () => {
     );
 
     const now = Date.now();
-    await memory.append("s2", { role: "user", content: "head", timestamp: now, anchored: false });
-    await memory.append("s2", {
-      role: "assistant",
-      content: "middle fallback one",
-      timestamp: now + 1,
-      anchored: false,
-    });
-    await memory.append("s2", {
-      role: "user",
-      content: "middle fallback two",
-      timestamp: now + 2,
-      anchored: false,
-    });
-    await memory.append("s2", { role: "assistant", content: "tail", timestamp: now + 3, anchored: false });
+    await memory.append(
+      "s2",
+      { role: "user", content: "head", timestamp: now, anchored: false },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
+    await memory.append(
+      "s2",
+      {
+        role: "assistant",
+        content: "middle fallback one",
+        timestamp: now + 1,
+        anchored: false,
+      },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
+    await memory.append(
+      "s2",
+      {
+        role: "user",
+        content: "middle fallback two",
+        timestamp: now + 2,
+        anchored: false,
+      },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
+    await memory.append(
+      "s2",
+      { role: "assistant", content: "tail", timestamp: now + 3, anchored: false },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
 
     await memory.compress("s2");
 
-    const window = await memory.load("s2");
+    const window = await memory.load("s2", DEFAULT_ADAPTER_CALL_CONTEXT);
     const summary = window.entries.find((entry) => String(entry.content).startsWith("中段摘要:"));
     expect(summary).toBeDefined();
     expect(String(summary?.content)).toContain("middle fallback");
@@ -175,30 +209,46 @@ describe("InMemoryMemorySystem", () => {
     );
 
     const baseTs = Date.now();
-    await memory.append("s3", {
-      role: "user",
-      content: "hello world memory",
-      timestamp: baseTs,
-      anchored: false,
-    });
-    await memory.append("s3", {
-      role: "assistant",
-      content: "first-filler-message-content",
-      timestamp: baseTs + 1,
-      anchored: false,
-    });
-    await memory.append("s3", {
-      role: "user",
-      content: "second-filler-message-content",
-      timestamp: baseTs + 2,
-      anchored: false,
-    });
-    await memory.append("s3", {
-      role: "assistant",
-      content: "final-message-content",
-      timestamp: baseTs + 3,
-      anchored: false,
-    });
+    await memory.append(
+      "s3",
+      {
+        role: "user",
+        content: "hello world memory",
+        timestamp: baseTs,
+        anchored: false,
+      },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
+    await memory.append(
+      "s3",
+      {
+        role: "assistant",
+        content: "first-filler-message-content",
+        timestamp: baseTs + 1,
+        anchored: false,
+      },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
+    await memory.append(
+      "s3",
+      {
+        role: "user",
+        content: "second-filler-message-content",
+        timestamp: baseTs + 2,
+        anchored: false,
+      },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
+    await memory.append(
+      "s3",
+      {
+        role: "assistant",
+        content: "final-message-content",
+        timestamp: baseTs + 3,
+        anchored: false,
+      },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
     await memory.archive("s3");
     const recalled = await memory.recall("s3", "hello", 1);
     expect(recalled.length).toBeGreaterThan(0);

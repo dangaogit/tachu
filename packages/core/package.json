@@ -1,6 +1,6 @@
 {
   "name": "@tachu/core",
-  "version": "1.0.0-alpha.1",
+  "version": "1.0.0-alpha.2",
   "description": "Agentic engine core (alpha) — descriptor registry, 9-phase execution pipeline, prompt assembler, task scheduler, safety & observability modules, with built-in direct-answer and tool-use (agentic loop) sub-flows.",
   "type": "module",
   "main": "./dist/index.js",

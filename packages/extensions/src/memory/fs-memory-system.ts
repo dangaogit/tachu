@@ -11,6 +11,7 @@ import { join } from "node:path";
 
 import {
   InMemoryMemorySystem,
+  type AdapterCallContext,
   type ContextWindow,
   type MemoryEntry,
   type MemorySystem,
@@ -129,10 +130,10 @@ export class FsMemorySystem implements MemorySystem {
   /**
    * @inheritdoc
    */
-  async load(sessionId: string): Promise<ContextWindow> {
+  async load(sessionId: string, ctx: AdapterCallContext): Promise<ContextWindow> {
     return this.serialize(sessionId, async () => {
       await this.hydrateIfNeeded(sessionId);
-      return this.inner.load(sessionId);
+      return this.inner.load(sessionId, ctx);
     });
   }
 
@@ -148,12 +149,12 @@ export class FsMemorySystem implements MemorySystem {
    *    - `inner.compress(sid)` 触发 LLM 摘要
    *    - atomic rewrite jsonl，保持盘与内存一致
    */
-  async append(sessionId: string, entry: MemoryEntry): Promise<void> {
+  async append(sessionId: string, entry: MemoryEntry, ctx: AdapterCallContext): Promise<void> {
     await this.serialize(sessionId, async () => {
       await this.hydrateIfNeeded(sessionId);
       await this.writeJsonlLine(sessionId, entry);
       await this.inner.hydrate(sessionId, [entry]);
-      const window = await this.inner.load(sessionId);
+      const window = await this.inner.load(sessionId, ctx);
       if (window.tokenCount > window.limit * this.compressionThreshold) {
         await this.inner.compress(sessionId);
         await this.rewriteJsonl(sessionId);
@@ -293,7 +294,7 @@ export class FsMemorySystem implements MemorySystem {
   }
 
   private async rewriteJsonl(sessionId: string): Promise<void> {
-    const window = await this.inner.load(sessionId);
+    const window = await this.inner.load(sessionId, this.inner.resolveAdapterContext(sessionId));
     const path = this.pathFor(sessionId);
     const tmp = `${path}.tmp`;
     await mkdir(this.persistDir, { recursive: true });

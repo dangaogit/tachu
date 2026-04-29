@@ -1,4 +1,5 @@
 import type { EngineConfig, GeneratedImage, Message } from "../../types";
+import type { AdapterCallContext } from "../../types/context";
 import type { ModelRoute } from "../../types/config";
 import type { MemoryEntry, MemorySystem } from "../../modules/memory";
 import type { ModelRouter } from "../../modules/model-router";
@@ -31,6 +32,8 @@ export interface DirectAnswerContext {
   traceId: string;
   /** SessionId：Memory 读入需要。 */
   sessionId: string;
+  /** Provider / Memory 调用的租户与链路上下文。 */
+  adapterContext: AdapterCallContext;
   /**
    * 预组装好的 Prompt（由 `Engine.runStream` 经 PromptAssembler 真实组装而成）。
    *
@@ -207,7 +210,7 @@ const buildDirectAnswerMessages = async (
   const messages: Message[] = [{ role: "system", content: DIRECT_ANSWER_SYSTEM_PROMPT }];
 
   try {
-    const window = await ctx.memorySystem.load(ctx.sessionId);
+    const window = await ctx.memorySystem.load(ctx.sessionId, ctx.adapterContext);
     const history = window.entries
       .map(memoryEntryToMessage)
       .filter((m): m is Message => m !== null)
@@ -341,6 +344,7 @@ export const executeDirectAnswer = async (
       };
       for await (const part of adapter.chatStream(
         { model: route.model, messages },
+        ctx.adapterContext,
         signal,
       )) {
         if (part.type === "text-delta") {
@@ -379,7 +383,11 @@ export const executeDirectAnswer = async (
       return trimmed;
     }
 
-    const response = await adapter.chat({ model: route.model, messages }, signal);
+    const response = await adapter.chat(
+      { model: route.model, messages },
+      ctx.adapterContext,
+      signal,
+    );
     // D1-LOW-04：真实 usage 回流。
     ctx.onProviderUsage?.(response.usage);
     // P1-1：文生图 / 图像编辑产物结构化透传到主干。

@@ -7,7 +7,7 @@ import type {
   ModelCapabilities,
   ProviderAdapter,
 } from "@tachu/core";
-import { ProviderError } from "@tachu/core";
+import { DEFAULT_ADAPTER_CALL_CONTEXT, ProviderError } from "@tachu/core";
 
 interface ImageToTextTransformerOptions {
   provider: ProviderAdapter;
@@ -89,7 +89,7 @@ export class ImageToTextTransformer implements InputTransformer {
           },
         ],
       };
-      const response = await this.provider.chat(request);
+      const response = await this.provider.chat(request, DEFAULT_ADAPTER_CALL_CONTEXT);
       return {
         content: response.content,
         metadata: {

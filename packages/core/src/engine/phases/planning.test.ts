@@ -13,6 +13,7 @@ import type {
   InputEnvelope,
   IntentResult,
 } from "../../types";
+import { DEFAULT_ADAPTER_CALL_CONTEXT } from "../../types/context";
 
 import { runPlanningPhase } from "./planning";
 import type { PhaseEnvironment } from "./index";
@@ -117,6 +118,7 @@ const buildEnv = (
     hooks: {} as never,
     scheduler: {} as never,
     activeAbortSignal: new AbortController().signal,
+    adapterContext: DEFAULT_ADAPTER_CALL_CONTEXT,
   };
   return { env, events };
 };

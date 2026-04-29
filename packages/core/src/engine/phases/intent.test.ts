@@ -12,6 +12,8 @@ import type {
 } from "../../modules/provider";
 import type { MemorySystem, ContextWindow, MemoryEntry } from "../../modules/memory";
 import type { EngineConfig, EngineEvent, ExecutionContext, InputEnvelope } from "../../types";
+import type { AdapterCallContext } from "../../types/context";
+import { DEFAULT_ADAPTER_CALL_CONTEXT } from "../../types/context";
 import { buildTextToImageInputEnvelope } from "../../utils/multimodal-envelope";
 
 import { runIntentPhase, __testing as intentInternals } from "./intent";
@@ -78,10 +80,10 @@ const buildMemoryStub = (history: MemoryEntry[] = []): MemorySystem => {
     limit: 2_000,
   };
   return {
-    async load() {
+    async load(_sessionId: string, _ctx: AdapterCallContext) {
       return window;
     },
-    async append() {
+    async append(_sessionId: string, _entry: MemoryEntry, _ctx: AdapterCallContext) {
       /* no-op */
     },
     async compress() {
@@ -114,11 +116,19 @@ class StubProvider implements ProviderAdapter {
     return [];
   }
 
-  chat(request: ChatRequest, signal?: AbortSignal): Promise<ChatResponse> {
+  chat(
+    request: ChatRequest,
+    _ctx: AdapterCallContext,
+    signal?: AbortSignal,
+  ): Promise<ChatResponse> {
     return this.impl(request, signal);
   }
 
-  async *chatStream(_req: ChatRequest, _signal?: AbortSignal): AsyncIterable<ChatStreamChunk> {
+  async *chatStream(
+    _req: ChatRequest,
+    _ctx: AdapterCallContext,
+    _signal?: AbortSignal,
+  ): AsyncIterable<ChatStreamChunk> {
     /* not used by intent phase */
     yield { type: "finish", finishReason: "stop" };
   }
@@ -149,6 +159,7 @@ const buildEnv = (
     hooks: {} as never,
     scheduler: {} as never,
     activeAbortSignal: signal,
+    adapterContext: DEFAULT_ADAPTER_CALL_CONTEXT,
   };
   return { env, events };
 };
@@ -368,6 +379,7 @@ describe("runIntentPhase (Phase 3 — Intent Analysis, pure classification)", ()
       hooks: {} as never,
       scheduler: {} as never,
       activeAbortSignal: new AbortController().signal,
+      adapterContext: DEFAULT_ADAPTER_CALL_CONTEXT,
     };
 
     const out = await runIntentPhase(buildSafetyState("这是一个拆分成多个步骤的复杂任务"), env);

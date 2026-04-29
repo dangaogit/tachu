@@ -1,4 +1,12 @@
-import { ProviderError, type VectorSearchResult, type VectorStore } from "@tachu/core";
+import {
+  ProviderError,
+  type AdapterCallContext,
+  type VectorHit,
+  type VectorPayloadFilter,
+  type VectorSearchQuery,
+  type VectorStore,
+  type SparseVector,
+} from "@tachu/core";
 import { QdrantClient } from "@qdrant/js-client-rest";
 
 interface QdrantVectorStoreOptions {
@@ -125,13 +133,21 @@ export class QdrantVectorStore implements VectorStore {
    * @param topK 结果数量
    * @returns 搜索结果
    */
-  async search(query: number[] | string, topK: number): Promise<VectorSearchResult[]> {
+  async search(
+    query: VectorSearchQuery,
+    _ctx: AdapterCallContext,
+    signal?: AbortSignal,
+  ): Promise<VectorHit[]> {
+    signal?.throwIfAborted();
     try {
       await this.ensureCollection();
-      const vector = typeof query === "string" ? embedText(query, this.vectorSize) : query;
+      const vector =
+        typeof query.query === "string"
+          ? embedText(query.query, this.vectorSize)
+          : query.query;
       const result = await this.client.search(this.collectionName, {
         vector,
-        limit: topK,
+        limit: query.topK,
         with_payload: true,
       });
       return result.map((item) => ({
@@ -141,6 +157,52 @@ export class QdrantVectorStore implements VectorStore {
       }));
     } catch (error) {
       throw new ProviderError("PROVIDER_UPSTREAM_ERROR", "Qdrant search 失败", {
+        cause: error,
+        retryable: true,
+      });
+    }
+  }
+
+  async hybridSearch(
+    denseVector: number[],
+    sparseVector: SparseVector | null,
+    k: number,
+    filters: VectorPayloadFilter,
+    _ctx: AdapterCallContext,
+    signal?: AbortSignal,
+  ): Promise<VectorHit[]> {
+    signal?.throwIfAborted();
+    if (sparseVector !== null) {
+      throw new ProviderError(
+        "PROVIDER_UNSUPPORTED",
+        "QdrantVectorStore 尚未接入稀疏向量 hybridSearch",
+        { retryable: false },
+      );
+    }
+    try {
+      await this.ensureCollection();
+      const filter =
+        filters.must && Object.keys(filters.must).length > 0
+          ? {
+              must: Object.entries(filters.must).map(([key, val]) => ({
+                key,
+                match: { value: val },
+              })),
+            }
+          : undefined;
+      const result = await this.client.search(this.collectionName, {
+        vector: denseVector,
+        limit: k,
+        with_payload: true,
+        ...(filter !== undefined ? { filter } : {}),
+      });
+      return result.map((item) => ({
+        id: String(item.id),
+        score: item.score,
+        metadata: (item.payload ?? {}) as Record<string, unknown>,
+      }));
+    } catch (error) {
+      throw new ProviderError("PROVIDER_UPSTREAM_ERROR", "Qdrant hybridSearch 失败", {
         cause: error,
         retryable: true,
       });

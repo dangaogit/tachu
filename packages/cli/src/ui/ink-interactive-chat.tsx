@@ -4,6 +4,7 @@ import Spinner from "ink-spinner";
 import TextInput from "ink-text-input";
 import { randomUUID } from "node:crypto";
 import type { Engine, EngineOutput, MemoryEntry } from "@tachu/core";
+import { DEFAULT_ADAPTER_CALL_CONTEXT } from "@tachu/core";
 import { setInteractivePrompter } from "../approval";
 import { colorize } from "../renderer/color";
 import { renderMarkdownToAnsi } from "../renderer/markdown";
@@ -138,7 +139,7 @@ function InkChatRoot({
   const loadHistory = useCallback(
     async (id: string): Promise<MemoryEntry[]> => {
       try {
-        const window = await memorySystem.load(id);
+        const window = await memorySystem.load(id, DEFAULT_ADAPTER_CALL_CONTEXT);
         return [...window.entries];
       } catch {
         return [];

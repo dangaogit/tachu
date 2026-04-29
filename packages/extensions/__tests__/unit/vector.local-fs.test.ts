@@ -1,3 +1,4 @@
+import { DEFAULT_ADAPTER_CALL_CONTEXT } from "@tachu/core";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { readFile, writeFile } from "node:fs/promises";
 import { LocalFsVectorStore } from "../../src/vector/local-fs";
@@ -17,7 +18,7 @@ describe("LocalFsVectorStore", () => {
   it("upserts and searches vectors", async () => {
     const store = new LocalFsVectorStore({ filePath: `${root}/vectors.json` });
     await store.upsert("1", "hello world", { source: "a" });
-    const result = await store.search("hello", 1);
+    const result = await store.search({ query: "hello", topK: 1 }, DEFAULT_ADAPTER_CALL_CONTEXT);
     expect(result.length).toBe(1);
     expect(result[0]?.id).toBe("1");
   });
@@ -43,7 +44,7 @@ describe("LocalFsVectorStore", () => {
     const store = new LocalFsVectorStore({ filePath: path });
     await store.embed(["warmup"]);
     expect(store.size()).toBe(1);
-    const result = await store.search([1, 0, 0], 1);
+    const result = await store.search({ query: [1, 0, 0], topK: 1 }, DEFAULT_ADAPTER_CALL_CONTEXT);
     expect(result[0]?.id).toBe("seed");
   });
 

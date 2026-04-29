@@ -1,4 +1,12 @@
-import type { VectorSearchResult, VectorStore } from "./vector-store";
+import type { AdapterCallContext } from "../types/context";
+import type {
+  VectorHit,
+  VectorPayloadFilter,
+  VectorSearchQuery,
+  VectorSearchResult,
+  VectorStore,
+  SparseVector,
+} from "./vector-store";
 
 interface StoreEntry {
   vector: number[];
@@ -31,6 +39,18 @@ const tokenize = (text: string): string[] =>
     .toLowerCase()
     .split(/[^a-z0-9\u4e00-\u9fa5]+/u)
     .filter((token) => token.length > 0 && !STOP_WORDS.has(token));
+
+const payloadMatchesMust = (
+  metadata: Record<string, unknown>,
+  must: Record<string, unknown>,
+): boolean => {
+  for (const [key, value] of Object.entries(must)) {
+    if (metadata[key] !== value) {
+      return false;
+    }
+  }
+  return true;
+};
 
 const cosineSimilarity = (a: number[], b: number[]): number => {
   if (a.length === 0 || b.length === 0) {
@@ -94,9 +114,14 @@ export class InMemoryVectorStore implements VectorStore {
     this.entries.set(id, { vector: vectorOrText, metadata, terms: [] });
   }
 
-  async search(query: number[] | string, topK: number): Promise<VectorSearchResult[]> {
-    const queryVector =
-      typeof query === "string" ? this.toVector(tokenize(query)) : query;
+  async search(
+    query: VectorSearchQuery,
+    _ctx: AdapterCallContext,
+    signal?: AbortSignal,
+  ): Promise<VectorHit[]> {
+    signal?.throwIfAborted();
+    const { query: raw, topK } = query;
+    const queryVector = typeof raw === "string" ? this.toVector(tokenize(raw)) : raw;
 
     return [...this.entries.entries()]
       .map(([id, entry]) => ({
@@ -106,6 +131,32 @@ export class InMemoryVectorStore implements VectorStore {
       }))
       .sort((a, b) => b.score - a.score)
       .slice(0, Math.max(0, topK));
+  }
+
+  async hybridSearch(
+    denseVector: number[],
+    sparseVector: SparseVector | null,
+    k: number,
+    filters: VectorPayloadFilter,
+    _ctx: AdapterCallContext,
+    signal?: AbortSignal,
+  ): Promise<VectorHit[]> {
+    signal?.throwIfAborted();
+    if (sparseVector !== null) {
+      throw new Error("InMemoryVectorStore 尚未实现稀疏分支 hybridSearch");
+    }
+    const must = filters.must ?? {};
+    const rows = [...this.entries.entries()].filter(([, entry]) =>
+      payloadMatchesMust(entry.metadata, must),
+    );
+    const ranked = rows
+      .map(([id, entry]) => ({
+        id,
+        score: cosineSimilarity(denseVector, entry.vector),
+        metadata: entry.metadata,
+      }))
+      .sort((a, b) => b.score - a.score);
+    return ranked.slice(0, Math.max(0, k));
   }
 
   async delete(id: string): Promise<void> {

@@ -412,12 +412,15 @@ export function createInkRunRenderer(options: StreamRendererOptions = {}): {
   unmount: () => void;
 } {
   const renderer = new InkStreamRenderer(options);
-  const { waitUntilExit, unmount } = render(<InkRunRoot controller={renderer} />, {
+  const { waitUntilExit: waitUntilExitInk, unmount } = render(<InkRunRoot controller={renderer} />, {
     exitOnCtrlC: false,
   });
   renderer.setUnmount(() => {
     unmount();
     resetTerminalAnsi();
   });
+  const waitUntilExit = async (): Promise<void> => {
+    await waitUntilExitInk();
+  };
   return { renderer, waitUntilExit, unmount };
 }

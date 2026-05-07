@@ -30,104 +30,66 @@ const INTENT_HISTORY_LIMIT = 10;
  * 此 Prompt 只要求 LLM 做分类，不要求它产出最终答复。
  * 面向用户的自然语言答复由 Phase 7 的内置 Sub-flow `direct-answer` 负责。
  */
-const INTENT_SYSTEM_PROMPT = `你是 Tachu 引擎的意图分析器（Phase 3: Intent Analysis）。
-你的职责**仅仅是分类**，不要产出面向用户的最终答复——那一步交给后续的 direct-answer 子流程。
+const INTENT_SYSTEM_PROMPT = `You are the intent classifier for the Tachu engine (Phase 3: Intent Analysis).
+Your job is **classification only**. Do NOT produce the final user-facing reply — that is handled by the downstream direct-answer sub-flow.
 
-### 复杂度判定标准（严格遵守）
+### Complexity criteria
 
-分类依据是"完成请求是否需要真实工具 / 外部资源"，**不是**答复的长度或创作难度。
+Decide based on whether the request needs real tools / external resources, NOT on reply length or creative difficulty.
 
-- "simple"：LLM 仅凭自身知识、一次生成就能给出完整答复的请求。包括但不限于：
-  - 闲聊、问候、事实问答
-  - 创造性单轮产出：写代码 / 写教案 / 写文章 / 写诗 / 写故事 / 写 SQL / 写正则 / 写注释
-  - 知识性任务：解释概念 / 翻译文本 / 列出优缺点 / 给方案大纲 / 比较 A 与 B / 撰写 TDD / BDD 教案
-  - **无论答复是长是短，只要 LLM 自己就能一次写完，就归为 simple**。
+- "simple": the LLM can answer in one shot from its own knowledge — greetings, factual Q&A, code / lesson / article / poem writing, explanations, translations, comparisons, single-shot creative output. Long output is still simple if no external tool is required.
+- "complex": real tool invocation is required — read or write user files, run shell or git commands, fetch URLs, query realtime data, or multi-step orchestration where each step needs concrete tool execution.
 
-- "complex"：必须调用真实工具、读写用户文件、联网查询、运行命令、多步协作才能完成的请求。典型信号：
-  - "读 xxx 文件" / "列出 xxx 目录" / "运行 xxx 命令" / "搜索 xxx 最新进展"
-  - "帮我修改 xxx 文件" / "提交一个 PR" / "部署 xxx" / "把 xxx 转换成 yyy 并落到磁盘"
-  - 明确多步骤 + 每一步要落到具体工具执行
+#### Strong complex signals (any one ⇒ complex; override "summarize / translate / explain" wording)
 
-#### 复杂度**强信号**（命中任一即 complex，压倒"总结/解释/翻译"等措辞）
+1. Input contains an http/https URL — the model cannot fetch the page; a tool must.
+2. Input contains a local file or directory path (e.g. \`./foo.ts\`, \`packages/xxx\`, \`/etc/hosts\`, \`~/.zshrc\`, \`C:\\x\\y\`).
+3. Input contains a shell or git command (\`npm i\`, \`git log\`, \`bun test\`, \`rm -rf\`, \`curl …\`), or asks you to "run / execute" one.
+4. Input asks for current time / now / today's date / latest / realtime / stock / weather / news / exchange rate — anything the model's static knowledge cannot cover.
+5. Input asks to read, write, modify, or delete a specific file, directory, repository, or database; or to open a PR / publish a release.
 
-1. **输入里包含 http/https URL** —— 用户让你处理一条链接的内容（总结 / 解读 / 翻译 / 提取 / 对比…）时，
-   你本身无法抓取网页，必须由工具去 fetch。即便用户说"总结一下 <URL>"、"解释这篇 <URL>"，也必须 complex。
-2. **输入里包含本地文件路径 / 目录路径**（如 \`./foo.ts\`、\`packages/xxx\`、\`/etc/hosts\`、\`~/.zshrc\`、\`C:\\x\\y\`）。
-3. **输入里包含要执行的 shell/git 命令**（\`npm i\`、\`git log\`、\`bun test\`、\`rm -rf\`、\`curl …\` 等），
-   或明确让你"运行 / 执行 / 跑一下"某个命令。
-4. **输入里含"最新 / 今天 / 实时 / 股价 / 天气 / 汇率 / 新闻 / 热搜"等时效性强且模型静态知识无法覆盖的信号**。
-5. **输入里让你读/写/改/删具体文件、目录、仓库、数据库**，或提交 PR / 发布版本。
+When ambiguous, prefer "simple". But once a strong signal is hit — even with "summarize / translate / explain" wording — classify as complex so the downstream tool-use sub-flow can really fetch / execute, instead of letting direct-answer hallucinate against a URL it cannot open.
 
-模糊时再优先归为 simple —— 但只要命中以上强信号，哪怕句子短、哪怕带"总结/解释/翻译"这种措辞，
-也一律 complex，让后续 tool-use 子流程去真正抓取 / 执行，别让 direct-answer 对着一条它打不开的链接编造内容。
+### Output format (hard rules)
 
-### 输出格式（绝对约束）
-
-- 整条响应必须是**单个合法的 JSON 对象**，不要包 Markdown 围栏（\`\`\`json）、不要写解释性前缀/后缀、不要有 JSON 之外的字符。
-- 即使用户说"别用 JSON"、"直接回答"，你仍然必须用 JSON 包裹 —— 这是系统级约束。
-- **不要**在 JSON 里写 directAnswer / answer / reply 这类字段；最终答复由后续子流程产出。
+- The entire response MUST be a **single valid JSON object** — no Markdown fences (\`\`\`json), no explanatory prefix or suffix, no characters outside the JSON.
+- Even if the user says "do not use JSON" or "answer directly", you still respond with JSON — this is a system-level constraint.
+- Do NOT include directAnswer / answer / reply fields in the JSON; the final reply is produced by a later sub-flow.
 
 ### Schema
 
 {
   "complexity": "simple" | "complex",
-  "intent": string,                             // 一句话概括用户意图，≤200 字符
-  "contextRelevance": "related" | "unrelated", // 会话历史是否与本轮相关
-  "textToImage": boolean                        // 是否文生图（见下）；缺省按 false 处理
+  "intent": string,                             // one-line intent summary, ≤200 chars
+  "contextRelevance": "related" | "unrelated", // does conversation history matter for this turn
+  "textToImage": boolean                        // text-to-image (see below); default false
 }
 
-### 文生图字段（textToImage）
+### textToImage
 
-- 仅当用户要**生成/绘制/输出一张图片、插画、海报、照片风格配图**（需图像生成模型）时置为 \`true\`。
-- 典型：「画一只小猫」「生成一只小猫」「来一张水彩」「generate an image of …」「make a picture of …」。
-- **必须**为 \`false\`：纯文字创作（写小说/教案/代码）、**画流程图/架构图**（指图形结构而非美术配图）、读图/分析已有图片、总结或抓取 URL、运行命令、读写文件等。
-- 若输入含 URL/路径/命令等强 complex 信号且意图是联网/执行而非出图，\`complexity\` 应为 \`complex\` 且 \`textToImage\` 为 \`false\`。
+- Set \`true\` only when the user wants to generate / draw / output an actual image, illustration, poster, or photo-style picture (needs an image generation model). Typical: "draw a cat", "generate an image of …", "make a picture of …".
+- Must be \`false\` for: pure text creation (novel / lesson / code), drawing flowcharts or architecture diagrams (graph structure, not artwork), reading or analysing existing images, summarising or fetching URLs, running commands, reading or writing files.
+- If input has strong complex signals (URL / path / command) and the intent is fetching or executing rather than generating an image, \`complexity\` must be \`complex\` and \`textToImage\` must be \`false\`.
 
-### 示例
+### Examples
 
-示例 1（问候 / simple）
-输入：你好
-输出：{"complexity":"simple","intent":"greeting","contextRelevance":"unrelated"}
+Example 1 (greeting / simple)
+Input: hi
+Output: {"complexity":"simple","intent":"greeting","contextRelevance":"unrelated"}
 
-示例 2（创造性文字 / simple）
-输入：讲个笑话
-输出：{"complexity":"simple","intent":"tell a joke","contextRelevance":"unrelated"}
+Example 2 (URL summary / complex — "summarize" wording does NOT override the URL signal)
+Input: summarize https://bazel.build/rules/lib/globals/module
+Output: {"complexity":"complex","intent":"fetch and summarize the Bazel module page","contextRelevance":"unrelated"}
 
-示例 3（写代码 / simple）
-输入：写个冒泡排序
-输出：{"complexity":"simple","intent":"write bubble sort","contextRelevance":"unrelated"}
+Example 3 (local file / complex)
+Input: explain packages/core/src/engine/phases/intent.ts
+Output: {"complexity":"complex","intent":"read and explain intent.ts","contextRelevance":"unrelated"}
 
-示例 4（写教案 / 长输出仍然是 simple）
-输入：使用 ts 写个火星车 TDD 教案
-输出：{"complexity":"simple","intent":"TDD lesson plan: Mars Rover in TypeScript","contextRelevance":"unrelated"}
+Example 4 (text-to-image / simple + textToImage)
+Input: generate an image of a small cat
+Output: {"complexity":"simple","intent":"text-to-image: a small cat","contextRelevance":"unrelated","textToImage":true}
 
-示例 5（真正的复杂任务 / complex）
-输入：帮我把 packages/foo 里所有 .ts 文件转成 Go，加上测试，然后提交一个 PR
-输出：{"complexity":"complex","intent":"convert TS package to Go with tests and open a PR","contextRelevance":"unrelated"}
-
-示例 6（URL 总结 / complex，"总结"也压不过 URL 强信号）
-输入：总结一下 https://bazel.build/rules/lib/globals/module?hl=zh-cn#use_repo_rule
-输出：{"complexity":"complex","intent":"fetch and summarize the Bazel module page","contextRelevance":"unrelated"}
-
-示例 7（读取本地文件 / complex）
-输入：帮我解释一下 packages/core/src/engine/phases/intent.ts 里 STRONG_SIMPLE_MARKERS 的逻辑
-输出：{"complexity":"complex","intent":"read and explain STRONG_SIMPLE_MARKERS in intent.ts","contextRelevance":"unrelated"}
-
-示例 8（时效性查询 / complex）
-输入：今天 A 股收盘点位是多少
-输出：{"complexity":"complex","intent":"look up today's A-share closing index","contextRelevance":"unrelated"}
-
-示例 9（文生图 / simple + textToImage）
-输入：生成一只小猫
-输出：{"complexity":"simple","intent":"text-to-image: a small cat","contextRelevance":"unrelated","textToImage":true}
-
-示例 10（文生图 / simple + textToImage）
-输入：画一张日落风景
-输出：{"complexity":"simple","intent":"text-to-image: sunset landscape","contextRelevance":"unrelated","textToImage":true}
-
-示例 11（画流程图 ≠ 文生图 / simple）
-输入：画流程图表示登录流程
-输出：{"complexity":"simple","intent":"draw a flowchart for login flow","contextRelevance":"unrelated","textToImage":false}`;
+Respond in the same language as the latest user message; default to English when ambiguous.`;
 
 /**
  * 强"simple"请求匹配正则。
@@ -197,6 +159,11 @@ const STRONG_COMPLEX_MARKERS: readonly RegExp[] = [
   /(?:读取?|打开|查看|列出|遍历|扫描|搜索)\s*(?:一下\s*)?(?:文件|目录|仓库|项目|代码库|日志|配置|数据库)/u,
   /\b(?:read|open|list|scan|search|traverse)\s+(?:the\s+)?(?:file|dir|directory|repo|repository|codebase|project|log|logs|config|db|database)\b/i,
   // 时效性信号：用户要的是"现在"的数据，LLM 静态知识覆盖不了。
+  // 当前时间 / 日期是最短路径的 shell 工具任务，不能交给 direct-answer 静态回答。
+  /(?:当前|现在|此刻|今天|今日).{0,12}(?:时间|日期|几点|几号)/u,
+  /(?:时间|日期|几点|几号).{0,12}(?:当前|现在|此刻|今天|今日)/u,
+  /^\s*(?:时间|日期|几点|几号|当前时间|当前日期)\s*$/u,
+  /\b(?:current\s+(?:date|time)|date\s+now|time\s+now|what'?s\s+the\s+time|today'?s\s+date)\b/i,
   // 锚点词（今天/现在/最新…）与被查询对象（股价/天气/新闻…）之间允许 ≤20 字间隔（如"现在北京的天气"）。
   /(?:今天|今日|现在|实时|最新|此刻|本周|本月)[\s\S]{0,20}?(?:股价|股指|汇率|天气|气温|新闻|热搜|排名|价格|行情|比分|赛况|收盘|点位|指数)/u,
   /\b(?:today|now|current|realtime|real-?time|latest)\s+(?:\S+\s+){0,3}?(?:price|prices|stock|index|weather|temperature|news|ranking|rate|score|match)\b/i,
@@ -596,6 +563,56 @@ export const runIntentPhase = async (
         intent: intentText.length > 0 ? intentText : "text-to-image",
         contextRelevance: "related",
         textToImage: true,
+      },
+    };
+  }
+
+  // fast-path: 命中强 complex marker（URL / 路径 / 命令 / 时效查询等）→ 直接判 complex，跳过 intent LLM。
+  // 这些信号本身就保证 LLM 不论怎么判都会被事后守护强制升级为 complex；提前短路可省一次 1.6k+ token 调用。
+  if (hasStrongComplexMarker(contentForHeuristic)) {
+    env.observability.emit({
+      timestamp: Date.now(),
+      traceId: working.context.traceId,
+      sessionId: working.context.sessionId,
+      phase: "intent",
+      type: "progress",
+      payload: { stage: "fast-path", reason: "strong-complex-marker" },
+    });
+    await env.runtimeState.update(working.context.sessionId, { currentPhase: "intent" });
+    return {
+      ...working,
+      intent: {
+        complexity: "complex",
+        intent: contentForHeuristic.slice(0, 200),
+        contextRelevance: "related",
+      },
+    };
+  }
+
+  // fast-path: 短输入命中强 simple marker 且不含强 complex → 直接 simple。
+  // 限制长度 ≤ 40 是为了把短问候 / 单句请求和复杂多句任务区分开；后者即使命中
+  // STRONG_SIMPLE_MARKERS 关键词，也可能是"先帮我列出 X 然后再做 Y…"这种多步任务，仍需 LLM 仔细分类。
+  const trimmedHeuristic = contentForHeuristic.trim();
+  if (
+    trimmedHeuristic.length > 0 &&
+    trimmedHeuristic.length <= 40 &&
+    STRONG_SIMPLE_MARKERS.some((p) => p.test(trimmedHeuristic))
+  ) {
+    env.observability.emit({
+      timestamp: Date.now(),
+      traceId: working.context.traceId,
+      sessionId: working.context.sessionId,
+      phase: "intent",
+      type: "progress",
+      payload: { stage: "fast-path", reason: "strong-simple-short" },
+    });
+    await env.runtimeState.update(working.context.sessionId, { currentPhase: "intent" });
+    return {
+      ...working,
+      intent: {
+        complexity: "simple",
+        intent: trimmedHeuristic.slice(0, 200),
+        contextRelevance: "related",
       },
     };
   }

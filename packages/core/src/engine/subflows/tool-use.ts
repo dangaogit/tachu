@@ -97,6 +97,7 @@ export type ToolApprovalDecision =
  */
 export interface ToolUseInput {
   prompt: string;
+  toolNames?: string[];
   hint?: string;
 }
 
@@ -125,29 +126,26 @@ const TOOL_USE_TOOL_TIMEOUT_MS = 60_000;
  *   2. 强调 **最终回复必须是自然语言 + Markdown**，不能是 JSON 或工具调用壳
  *   3. 强调工具失败时要自行修复或降级，不要反复请求同一失败工具
  */
-const TOOL_USE_SYSTEM_PROMPT = `你是 Tachu 引擎的"Agentic 工具循环"子流程（内置 Sub-flow: tool-use）。
+const TOOL_USE_SYSTEM_PROMPT = `You are the agentic tool-loop sub-flow of the Tachu engine (built-in sub-flow: tool-use).
 
-### 你的工作方式
-- 你可以多轮调用系统提供的工具（Function Calling）。每次调用结束后，系统会把工具的真实输出以 \`tool\` 角色消息返回给你。
-- 当你拿到足够信息时，请**不要再调用工具**，直接输出**自然语言 + Markdown** 的最终回复。
+### How to work
+- You may call the provided tools across multiple turns via function calling. After each call, the system returns the real tool output to you as a \`tool\` role message.
+- When you have enough information, stop calling tools and produce a natural-language Markdown reply. The final reply MUST NOT carry any tool calls — text only.
 
-### 输出格式（最终回复，必须遵守）
-- 自然语言 + Markdown；禁止 JSON 壳、禁止"已识别请求：xxx"模板。
-- **所有代码使用 fenced 代码块并带 language 标签**（\`\`\`python / \`\`\`ts / \`\`\`bash / \`\`\`sql / \`\`\`json ...）。
-- 支持标题（#, ##）、粗体、列表、链接、表格。
-- 如果用户用中文，优先中文回复。
+### Final reply format
+- Natural language + Markdown; no JSON envelope, no "Identified request: xxx" template.
+- All code MUST use fenced code blocks with a language tag (\`\`\`python / \`\`\`ts / \`\`\`bash / \`\`\`sql / \`\`\`json …).
+- Headings (#, ##), bold, lists, links, tables are allowed.
 
-### 工具调用原则
-- 优先调用最贴合任务的工具；参数要明确、具体。
-- 单轮可以请求多个工具，但要避免无意义的重复调用（例如连续列同一目录）。
-- 如果工具返回错误，先分析错误原因：
-  - 参数非法 → 修正参数重试一次；
-  - 工具不适用 → 换一个工具或直接给出基于已有信息的回答；
-  - 重复失败 → 坦诚说明失败原因，不要无限重试。
+### Tool-call principles
+- Prefer the tool that most closely fits the task; arguments must be concrete.
+- A single turn may request multiple tools, but avoid pointless repeats (e.g. listing the same directory twice).
+- On tool error: fix the arguments and retry once, switch to a different tool, or honestly state the failure based on what you already know. Do not retry indefinitely.
 
-### 终止条件
-- 当你准备给最终答复时，**不要**再附带任何工具调用；只输出自然语言正文。
-- 系统会限制你最多进行若干轮思考，超过限制会强制终止并报错。`;
+### Termination
+- The system caps the number of loop steps; exceeding it raises an error. Stop calling tools as soon as you are ready to answer.
+
+Respond in the same language as the latest user message; default to English when ambiguous.`;
 
 /**
  * `tool-use` Sub-flow 对话历史中最多保留的近 N 条历史。
@@ -208,12 +206,37 @@ const buildToolExecutionSignal = (outer: AbortSignal, timeoutMs: number): AbortS
 };
 
 /**
- * 解析 `tool-use` 使用的能力路由：优先 `high-reasoning`，回退 `intent` → `fast-cheap`。
+ * 解析 `tool-use` 使用的能力路由。
  *
- * 选择 `high-reasoning` 为首选是因为 Agentic Loop 里 LLM 需要决定"是否还要调工具"、
- * "选哪个工具"、"用什么参数"，这是典型的推理密集型任务，应当走更强的模型。
+ * 默认链路：`high-reasoning` → `intent` → `fast-cheap`（Agentic Loop 里 LLM 需要
+ * 推理是否继续调工具、选什么工具、参数怎么写，归类为推理密集型）。
+ *
+ * 当 `runtime.toolLoop.shortTaskRoute.enabled` 为 true 且本次输入命中"短任务"
+ * 阈值（toolNames 数 ≤ maxToolNames 且 prompt 长度 ≤ maxPromptChars）时，
+ * 优先尝试配置中指定的 `capability`（典型为 `fast-cheap`），命中失败再回退到
+ * 默认链路。这样可以把"单工具调用 + 简短结果总结"的场景从 gpt-4o 降到
+ * gpt-4o-mini，wall time 通常能从 5-6s 缩到 1-2s。
  */
-const resolveToolUseRoute = (router: ModelRouter): { provider: string; model: string } => {
+const resolveToolUseRoute = (
+  input: ToolUseInput,
+  ctx: ToolUseContext,
+): { provider: string; model: string } => {
+  const router = ctx.modelRouter;
+  const shortRoute = ctx.config.runtime.toolLoop?.shortTaskRoute;
+  if (
+    shortRoute?.enabled === true &&
+    Array.isArray(input.toolNames) &&
+    input.toolNames.length > 0 &&
+    input.toolNames.length <= (shortRoute.maxToolNames ?? 1) &&
+    input.prompt.length <= (shortRoute.maxPromptChars ?? 120)
+  ) {
+    try {
+      return router.resolve(shortRoute.capability ?? "fast-cheap");
+    } catch {
+      // 配置的 capability 未在 capabilityMapping 中注册时静默回退到默认链路；
+      // observability 不在此处再 emit，是因为下面 default 链路命中后整体不算异常路径。
+    }
+  }
   try {
     return router.resolve("high-reasoning");
   } catch {
@@ -235,6 +258,16 @@ const buildInitialMessages = (
   input: ToolUseInput,
   ctx: ToolUseContext,
 ): Message[] => {
+  if (input.toolNames && input.toolNames.length > 0) {
+    const messages: Message[] = [
+      { role: "system", content: TOOL_USE_SYSTEM_PROMPT },
+      { role: "user", content: input.prompt },
+    ];
+    if (input.hint && input.hint.length > 0) {
+      messages.push({ role: "system", content: `补充指令（来自宿主）：${input.hint}` });
+    }
+    return messages;
+  }
   const base = ctx.prebuiltPrompt.messages.map((m) => ({ ...m }));
   const hasSystem = base.some((m) => m.role === "system");
   const messages: Message[] = hasSystem
@@ -274,6 +307,52 @@ const buildFallbackMessages = async (
     messages.push({ role: "system", content: `补充指令（来自宿主）：${input.hint}` });
   }
   return messages;
+};
+
+/**
+ * Shell 自动审批正则缓存。
+ *
+ * 把 `safety.shellAutoApprovePatterns` 里的正则源串编译为 RegExp，按数组身份缓存。
+ * 同一份配置在多次 `executeSingleToolCall` 调用之间共享同一组编译后正则，避免每次
+ * 重新 compile。`validateEngineConfig` 已经保证源串合法，这里再失败一次直接抛错。
+ */
+const shellAutoApproveRegexCache = new WeakMap<readonly string[], RegExp[]>();
+
+const compileShellAutoApprovePatterns = (
+  patterns: readonly string[] | undefined,
+): RegExp[] => {
+  if (!patterns || patterns.length === 0) return [];
+  const cached = shellAutoApproveRegexCache.get(patterns);
+  if (cached) return cached;
+  const compiled = patterns.map((source) => new RegExp(source));
+  shellAutoApproveRegexCache.set(patterns, compiled);
+  return compiled;
+};
+
+/**
+ * 判断本次 `run-shell` 调用是否命中 `safety.shellAutoApprovePatterns` 自动审批白名单。
+ *
+ * 命中条件（全部满足）：
+ *   1. 工具名为 `run-shell`
+ *   2. `arguments.command` 字符串命中任一已编译正则
+ *   3. `arguments.args` 字段为空（数组未提供或长度为 0）—— 一旦带 args，潜在风险面扩大，
+ *      为安全起见仍走人工审批
+ *
+ * 未配置 patterns（默认）→ 永远 false，保持向后兼容。
+ */
+const isShellAutoApproved = (
+  call: ToolCallRequest,
+  config: EngineConfig,
+): boolean => {
+  if (call.name !== "run-shell") return false;
+  const patterns = config.safety.shellAutoApprovePatterns;
+  if (!patterns || patterns.length === 0) return false;
+  const args = call.arguments as { command?: unknown; args?: unknown };
+  const command = typeof args.command === "string" ? args.command.trim() : "";
+  if (command.length === 0) return false;
+  if (Array.isArray(args.args) && args.args.length > 0) return false;
+  const regexes = compileShellAutoApprovePatterns(patterns);
+  return regexes.some((re) => re.test(command));
 };
 
 /**
@@ -424,7 +503,26 @@ const executeSingleToolCall = async (
 
   const globalApproval = ctx.config.runtime.toolLoop?.requireApprovalGlobal === true;
   const descriptorApproval = descriptor.requiresApproval === true;
-  const approvalNeeded = descriptorApproval || globalApproval;
+  const autoApproved = isShellAutoApproved(call, ctx.config);
+  if (autoApproved) {
+    ctx.observability.emit({
+      timestamp: Date.now(),
+      traceId: ctx.traceId,
+      sessionId: ctx.sessionId,
+      phase: "tool-use",
+      type: "progress",
+      payload: {
+        stage: "approval-auto",
+        tool: call.name,
+        callId: call.id,
+        reason: "shell-auto-approve-pattern",
+      },
+    });
+  }
+  // 全局策略 (`requireApprovalGlobal`) 与描述符 `requiresApproval` 任一命中即需要审批；
+  // 但若本次调用已被 shell 自动审批白名单覆盖，则跳过 approval 回调（用户在
+  // `safety.shellAutoApprovePatterns` 里显式声明的命令视为预批准）。
+  const approvalNeeded = (descriptorApproval || globalApproval) && !autoApproved;
   if (approvalNeeded && ctx.onBeforeToolCall) {
     const triggeredBy: ToolApprovalRequest["triggeredBy"] = descriptorApproval
       ? "descriptor"
@@ -659,15 +757,30 @@ const normalizeFinishReason = (
  * 优先使用 `prebuiltPrompt.tools`（已由 PromptAssembler 做过 maxContextTokens 裁剪与
  * scope 过滤）；若为空则回退到 registry 直查。
  */
-const resolveToolDefinitions = (ctx: ToolUseContext): ToolDefinition[] => {
-  if (ctx.prebuiltPrompt.tools.length > 0) {
-    return ctx.prebuiltPrompt.tools;
-  }
-  return ctx.registry.list("tool").map((tool) => ({
+const registryToolDefinitions = (ctx: ToolUseContext): ToolDefinition[] =>
+  ctx.registry.list("tool").map((tool) => ({
     name: tool.name,
     description: tool.description,
     inputSchema: tool.inputSchema,
   }));
+
+const filterToolDefinitions = (
+  tools: ToolDefinition[],
+  toolNames: readonly string[] | undefined,
+): ToolDefinition[] => {
+  if (!toolNames || toolNames.length === 0) {
+    return tools;
+  }
+  const allowed = new Set(toolNames);
+  return tools.filter((tool) => allowed.has(tool.name));
+};
+
+const resolveToolDefinitions = (input: ToolUseInput, ctx: ToolUseContext): ToolDefinition[] => {
+  const prebuilt = filterToolDefinitions(ctx.prebuiltPrompt.tools, input.toolNames);
+  if (prebuilt.length > 0) {
+    return prebuilt;
+  }
+  return filterToolDefinitions(registryToolDefinitions(ctx), input.toolNames);
 };
 
 /**
@@ -695,13 +808,13 @@ export const executeToolUse = async (
   }
 
   const { maxSteps, parallelism } = resolveToolLoopLimits(ctx.config);
-  const route = resolveToolUseRoute(ctx.modelRouter);
+  const route = resolveToolUseRoute(input, ctx);
   const adapter = ctx.providers.get(route.provider);
   if (!adapter) {
     throw new Error(`tool-use 路由到 provider ${route.provider}，但该 provider 未注册`);
   }
 
-  const tools = resolveToolDefinitions(ctx);
+  const tools = resolveToolDefinitions(input, ctx);
   const conversation: Message[] =
     ctx.prebuiltPrompt.messages.length > 0
       ? buildInitialMessages(input, ctx)

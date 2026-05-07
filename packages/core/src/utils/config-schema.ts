@@ -54,6 +54,7 @@ const DEFAULT_CONFIG: EngineConfig = {
     ],
     defaultGate: false,
     allowedWriteRoots: [],
+    shellAutoApprovePatterns: [],
   },
   models: {
     capabilityMapping: {
@@ -444,7 +445,7 @@ export const validateEngineConfig = (raw: unknown): EngineConfig => {
           return { ...fallback };
         }
         const raw = asRecord(rawValue, "runtime.toolLoop");
-        return {
+        const result: NonNullable<EngineConfig["runtime"]["toolLoop"]> = {
           maxSteps: asNumber(
             raw.maxSteps,
             "runtime.toolLoop.maxSteps",
@@ -463,6 +464,34 @@ export const validateEngineConfig = (raw: unknown): EngineConfig => {
             fallback.requireApprovalGlobal ?? false,
           ),
         };
+        if (raw.shortTaskRoute !== undefined && raw.shortTaskRoute !== null) {
+          const shortRaw = asRecord(raw.shortTaskRoute, "runtime.toolLoop.shortTaskRoute");
+          result.shortTaskRoute = {
+            enabled: asBoolean(
+              shortRaw.enabled,
+              "runtime.toolLoop.shortTaskRoute.enabled",
+              false,
+            ),
+            capability: asString(
+              shortRaw.capability,
+              "runtime.toolLoop.shortTaskRoute.capability",
+              "fast-cheap",
+            ),
+            maxToolNames: asNumber(
+              shortRaw.maxToolNames,
+              "runtime.toolLoop.shortTaskRoute.maxToolNames",
+              1,
+              { min: 1, max: 32 },
+            ),
+            maxPromptChars: asNumber(
+              shortRaw.maxPromptChars,
+              "runtime.toolLoop.shortTaskRoute.maxPromptChars",
+              120,
+              { min: 1, max: 10_000 },
+            ),
+          };
+        }
+        return result;
       })(),
       streamingOutput: asBoolean(
         runtime.streamingOutput,
@@ -578,6 +607,25 @@ export const validateEngineConfig = (raw: unknown): EngineConfig => {
         "safety.allowedWriteRoots",
         DEFAULT_CONFIG.safety.allowedWriteRoots ?? [],
       ),
+      shellAutoApprovePatterns: ((): string[] => {
+        const fallback = DEFAULT_CONFIG.safety.shellAutoApprovePatterns ?? [];
+        const list = asStringArray(
+          safety.shellAutoApprovePatterns,
+          "safety.shellAutoApprovePatterns",
+          fallback,
+        );
+        // 装配阶段就把每条 pattern 编译成 RegExp，捕获非法源字符串；运行时只比对编译后结果。
+        for (const source of list) {
+          try {
+            new RegExp(source);
+          } catch (err) {
+            throw ValidationError.invalidConfig(
+              `safety.shellAutoApprovePatterns 包含非法正则 "${source}"：${(err as Error).message}`,
+            );
+          }
+        }
+        return list;
+      })(),
     },
     models: {
       capabilityMapping: parseCapabilityMapping(

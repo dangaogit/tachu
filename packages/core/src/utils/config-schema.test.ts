@@ -186,6 +186,99 @@ describe("validateEngineConfig", () => {
     expect(withUndef.runtime.toolLoop?.parallelism).toBe(4);
   });
 
+  test("runtime.toolLoop.shortTaskRoute: 未指定时字段缺省（向后兼容）", () => {
+    const config = validateEngineConfig({});
+    expect(config.runtime.toolLoop?.shortTaskRoute).toBeUndefined();
+  });
+
+  test("runtime.toolLoop.shortTaskRoute: 显式配置回填字段默认值", () => {
+    const config = validateEngineConfig({
+      runtime: { toolLoop: { shortTaskRoute: { enabled: true } } },
+    });
+    expect(config.runtime.toolLoop?.shortTaskRoute).toEqual({
+      enabled: true,
+      capability: "fast-cheap",
+      maxToolNames: 1,
+      maxPromptChars: 120,
+    });
+  });
+
+  test("runtime.toolLoop.shortTaskRoute: 全字段覆盖", () => {
+    const config = validateEngineConfig({
+      runtime: {
+        toolLoop: {
+          shortTaskRoute: {
+            enabled: true,
+            capability: "intent",
+            maxToolNames: 2,
+            maxPromptChars: 200,
+          },
+        },
+      },
+    });
+    expect(config.runtime.toolLoop?.shortTaskRoute).toEqual({
+      enabled: true,
+      capability: "intent",
+      maxToolNames: 2,
+      maxPromptChars: 200,
+    });
+  });
+
+  test("runtime.toolLoop.shortTaskRoute: 区间违规抛 ValidationError", () => {
+    expect(() =>
+      validateEngineConfig({
+        runtime: {
+          toolLoop: { shortTaskRoute: { enabled: true, maxToolNames: 0 } },
+        },
+      }),
+    ).toThrow(ValidationError);
+    expect(() =>
+      validateEngineConfig({
+        runtime: {
+          toolLoop: { shortTaskRoute: { enabled: true, maxPromptChars: 0 } },
+        },
+      }),
+    ).toThrow(ValidationError);
+  });
+
+  test("safety.shellAutoApprovePatterns: 默认空数组", () => {
+    const config = validateEngineConfig({});
+    expect(config.safety.shellAutoApprovePatterns).toEqual([]);
+  });
+
+  test("safety.shellAutoApprovePatterns: 接受合法正则源串数组", () => {
+    const config = validateEngineConfig({
+      safety: {
+        shellAutoApprovePatterns: [
+          "^date(\\b|$)",
+          "^pwd(\\b|$)",
+          "^whoami(\\b|$)",
+        ],
+      },
+    });
+    expect(config.safety.shellAutoApprovePatterns).toEqual([
+      "^date(\\b|$)",
+      "^pwd(\\b|$)",
+      "^whoami(\\b|$)",
+    ]);
+  });
+
+  test("safety.shellAutoApprovePatterns: 非法正则源串抛 ValidationError", () => {
+    expect(() =>
+      validateEngineConfig({
+        safety: { shellAutoApprovePatterns: ["[unclosed("] },
+      }),
+    ).toThrow(ValidationError);
+  });
+
+  test("safety.shellAutoApprovePatterns: 类型错误抛 ValidationError", () => {
+    expect(() =>
+      validateEngineConfig({
+        safety: { shellAutoApprovePatterns: "not-an-array" },
+      }),
+    ).toThrow(ValidationError);
+  });
+
   describe("mcpServers", () => {
     test("未指定时字段省略（保持向后兼容）", () => {
       const config = validateEngineConfig({});

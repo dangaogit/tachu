@@ -368,8 +368,13 @@ describe("engine integration: tool-use agentic loop", () => {
     const chunks: StreamChunk[] = [];
     for await (const chunk of engine.runStream(
       {
-        content: "写一首短诗",
-        metadata: { modality: "text", size: 20 },
+        // 用一个**不命中** intent fast-path 任一分支的输入：
+        // - 不以 STRONG_SIMPLE_MARKERS 的中文白名单（写/编写/生成/列出/翻译/解释/介绍/...）开头
+        // - 不含 STRONG_COMPLEX_MARKERS 的 URL / 路径 / 命令 / 时效信号
+        // 这样 intent 必然走 mock provider，第一条响应被消费为 IntentResult，
+        // 第二条响应留给 direct-answer 子流程使用。
+        content: "构思一首关于海天相接的短诗",
+        metadata: { modality: "text", size: 32 },
       },
       {
         requestId: "req-fallback",

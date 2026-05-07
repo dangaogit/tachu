@@ -109,6 +109,53 @@ describe("StreamRenderer", () => {
     expect(stdout).toContain("success");
   });
 
+  it("done chunk 含 cached 时显示 cached 标签且 cost 按半价折扣", () => {
+    const renderer = new StreamRenderer();
+    const output: EngineOutput = {
+      type: "text",
+      content: "result",
+      status: "success",
+      steps: [],
+      metadata: {
+        toolCalls: [],
+        durationMs: 100,
+        tokenUsage: { input: 1000, output: 200, total: 1200, cached: 800 },
+      },
+      traceId: "trace-1",
+      deliveryMode: "complete",
+    };
+    const { stdout } = captureOutput(() => {
+      renderer.render({ type: "done", output });
+    });
+    // cached 量按 formatTokensK(800) → "0.8k" 展示
+    expect(stdout).toContain("cached 0.8k");
+    // billable = 1200 - 800 * 0.5 = 800; cost = 800 * 0.000002 = 0.0016
+    expect(stdout).toContain("$0.0016");
+  });
+
+  it("done chunk 不含 cached 时不显示 cached 标签且 cost 按全价计算", () => {
+    const renderer = new StreamRenderer();
+    const output: EngineOutput = {
+      type: "text",
+      content: "result",
+      status: "success",
+      steps: [],
+      metadata: {
+        toolCalls: [],
+        durationMs: 100,
+        tokenUsage: { input: 1000, output: 200, total: 1200 },
+      },
+      traceId: "trace-1",
+      deliveryMode: "complete",
+    };
+    const { stdout } = captureOutput(() => {
+      renderer.render({ type: "done", output });
+    });
+    expect(stdout).not.toContain("cached");
+    // 全价：1200 * 0.000002 = 0.0024
+    expect(stdout).toContain("$0.0024");
+  });
+
   it("finalize text 格式输出 content 并补换行", () => {
     const renderer = new StreamRenderer();
     const output: EngineOutput = {

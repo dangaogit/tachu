@@ -172,6 +172,36 @@ describe("runPlanningPhase (Phase 5 — Task Planning, ADR-0002 路由)", () => 
     expect(decisionEvent).toBeDefined();
   });
 
+  test("当前时间类请求只暴露 run-shell 给 tool-use", async () => {
+    const { env, events } = buildEnv({
+      toolNames: ["list-dir", "read-file", "run-shell"],
+    });
+    const state = buildPrecheckState("当前时间", {
+      intent: "look up the current time",
+      complexity: "complex",
+      contextRelevance: "related",
+    });
+    const { planning } = await runPlanningPhase(state, env);
+    const task = planning.plans[0]?.tasks?.[0];
+    expect(task).toMatchObject({
+      id: "task-tool-use",
+      ref: "tool-use",
+    });
+    expect(task?.input).toEqual({
+      prompt: "look up the current time",
+      toolNames: ["run-shell"],
+    });
+    const decisionEvent = events.find(
+      (e) =>
+        e.phase === "planning" &&
+        e.type === "progress" &&
+        (e.payload as { decision?: string }).decision === "tool-use",
+    );
+    expect((decisionEvent?.payload as { selectedToolNames?: string[] }).selectedToolNames).toEqual([
+      "run-shell",
+    ]);
+  });
+
   test("complex 意图 + 无工具 → direct-answer warn=true 兜底", async () => {
     const { env, events } = buildEnv({ toolNames: [] });
     const state = buildPrecheckState("请帮我写代码", {

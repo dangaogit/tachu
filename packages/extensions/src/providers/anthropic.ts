@@ -437,6 +437,10 @@ export class AnthropicProviderAdapter implements ProviderAdapter {
       const toolCalls = parseAnthropicToolCalls(response.content);
       const finishReason = mapAnthropicFinishReason(response.stop_reason);
 
+      // Anthropic prompt caching：`cache_read_input_tokens` 不计入 `input_tokens`。
+      // 既有行为是把它合并进 `promptTokens` 用于预算与估算（保持不变），
+      // 同时通过 `cachedPromptTokens` 单独上报命中量供 CLI / 账单按折扣展示。
+      const cacheRead = response.usage.cache_read_input_tokens ?? 0;
       return {
         content,
         ...(toolCalls ? { toolCalls } : {}),
@@ -445,13 +449,14 @@ export class AnthropicProviderAdapter implements ProviderAdapter {
           promptTokens:
             response.usage.input_tokens +
             (response.usage.cache_creation_input_tokens ?? 0) +
-            (response.usage.cache_read_input_tokens ?? 0),
+            cacheRead,
           completionTokens: response.usage.output_tokens,
           totalTokens:
             response.usage.input_tokens +
             (response.usage.cache_creation_input_tokens ?? 0) +
-            (response.usage.cache_read_input_tokens ?? 0) +
+            cacheRead +
             response.usage.output_tokens,
+          ...(cacheRead > 0 ? { cachedPromptTokens: cacheRead } : {}),
         },
       };
     } catch (error) {

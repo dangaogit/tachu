@@ -89,6 +89,13 @@ describe("DefaultPromptAssembler", () => {
     expect(systemPrompt).toContain("## Recall Content");
     expect(systemPrompt).toContain("## Current Task Context");
     expect(systemPrompt).toContain("## Output Constraint");
+    expect(systemPrompt).toContain("- read-file: read file");
+    expect(systemPrompt).not.toContain("schema=");
+    expect(systemPrompt).not.toContain('"properties"');
+    expect(result.tools[0]?.inputSchema).toEqual({
+      type: "object",
+      properties: { path: { type: "string" } },
+    });
     expect(result.tokenCount).toBeGreaterThan(0);
   });
 

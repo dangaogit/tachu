@@ -149,6 +149,17 @@ export class StreamRenderer implements ChunkRenderer {
   }
 
   /**
+   * 在仍会向 stdout 写提示的嵌套输入前调用（例如工具审批共享 `rl.question`）。
+   *
+   * 非 verbose 模式下 progress 会使用 {@link Spinner} 周期性重写 stdout，
+   * 与 readline 的提示行争抢同一终端列，表现为审批提示不出现或无法输入；
+   * 此处强制停转以释放 stdout。
+   */
+  stopSpinnerBeforeStdinPrompt(): void {
+    this.spinner.stop();
+  }
+
+  /**
    * 渲染流式块。
    *
    * @param chunk 流式块
@@ -292,10 +303,15 @@ export class StreamRenderer implements ChunkRenderer {
         this.spinner.stop();
         const { metadata } = chunk.output;
         const total = metadata.tokenUsage.total ?? 0;
-        const cost = (total * 0.000002).toFixed(4);
+        // Prompt caching 命中部分按半价计费（OpenAI 官方折扣），cost 估算时
+        // 把 cached 量按 0.5 系数从 billable 里扣除；总 token 数仍按全额展示。
+        const cached = metadata.tokenUsage.cached ?? 0;
+        const billable = Math.max(total - cached * 0.5, 0);
+        const cost = (billable * 0.000002).toFixed(4);
+        const cachedTag = cached > 0 ? ` (cached ${formatTokensK(cached)})` : "";
         process.stdout.write(
           colorize(
-            `\n[done:${chunk.output.status}] duration=${metadata.durationMs}ms tokens=${formatTokensK(total)} cost≈$${cost}\n`,
+            `\n[done:${chunk.output.status}] duration=${metadata.durationMs}ms tokens=${formatTokensK(total)}${cachedTag} cost≈$${cost}\n`,
             "blue",
           ),
         );

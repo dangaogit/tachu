@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha.3] - 2026-05-07
+
+### Changed
+
+#### `@tachu/core`
+
+- **Internal system prompts** — intent, tool-use, direct-answer and fallback prompts are now English-first with explicit “mirror the user’s language” guidance; reduces prompt tokens and stabilizes instruction following.
+- **Intent phase** — fast-path for strong simple vs strong complex heuristics (including timeliness / “current time” style queries) to skip redundant LLM classification when safe.
+- **Planning / tool-use** — optional narrowing to `run-shell` for current-time style tasks; `toolLoop.shortTaskRoute` can route short single-tool loops to a `fast-cheap` capability; `safety.shellAutoApprovePatterns` auto-approves matching read-only shell commands (config-driven, validated by schema).
+- **Prompt assembler** — tool listing in the system prompt keeps name + description only (drops full JSON Schema) to shrink every request.
+- **Usage reporting** — propagates provider `cachedPromptTokens` into orchestrator totals and `OutputMetadata.tokenUsage.cached`.
+
+#### `@tachu/cli`
+
+- **Stream renderer** — shows cached input tokens when present and adjusts the rough cost estimate (cached counted at half weight vs uncached).
+- **`tachu init`** — seeds `shortTaskRoute`, `shellAutoApprovePatterns`, and the `respond-in-user-language` rule file in the generated project template.
+
+#### `@tachu/extensions`
+
+- **OpenAI / Anthropic adapters** — map provider cache read fields into `ChatUsage.cachedPromptTokens`.
+- **`run-shell` executor** — runs single-string commands that contain shell metacharacters via `/bin/sh -c` so quoting and pipelines work without login-shell profile noise.
+
 ## [1.0.0-alpha.2] - 2026-04-28
 
 ### Changed

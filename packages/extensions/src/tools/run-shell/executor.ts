@@ -22,6 +22,7 @@ interface RunShellOutput {
 const DEFAULT_TIMEOUT_MS = 30_000;
 const STREAM_LIMIT_BYTES = 1024 * 1024;
 const DEFAULT_ENV_ALLOWLIST = ["PATH", "HOME", "LANG"] as const;
+const SHELL_SYNTAX_PATTERN = /[\s'"`|&;<>*$(){}[\]\\]/;
 
 const buildSandboxedEnv = (extra?: Record<string, string>): Record<string, string> => {
   const env: Record<string, string> = {};
@@ -35,6 +36,18 @@ const buildSandboxedEnv = (extra?: Record<string, string>): Record<string, strin
     env[key] = value;
   }
   return env;
+};
+
+const buildSpawnCommand = (input: RunShellInput): string[] => {
+  const args = input.args ?? [];
+  if (args.length > 0) {
+    return [input.command, ...args];
+  }
+  const command = input.command.trim();
+  if (SHELL_SYNTAX_PATTERN.test(command)) {
+    return ["/bin/sh", "-c", command];
+  }
+  return [command];
 };
 
 /**
@@ -54,8 +67,9 @@ export const runShellExecutor: ToolExecutor<RunShellInput, RunShellOutput> = asy
     : context.workspaceRoot;
   const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const startedAt = Date.now();
+  const cmd = buildSpawnCommand(input);
   const processRef = Bun.spawn({
-    cmd: [input.command, ...(input.args ?? [])],
+    cmd,
     cwd,
     env: buildSandboxedEnv(input.env),
     stdout: "pipe",

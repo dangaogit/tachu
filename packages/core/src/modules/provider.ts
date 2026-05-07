@@ -48,6 +48,19 @@ export interface ChatUsage {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  /**
+   * Prompt caching 命中的 token 数（OpenAI `prompt_tokens_details.cached_tokens`
+   * / Anthropic `usage.cache_read_input_tokens`）。
+   *
+   * - OpenAI 把 cached 部分**包含在 `promptTokens` 内**，按半价计费
+   * - Anthropic 把 `cache_read` 单独统计，**不重复计入 `input_tokens`**；
+   *   本 adapter 仍按原行为把它合并进 `promptTokens` 用于预算/估算，
+   *   同时把 cache_read 量单独通过本字段上报便于折扣展示
+   *
+   * 该字段仅用于 CLI / 账单展示与可观测性；预算 (`assertBudget`) 仍按
+   * `promptTokens + completionTokens` 全额校验，避免低估。
+   */
+  cachedPromptTokens?: number;
 }
 
 /**

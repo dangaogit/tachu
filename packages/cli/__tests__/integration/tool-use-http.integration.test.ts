@@ -141,13 +141,10 @@ describe("CLI integration: real fetch-url × Bun.serve", () => {
 
   it("LLM 选择 fetch-url → 真实 executor 抓取本地固定页面并收束为自然语言回复", async () => {
     const targetUrl = fixture!.url;
+    // 输入含 http URL → 触发 intent fast-path STRONG_COMPLEX_MARKERS 直判 complex，
+    // 跳过 intent LLM；mock provider 只需准备 tool-use 子流程两轮响应。
     const provider = new MockProviderAdapter({
       replies: [
-        {
-          content:
-            '{"intent":"抓取本地 fixture 页面","complexity":"complex","contextRelevance":"related"}',
-          finishReason: "stop",
-        },
         {
           content: "好的，开始抓取。",
           toolCalls: [
@@ -263,13 +260,10 @@ describe("CLI integration: real fetch-url × Bun.serve", () => {
 
   it("审批拒绝 fetch-url → tool message 告知 LLM，最终自然语言回复不发起真实请求", async () => {
     const targetUrl = fixture!.url;
+    // 输入含 http URL → 触发 intent fast-path STRONG_COMPLEX_MARKERS 直判 complex，
+    // 跳过 intent LLM；mock provider 只准备 tool-use 子流程两轮响应。
     const provider = new MockProviderAdapter({
       replies: [
-        {
-          content:
-            '{"intent":"抓取本地 fixture","complexity":"complex","contextRelevance":"related"}',
-          finishReason: "stop",
-        },
         {
           content: "准备抓取。",
           toolCalls: [

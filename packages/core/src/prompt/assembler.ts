@@ -102,9 +102,7 @@ const renderSystemPrompt = (parts: {
     .map((rule) => `- ${rule.content}`)
     .join("\n");
   const skills = parts.skills.map((skill) => `### ${skill.name}\n${skill.instructions}`).join("\n\n");
-  const tools = parts.tools
-    .map((tool) => `- ${tool.name}: ${tool.description}\n  schema=${JSON.stringify(tool.inputSchema)}`)
-    .join("\n");
+  const tools = parts.tools.map((tool) => `- ${tool.name}: ${tool.description}`).join("\n");
 
   return [
     parts.systemInstruction,

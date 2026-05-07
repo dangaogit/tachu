@@ -194,6 +194,7 @@ export class Engine {
       promptTokens: number;
       completionTokens: number;
       totalTokens: number;
+      cachedPromptTokens?: number;
     }) => void
   >();
 
@@ -631,12 +632,19 @@ export class Engine {
 
     // D1-LOW-04：把各阶段 Provider.chat 返回的真实 usage 汇回 orchestrator，
     // 保证预算熔断、可观测事件均基于真值而非 Prompt 估算值。
+    // `cachedPromptTokens` 由 OpenAI / Anthropic adapter 在命中 prompt caching 时携带，
+    // 主路径仅累计、不参与预算熔断（避免把命中量当折扣后的预算下放）。
     const usageSink = (usage: {
       promptTokens: number;
       completionTokens: number;
       totalTokens: number;
+      cachedPromptTokens?: number;
     }): void => {
-      orchestrator.recordModelUsage(usage.promptTokens, usage.completionTokens);
+      orchestrator.recordModelUsage(
+        usage.promptTokens,
+        usage.completionTokens,
+        usage.cachedPromptTokens ?? 0,
+      );
       enqueueUsageChunk(
         this.activeRunDeltaOutbox.get(normalizedContext.traceId),
         orchestrator,
@@ -735,7 +743,6 @@ export class Engine {
       });
 
       if (envelopeNeedsTextToImage(effectiveInput)) {
-        orchestrator.recordModelUsage(0, 0);
         this.activeRunPrompts.set(normalizedContext.traceId, {
           messages: [],
           tools: [],
@@ -780,7 +787,6 @@ export class Engine {
                 : JSON.stringify(entry.content),
           })),
         });
-        orchestrator.recordModelUsage(assembled.tokenCount, 0);
         this.activeRunPrompts.set(normalizedContext.traceId, assembled);
       }
 
@@ -790,7 +796,7 @@ export class Engine {
       if (this.config.runtime.streamingOutput) {
         const deltaQueue = new DeltaStreamQueue();
         this.activeRunDeltaOutbox.set(normalizedContext.traceId, deltaQueue);
-        // Prompt 组装等已在 execution 前计入 orchestrator，补发首帧 usage 供 UI 实时展示
+        // Provider usage 才进入最终 token/cost 统计；预组装 prompt size 仅用于裁剪。
         enqueueUsageChunk(deltaQueue, orchestrator);
         const execPromise = runExecutionPhase(
           graphState,
@@ -916,9 +922,12 @@ export class Engine {
         toolCalls,
         durationMs: Date.now() - startTs,
         tokenUsage: {
-          input: usage.tokens,
-          output: 0,
+          input: usage.promptTokens,
+          output: usage.completionTokens,
           total: usage.tokens,
+          ...(usage.cachedPromptTokens > 0
+            ? { cached: usage.cachedPromptTokens }
+            : {}),
         },
         ...(generatedImagesBucket.length > 0
           ? { generatedImages: generatedImagesBucket.slice() }

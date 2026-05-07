@@ -193,6 +193,30 @@ export interface ToolLoopConfig {
    * 若设为 `true`，工具 `withDefaultGate` 会对每一次调用都发起审批请求。
    */
   requireApprovalGlobal?: boolean;
+  /**
+   * 短任务路由策略（性能优化）。
+   *
+   * 当本轮 `tool-use` 子流程满足以下条件时，将能力路由从 `high-reasoning`
+   * 降级到指定的 `capability`（典型为 `fast-cheap`），以显著降低 wall time：
+   *   - `input.toolNames.length` ≤ `maxToolNames`（典型 1）
+   *   - `input.prompt.length` ≤ `maxPromptChars`（典型 120）
+   *
+   * 命中条件意味着这是一次"简单工具调用 + 简短结果总结"的链路，无需上 `gpt-4o`
+   * 之类的强推理模型；切到 `gpt-4o-mini` 等廉价模型可把 5-6s/轮 的延迟压到 1-2s。
+   *
+   * 多工具组合 / 长 prompt 不命中条件时，仍走 `high-reasoning` → `intent` →
+   * `fast-cheap` 的原有回退顺序，保持复杂任务质量。
+   */
+  shortTaskRoute?: {
+    /** 是否启用短任务路由降级。默认 `false`（关闭以保持向后兼容）。 */
+    enabled?: boolean;
+    /** 命中后路由到的能力标签。默认 `"fast-cheap"`。必须能在 `capabilityMapping` 中找到对应映射。 */
+    capability?: string;
+    /** 命中条件：`input.toolNames` 数量上限（含）。默认 `1`。 */
+    maxToolNames?: number;
+    /** 命中条件：`input.prompt` 字符长度上限（含）。默认 `120`。 */
+    maxPromptChars?: number;
+  };
 }
 
 /**
@@ -305,6 +329,24 @@ export interface EngineConfig {
      * 支持绝对路径；相对路径由宿主按自己的 cwd 展开再传入。留空视作未启用。
      */
     allowedWriteRoots?: string[];
+    /**
+     * `run-shell` 自动审批白名单（正则源字符串数组）。
+     *
+     * 当某次 `run-shell` 调用满足以下条件时，跳过 `onBeforeToolCall` 审批回调：
+     *   1. 工具名是 `run-shell`
+     *   2. `input.command` 字符串命中本数组中**任一**正则
+     *   3. `input.args` 为空（数组未提供或长度 0）—— 一旦带 args，潜在风险面扩大，
+     *      为安全起见仍走人工审批
+     *
+     * 字段为正则**源字符串**数组，由 core 在 `validateEngineConfig` 阶段编译为 RegExp。
+     * 非法正则会在装配阶段显式抛 `ValidationError`，避免运行时静默失效。
+     *
+     * 典型默认值（init 模板写入）：`date / pwd / whoami / hostname / uname / uptime / cal / printenv`
+     * 等纯只读命令。生产可按需扩充或清空。
+     *
+     * 留空（默认）→ 所有 `run-shell` 调用一律按 `descriptor.requiresApproval` 决定是否审批。
+     */
+    shellAutoApprovePatterns?: string[];
   };
   models: {
     capabilityMapping: Record<string, ModelRoute>;

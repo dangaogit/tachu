@@ -211,13 +211,12 @@ describe("CLI integration: StreamRenderer × Agentic Loop", () => {
   it("fetch-url 跃迁场景（Mock scripted + stub executor）：工具调用闭环", async () => {
     // 真实 CLI 跃迁的代表性用例：LLM 决定调用 fetch-url → 收到 HTTP 响应 → 总结成文本。
     // 这里用 scripted provider + stub TaskExecutor 闭合整个链路，避免集成测试依赖外网。
+    //
+    // 注意：本输入含 https URL，会命中 intent fast-path 的 STRONG_COMPLEX_MARKERS 分支，
+    // 直接判 complex 跳过 intent LLM 调用。因此 mock provider 只需提供 tool-use 子流程
+    // 的两轮响应（toolCalls → 终止文本），不再准备 intent 分类响应。
     const provider = new MockProviderAdapter({
       replies: [
-        {
-          content:
-            '{"intent":"抓取 example.com 首页","complexity":"complex","contextRelevance":"related"}',
-          finishReason: "stop",
-        },
         {
           content: "好的，我来抓取。",
           toolCalls: [

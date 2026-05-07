@@ -63,12 +63,28 @@ const buildDirectAnswerTask = (
  * 不再占用 DAG 上的独立节点。这保证 Planning 对 simple / complex 的输出结构同构，
  * 便于 Phase 6 保持"单任务 DAG"的简化假设。
  */
-const buildToolUseTask = (prompt: string): TaskNode => ({
+const buildToolUseTask = (prompt: string, toolNames?: string[]): TaskNode => ({
   id: "task-tool-use",
   type: "sub-flow",
   ref: "tool-use",
-  input: { prompt },
+  input:
+    toolNames && toolNames.length > 0
+      ? { prompt, toolNames }
+      : { prompt },
 });
+
+const CURRENT_TIME_MARKERS: readonly RegExp[] = [
+  /(?:当前|现在|此刻|今天|今日).{0,12}(?:时间|日期|几点|几号)/u,
+  /(?:时间|日期|几点|几号).{0,12}(?:当前|现在|此刻|今天|今日)/u,
+  /^\s*(?:时间|日期|几点|几号|当前时间|当前日期)\s*$/u,
+  /\b(?:current\s+(?:date|time)|date\s+now|time\s+now|what'?s\s+the\s+time|today'?s\s+date)\b/i,
+];
+
+const shouldLimitToRunShell = (prompt: string, intentSummary: string): boolean => {
+  const text = `${prompt}\n${intentSummary}`.trim();
+  if (text.length === 0) return false;
+  return CURRENT_TIME_MARKERS.some((pattern) => pattern.test(text));
+};
 
 /**
  * 阶段 5：任务规划（ADR-0002 更新）。
@@ -96,6 +112,11 @@ export const runPlanningPhase = async (
   } else {
     const candidateTools = env.registry.list("tool");
     if (candidateTools.length > 0) {
+      const selectedToolNames =
+        shouldLimitToRunShell(prompt, intentSummary) &&
+        candidateTools.some((tool) => tool.name === "run-shell")
+          ? ["run-shell"]
+          : undefined;
       env.observability.emit({
         timestamp: Date.now(),
         traceId: state.context.traceId,
@@ -105,10 +126,11 @@ export const runPlanningPhase = async (
         payload: {
           decision: "tool-use",
           toolCount: candidateTools.length,
+          ...(selectedToolNames ? { selectedToolNames } : {}),
           intent: intentSummary,
         },
       });
-      tasks = [buildToolUseTask(intentSummary)];
+      tasks = [buildToolUseTask(intentSummary, selectedToolNames)];
     } else {
       env.observability.emit({
         timestamp: Date.now(),

@@ -99,6 +99,18 @@ export interface OutputMetadata {
     input: number;
     output: number;
     total: number;
+    /**
+     * Prompt caching 命中累计量（OpenAI `prompt_tokens_details.cached_tokens`
+     * / Anthropic `cache_read_input_tokens`）。仅用于 CLI / 账单展示与可观测性，
+     * 不影响 `total` 与预算校验：
+     *
+     * - OpenAI 的 cached 部分**已经计入 `input`**，按半价计费，CLI 据此做折扣展示
+     * - Anthropic 的 cache_read 在 adapter 层已合并进 `input`，cached 字段单独
+     *   上报命中量
+     *
+     * 该字段为可选：未命中或 Provider 未返回时缺省（即视为 0）。
+     */
+    cached?: number;
   };
   /**
    * 文生图 / 图像编辑响应的结构化图片列表（可选）。

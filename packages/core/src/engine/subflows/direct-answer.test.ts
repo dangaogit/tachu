@@ -12,30 +12,38 @@ import { DIRECT_ANSWER_CONSTANTS } from "./direct-answer";
 describe("DIRECT_ANSWER_CONSTANTS.SYSTEM_PROMPT 硬契约", () => {
   const prompt = DIRECT_ANSWER_CONSTANTS.SYSTEM_PROMPT;
 
-  test("显式禁止空头承诺（我将/请稍等/I'll fetch）", () => {
-    expect(prompt).toContain("禁止空头承诺");
+  test("显式禁止空头承诺（I'll fetch / let me check / 请稍等）", () => {
+    expect(prompt).toContain("No empty promises");
     expect(prompt).toContain("请稍等");
     expect(prompt).toMatch(/I'?ll\s+(fetch|check|look)/i);
+    expect(prompt).toMatch(/let\s+me\s+check/i);
   });
 
-  test("显式禁止伪装已执行动作（我已经抓取 / 我刚才打开）", () => {
-    expect(prompt).toContain("禁止伪装已经执行了动作");
-    expect(prompt).toContain("我已经抓取");
+  test("显式禁止伪装已执行动作（I fetched / I ran / I just opened）", () => {
+    expect(prompt).toContain("No pretending you executed an action");
+    expect(prompt).toMatch(/I\s+fetched/i);
+    expect(prompt).toMatch(/I\s+ran/i);
   });
 
   test("给出无法真正执行时的三步兜底指引", () => {
-    expect(prompt).toContain("本轮未匹配到对应工具");
-    expect(prompt).toContain("不代表该 URL 的实时内容");
-    expect(prompt).toContain("把网页正文");
+    expect(prompt).toContain("no matching tool was available this turn");
+    expect(prompt).toContain("based on general knowledge rather than the live content");
+    expect(prompt).toMatch(/paste the page text/i);
   });
 
   test("保留 warn=true 的宿主提示分支", () => {
     expect(prompt).toContain("warn=true");
-    expect(prompt).toContain("基于通用知识的建议回答");
+    expect(prompt).toContain("knowledge-based answer");
   });
 
   test("保留 Markdown 与代码围栏格式约束", () => {
-    expect(prompt).toContain("自然语言 + Markdown");
-    expect(prompt).toContain("fenced 代码块");
+    expect(prompt).toContain("natural language + Markdown");
+    expect(prompt).toContain("fenced code block");
+  });
+
+  test("末尾要求 LLM 跟随用户语言（language mirror）", () => {
+    expect(prompt).toContain(
+      "Respond in the same language as the latest user message",
+    );
   });
 });

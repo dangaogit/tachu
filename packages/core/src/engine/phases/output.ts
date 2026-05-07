@@ -41,25 +41,28 @@ const FALLBACK_MIN_LENGTH = 30;
  * 兜底答复 LLM 的 System Prompt。
  *
  * 硬约束：
- *   - 禁止提及内部术语（Phase / 子流程 / 路由 / capability / task-tool-N / task-tool-use / Tool / Agent 描述符）
+ *   - 禁止提及内部术语（Phase / sub-flow / capability / task-tool-N / Tool / Agent descriptor 等）
  *   - 禁止编造"已执行 / 已调用 XX API"等假执行信号
- *   - 固定三段结构，80-200 字，中文输出
+ *   - 固定三段结构，2-4 段共 80-200 字
+ *   - 末尾的 language mirror 约束让模型对中文用户回中文、英文用户回英文
  *
  * 这些约束与 `sanitizeInternalTerms()` 双重保险：即使 LLM 不完全听话，
  * 后置正则过滤仍能把漏网术语降级掉。
  */
-const FALLBACK_SYSTEM_PROMPT = `你是 Tachu 引擎的"兜底答复生成器"。本次引擎未能完整完成用户请求，需要你生成一段面向用户的友好中文答复。
+const FALLBACK_SYSTEM_PROMPT = `You are the fallback summary generator for the Tachu engine. The engine could not fully complete the user's request this turn; produce a short, friendly final reply for the user.
 
-### 硬约束
-- **中文输出**，2-4 段共 80-200 字；直接输出正文，不要用 JSON 或代码块包裹。
-- **严禁**提及 "Phase / 子流程 / 路由 / capability / task-tool-N / task-tool-use / Tool / Agent 描述符" 等内部术语。
-- **严禁**编造"已执行 XX"、"调用了 XX API"、"已读取 XX 文件" 之类的假执行信号。
-- 不要过度道歉（不要用"非常抱歉""万分抱歉"等），保持专业克制。
+### Hard rules
+- Output 2–4 paragraphs totalling roughly 80–200 characters. Plain text only — no JSON envelope, no code fences around the whole reply.
+- Do NOT mention internal terms: Phase, sub-flow, capability, task-tool-N, task-tool-use, Tool / Agent descriptor, or any similar engine-internal vocabulary.
+- Do NOT pretend you executed anything ("ran XX", "called the XX API", "read the XX file"); the engine did not really run those actions this turn.
+- Do not over-apologise ("so sorry", "我万分抱歉"); stay professional and concise.
 
-### 结构（三段，依次）
-1. 一句简短承认本次未能如愿完成。
-2. **基于用户意图，给出一段真正有价值的通用知识型回答或具体替代建议**（这是本段的核心价值，不可省略）。
-3. 一句可行的下一步提示（改写请求 / 补充信息 / 使用其他渠道）。`;
+### Structure (three parts, in order)
+1. One short sentence acknowledging the request was not fully completed.
+2. **Based on the user's intent, give one paragraph of genuinely useful general-knowledge insight or a concrete alternative suggestion.** This is the core value of the reply — do not skip it.
+3. One short next-step hint (rephrase the request / supply more detail / try another channel).
+
+Respond in the same language as the latest user message; default to English when ambiguous.`;
 
 /**
  * 内部术语黑名单。
@@ -221,11 +224,11 @@ const tryLLMFallbackSummary = async (
   const intent = state.intent.intent;
   const failedCount = state.validation.diagnosis?.failedTaskIds?.length ?? 0;
 
-  const userPrompt = `用户请求：${userInput}
-识别到的意图：${intent}
-执行过程中未成功完成的步骤数：${failedCount}
+  const userPrompt = `User request: ${userInput}
+Detected intent: ${intent}
+Number of steps that did not complete: ${failedCount}
 
-请按 system 中的硬约束生成兜底答复。`;
+Generate the fallback reply per the system prompt's hard rules.`;
 
   const messages: Message[] = [
     { role: "system", content: FALLBACK_SYSTEM_PROMPT },

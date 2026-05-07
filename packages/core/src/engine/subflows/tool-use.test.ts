@@ -25,9 +25,9 @@ import { executeToolUse, TOOL_USE_CONSTANTS, type ToolUseContext } from "./tool-
  */
 const createScriptedProvider = (responses: ChatResponse[]): {
   adapter: ProviderAdapter;
-  calls: Array<{ messages: Message[]; toolsCount: number }>;
+  calls: Array<{ messages: Message[]; toolsCount: number; toolNames: string[]; model: string }>;
 } => {
-  const calls: Array<{ messages: Message[]; toolsCount: number }> = [];
+  const calls: Array<{ messages: Message[]; toolsCount: number; toolNames: string[]; model: string }> = [];
   let cursor = 0;
   const adapter: ProviderAdapter = {
     id: "scripted",
@@ -49,6 +49,8 @@ const createScriptedProvider = (responses: ChatResponse[]): {
       calls.push({
         messages: req.messages.map((m) => ({ ...m })),
         toolsCount: req.tools?.length ?? 0,
+        toolNames: req.tools?.map((tool) => tool.name) ?? [],
+        model: req.model,
       });
       const response = responses[cursor];
       if (!response) {
@@ -75,10 +77,11 @@ const createScriptedProvider = (responses: ChatResponse[]): {
  */
 const baseConfig = (overrides?: Partial<EngineConfig["runtime"]["toolLoop"]>): EngineConfig => {
   const config = createDefaultEngineConfig();
+  // 三个 capability 故意配成不同 model 名，方便测试断言"实际路由到哪个 model"。
   config.models.capabilityMapping = {
-    "high-reasoning": { provider: "scripted", model: "scripted-model" },
-    intent: { provider: "scripted", model: "scripted-model" },
-    "fast-cheap": { provider: "scripted", model: "scripted-model" },
+    "high-reasoning": { provider: "scripted", model: "scripted-large" },
+    intent: { provider: "scripted", model: "scripted-medium" },
+    "fast-cheap": { provider: "scripted", model: "scripted-small" },
   };
   config.runtime.toolLoop = {
     maxSteps: 3,
@@ -203,6 +206,259 @@ describe("executeToolUse (ADR-0002 Agentic Loop)", () => {
     expect(result).toBe("这是第一轮就给出的最终回复");
     expect(calls.length).toBe(1);
     expect(calls[0]?.toolsCount).toBe(1);
+  });
+
+  test("toolNames 输入只向 Provider 暴露指定工具", async () => {
+    const { adapter, calls } = createScriptedProvider([
+      {
+        content: "当前时间已查询。",
+        finishReason: "stop",
+        usage: noopUsage,
+      },
+    ]);
+    const ctx = buildCtx({
+      config: baseConfig(),
+      provider: adapter,
+      toolSet: [{ name: "list-dir" }, { name: "run-shell" }, { name: "read-file" }],
+      taskExecutor: async () => {
+        throw new Error("taskExecutor 不应被调用");
+      },
+    });
+    const result = await executeToolUse(
+      { prompt: "look up the current time", toolNames: ["run-shell"] },
+      ctx,
+    );
+    expect(result).toBe("当前时间已查询。");
+    expect(calls[0]?.toolNames).toEqual(["run-shell"]);
+    expect(calls[0]?.messages.map((m) => m.content)).not.toContain(
+      "[assembler] global system instruction",
+    );
+    expect(calls[0]?.messages).toEqual([
+      expect.objectContaining({ role: "system" }),
+      { role: "user", content: "look up the current time" },
+    ]);
+  });
+
+  test("shortTaskRoute.enabled 命中短任务条件 → 路由降级到 fast-cheap 的 model", async () => {
+    const { adapter, calls } = createScriptedProvider([
+      { content: "ok", finishReason: "stop", usage: noopUsage },
+    ]);
+    const config = baseConfig();
+    config.runtime.toolLoop = {
+      ...(config.runtime.toolLoop ?? {}),
+      shortTaskRoute: {
+        enabled: true,
+        capability: "fast-cheap",
+        maxToolNames: 1,
+        maxPromptChars: 120,
+      },
+    };
+    const ctx = buildCtx({
+      config,
+      provider: adapter,
+      toolSet: [{ name: "run-shell" }],
+      taskExecutor: async () => ({ output: "n/a" }),
+    });
+    await executeToolUse(
+      { prompt: "短任务：查询时间", toolNames: ["run-shell"] },
+      ctx,
+    );
+    expect(calls[0]?.model).toBe("scripted-small");
+  });
+
+  test("shortTaskRoute.enabled 但 prompt 长度超阈值 → 仍走 high-reasoning", async () => {
+    const { adapter, calls } = createScriptedProvider([
+      { content: "ok", finishReason: "stop", usage: noopUsage },
+    ]);
+    const config = baseConfig();
+    config.runtime.toolLoop = {
+      ...(config.runtime.toolLoop ?? {}),
+      shortTaskRoute: {
+        enabled: true,
+        capability: "fast-cheap",
+        maxToolNames: 1,
+        maxPromptChars: 20,
+      },
+    };
+    const ctx = buildCtx({
+      config,
+      provider: adapter,
+      toolSet: [{ name: "run-shell" }],
+      taskExecutor: async () => ({ output: "n/a" }),
+    });
+    await executeToolUse(
+      {
+        prompt: "这是一个超过阈值的较长 prompt，用来确认短任务路由不会命中",
+        toolNames: ["run-shell"],
+      },
+      ctx,
+    );
+    expect(calls[0]?.model).toBe("scripted-large");
+  });
+
+  test("shortTaskRoute.enabled 但 toolNames 数量超阈值 → 仍走 high-reasoning", async () => {
+    const { adapter, calls } = createScriptedProvider([
+      { content: "ok", finishReason: "stop", usage: noopUsage },
+    ]);
+    const config = baseConfig();
+    config.runtime.toolLoop = {
+      ...(config.runtime.toolLoop ?? {}),
+      shortTaskRoute: {
+        enabled: true,
+        capability: "fast-cheap",
+        maxToolNames: 1,
+        maxPromptChars: 200,
+      },
+    };
+    const ctx = buildCtx({
+      config,
+      provider: adapter,
+      toolSet: [{ name: "run-shell" }, { name: "list-dir" }],
+      taskExecutor: async () => ({ output: "n/a" }),
+    });
+    await executeToolUse(
+      { prompt: "短", toolNames: ["run-shell", "list-dir"] },
+      ctx,
+    );
+    expect(calls[0]?.model).toBe("scripted-large");
+  });
+
+  test("shortTaskRoute.enabled 但 capability 未配置 → 静默回退到默认链路 high-reasoning", async () => {
+    const { adapter, calls } = createScriptedProvider([
+      { content: "ok", finishReason: "stop", usage: noopUsage },
+    ]);
+    const config = baseConfig();
+    config.runtime.toolLoop = {
+      ...(config.runtime.toolLoop ?? {}),
+      shortTaskRoute: {
+        enabled: true,
+        capability: "non-existent-capability",
+        maxToolNames: 1,
+        maxPromptChars: 200,
+      },
+    };
+    const ctx = buildCtx({
+      config,
+      provider: adapter,
+      toolSet: [{ name: "run-shell" }],
+      taskExecutor: async () => ({ output: "n/a" }),
+    });
+    await executeToolUse(
+      { prompt: "短任务", toolNames: ["run-shell"] },
+      ctx,
+    );
+    expect(calls[0]?.model).toBe("scripted-large");
+  });
+
+  test("shellAutoApprovePatterns 命中纯 readonly 命令 → 跳过 approval 回调直接执行", async () => {
+    const { adapter } = createScriptedProvider([
+      {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [
+          {
+            id: "c-auto-1",
+            name: "run-shell",
+            arguments: { command: "date" },
+          },
+        ],
+        usage: noopUsage,
+      },
+      { content: "当前时间已查询。", finishReason: "stop", usage: noopUsage },
+    ]);
+    const config = baseConfig();
+    config.safety.shellAutoApprovePatterns = ["^date(\\b|$)", "^pwd(\\b|$)"];
+    let executed = false;
+    let approvalCalls = 0;
+    const ctx = buildCtx({
+      config,
+      provider: adapter,
+      toolSet: [
+        { name: "run-shell", requiresApproval: true, sideEffect: "irreversible" },
+      ],
+      taskExecutor: async () => {
+        executed = true;
+        return { stdout: "Sun May  7 11:30:00 CST 2026", stderr: "", exitCode: 0 };
+      },
+    });
+    ctx.onBeforeToolCall = async () => {
+      approvalCalls += 1;
+      return { type: "approve" };
+    };
+    const result = await executeToolUse({ prompt: "now" }, ctx);
+    expect(result).toBe("当前时间已查询。");
+    expect(executed).toBe(true);
+    expect(approvalCalls).toBe(0);
+  });
+
+  test("shellAutoApprovePatterns 命中但调用带 args → 仍走 approval 回调（保守策略）", async () => {
+    const { adapter } = createScriptedProvider([
+      {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [
+          {
+            id: "c-auto-2",
+            name: "run-shell",
+            arguments: { command: "date", args: ["+%s"] },
+          },
+        ],
+        usage: noopUsage,
+      },
+      { content: "已查询。", finishReason: "stop", usage: noopUsage },
+    ]);
+    const config = baseConfig();
+    config.safety.shellAutoApprovePatterns = ["^date(\\b|$)"];
+    let approvalCalls = 0;
+    const ctx = buildCtx({
+      config,
+      provider: adapter,
+      toolSet: [
+        { name: "run-shell", requiresApproval: true, sideEffect: "irreversible" },
+      ],
+      taskExecutor: async () => ({ stdout: "1718000000", stderr: "", exitCode: 0 }),
+    });
+    ctx.onBeforeToolCall = async () => {
+      approvalCalls += 1;
+      return { type: "approve" };
+    };
+    await executeToolUse({ prompt: "epoch" }, ctx);
+    expect(approvalCalls).toBe(1);
+  });
+
+  test("shellAutoApprovePatterns 不命中命令 → 仍走 approval 回调", async () => {
+    const { adapter } = createScriptedProvider([
+      {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [
+          {
+            id: "c-auto-3",
+            name: "run-shell",
+            arguments: { command: "ls" },
+          },
+        ],
+        usage: noopUsage,
+      },
+      { content: "已查询。", finishReason: "stop", usage: noopUsage },
+    ]);
+    const config = baseConfig();
+    config.safety.shellAutoApprovePatterns = ["^date(\\b|$)"];
+    let approvalCalls = 0;
+    const ctx = buildCtx({
+      config,
+      provider: adapter,
+      toolSet: [
+        { name: "run-shell", requiresApproval: true, sideEffect: "irreversible" },
+      ],
+      taskExecutor: async () => ({ stdout: "a b c", stderr: "", exitCode: 0 }),
+    });
+    ctx.onBeforeToolCall = async () => {
+      approvalCalls += 1;
+      return { type: "approve" };
+    };
+    await executeToolUse({ prompt: "ls" }, ctx);
+    expect(approvalCalls).toBe(1);
   });
 
   test("两轮循环：tool_calls → 工具执行 → 终止 stop", async () => {

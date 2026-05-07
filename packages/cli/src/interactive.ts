@@ -112,15 +112,20 @@ export async function runInteractiveChatReadline(
     terminal: isTTY(),
   });
 
-  // 把 rl.question 注册为进程级的审批 prompter，工具审批走这条路径，不会
-  // 再在 process.stdin 上反复 createInterface/close —— 避免 Node 在
-  // `Interface.close()` 里调用 `input.pause()` 把主循环的 readline 拖死。
-  setInteractivePrompter((query) => rl.question(query));
-
   const debug = options.debug ?? false;
   const renderer = new StreamRenderer({
     verbose: debug || (options.verbose ?? false),
     debug,
+  });
+
+  // 把 rl.question 注册为进程级的审批 prompter，工具审批走这条路径，不会
+  // 再在 process.stdin 上反复 createInterface/close —— 避免 Node 在
+  // `Interface.close()` 里调用 `input.pause()` 把主循环的 readline 拖死。
+  // 须在提问前停止 StreamRenderer 的 stdout spinner（非 verbose 模式），否则会与
+  // readline 提示行争抢终端，表现为审批一直转圈、无法交互。
+  setInteractivePrompter((query) => {
+    renderer.stopSpinnerBeforeStdinPrompt();
+    return rl.question(query);
   });
 
   const memorySystem = engine.getMemorySystem();

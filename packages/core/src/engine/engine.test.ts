@@ -6,7 +6,9 @@ import {
   type EngineConfig,
   type ProviderAdapter,
 } from "../index";
+import { DescriptorRegistry } from "../registry";
 import type { AdapterCallContext } from "../types/context";
+import { InMemoryVectorStore } from "../vector";
 
 const config: EngineConfig = {
   registry: { descriptorPaths: [], enableVectorIndexing: false },
@@ -210,6 +212,102 @@ describe("Engine", () => {
     // 业务 executor 不应该被 direct-answer 触发过 —— 层级分发把 sub-flow 完全拦在引擎内
     expect(toolTaskRefs).toEqual([]);
 
+    await engine.dispose();
+  });
+
+  test("tokenUsage uses provider usage and does not include assembled prompt estimate", async () => {
+    const vectorStore = new InMemoryVectorStore({ indexLimit: config.memory.vectorIndexLimit });
+    const registry = new DescriptorRegistry({ vectorStore });
+    await registry.register({
+      kind: "tool",
+      name: "huge-tool",
+      description: "x".repeat(20_000),
+      sideEffect: "readonly",
+      idempotent: true,
+      requiresApproval: false,
+      timeout: 1_000,
+      inputSchema: {
+        type: "object",
+        properties: {
+          payload: { type: "string", description: "y".repeat(20_000) },
+        },
+      },
+      execute: "hugeTool",
+    });
+
+    let calls = 0;
+    const usageProvider: ProviderAdapter = {
+      id: "usage",
+      name: "UsageProvider",
+      async listAvailableModels() {
+        return [];
+      },
+      async chat(): Promise<ChatResponse> {
+        calls += 1;
+        if (calls === 1) {
+          return {
+            content: JSON.stringify({
+              complexity: "simple",
+              intent: "say hi",
+              contextRelevance: "related",
+              textToImage: false,
+            }),
+            usage: { promptTokens: 100, completionTokens: 10, totalTokens: 110 },
+          };
+        }
+        return {
+          content: "hi",
+          finishReason: "stop",
+          usage: {
+            promptTokens: 200,
+            completionTokens: 20,
+            totalTokens: 220,
+            cachedPromptTokens: 80,
+          },
+        };
+      },
+      async *chatStream() {
+        throw new Error("streaming should be disabled in this test");
+      },
+    };
+
+    const engine = new Engine(
+      {
+        ...config,
+        runtime: { ...config.runtime, streamingOutput: false },
+        budget: { ...config.budget, maxTokens: 500_000 },
+        models: {
+          capabilityMapping: {
+            intent: { provider: "usage", model: "usage-chat" },
+            planning: { provider: "usage", model: "usage-chat" },
+            validation: { provider: "usage", model: "usage-chat" },
+            "fast-cheap": { provider: "usage", model: "usage-chat" },
+            "high-reasoning": { provider: "usage", model: "usage-chat" },
+          },
+          providerFallbackOrder: ["usage"],
+        },
+      },
+      { providers: [usageProvider], registry },
+    );
+
+    const output = await engine.run(
+      { content: "hi", metadata: { modality: "text", size: 2 } },
+      {
+        requestId: "r-usage",
+        sessionId: "s-usage",
+        traceId: "t-usage",
+        principal: {},
+        budget: {},
+        scopes: ["*"],
+      },
+    );
+
+    expect(output.metadata.tokenUsage).toEqual({
+      input: 300,
+      output: 30,
+      total: 330,
+      cached: 80,
+    });
     await engine.dispose();
   });
 });

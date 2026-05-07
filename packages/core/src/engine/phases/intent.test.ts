@@ -189,12 +189,15 @@ describe("runIntentPhase (Phase 3 — Intent Analysis, pure classification)", ()
     const { env } = buildEnv(provider);
     await runIntentPhase(buildSafetyState("ping"), env);
 
-    expect(capturedSystemPrompt).toContain("真实工具");
-    expect(capturedSystemPrompt).toContain("仅仅是分类");
+    expect(capturedSystemPrompt).toContain("real tools");
+    expect(capturedSystemPrompt).toContain("classification only");
     expect(capturedSystemPrompt).toContain("direct-answer");
-    expect(capturedSystemPrompt).toContain("不要");
+    expect(capturedSystemPrompt).toContain("Do NOT");
     expect(capturedSystemPrompt).toContain("directAnswer / answer / reply");
-    expect(capturedSystemPrompt).toContain("convert TS package to Go");
+    expect(capturedSystemPrompt).toContain("fetch and summarize the Bazel module page");
+    expect(capturedSystemPrompt).toContain(
+      "Respond in the same language as the latest user message",
+    );
   });
 
   test("LLM 返回合法 JSON → 按 3 字段 schema 解析（不含 directAnswer）", async () => {
@@ -233,7 +236,8 @@ describe("runIntentPhase (Phase 3 — Intent Analysis, pure classification)", ()
       usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
     }));
     const { env } = buildEnv(provider);
-    const out = await runIntentPhase(buildSafetyState("生成一只小猫"), env);
+    // 输入故意避开 STRONG_SIMPLE_MARKERS（"画"/"draw" 都不在白名单里），让 fast-path 不触发，确保走到 LLM。
+    const out = await runIntentPhase(buildSafetyState("draw a cat"), env);
     expect(out.intent.textToImage).toBe(true);
     expect(out.input.metadata?.textToImage).toBe(true);
   });
@@ -275,7 +279,8 @@ describe("runIntentPhase (Phase 3 — Intent Analysis, pure classification)", ()
       usage: { promptTokens: 20, completionTokens: 8, totalTokens: 28 },
     }));
     const { env } = buildEnv(provider);
-    const out = await runIntentPhase(buildSafetyState("请帮我把 A 重构成 B，然后加测试"), env);
+    // 故意避开 STRONG_SIMPLE_MARKERS（"请帮我" 命中白名单 → fast-path 会拦截），用"请把"开头让 LLM 真正被调用。
+    const out = await runIntentPhase(buildSafetyState("请把 A 重构成 B，然后加测试"), env);
 
     expect(out.intent.complexity).toBe("complex");
     expect(Object.prototype.hasOwnProperty.call(out.intent, "directAnswer")).toBe(false);
@@ -302,7 +307,9 @@ describe("runIntentPhase (Phase 3 — Intent Analysis, pure classification)", ()
       usage: { promptTokens: 5, completionTokens: 5, totalTokens: 10 },
     }));
     const { env, events } = buildEnv(provider);
-    const out = await runIntentPhase(buildSafetyState("讲个笑话"), env);
+    // 输入避开 STRONG_SIMPLE_MARKERS（"讲个" 在白名单里 → fast-path 会拦截）。
+    // 用"share a fun fact"既不命中 STRONG_SIMPLE_MARKERS 也不命中 STRONG_COMPLEX_MARKERS，确保走 LLM。
+    const out = await runIntentPhase(buildSafetyState("share a fun fact"), env);
 
     expect(out.intent.complexity).toBe("simple");
     expect(out.intent.intent.length).toBeGreaterThan(0);
@@ -468,71 +475,154 @@ describe("runIntentPhase (Phase 3 — Intent Analysis, pure classification)", ()
     await runIntentPhase(buildSafetyState("ping"), env);
 
     expect(capturedSystemPrompt).toContain("http/https URL");
-    expect(capturedSystemPrompt).toContain("本地文件路径");
-    expect(capturedSystemPrompt).toContain("shell/git 命令");
+    expect(capturedSystemPrompt).toContain("local file");
+    expect(capturedSystemPrompt).toContain("shell");
+    expect(capturedSystemPrompt).toContain("git command");
     expect(capturedSystemPrompt).toContain("bazel.build");
   });
 
-  test("LLM 判 simple 但输入含 URL → 强制升级为 complex，并记录 warning", async () => {
-    const provider = new StubProvider(async () => ({
-      content: JSON.stringify({
-        complexity: "simple",
-        intent: "summarize bazel page",
-        contextRelevance: "unrelated",
-      }),
-      usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
-    }));
+  test("fast-path 命中强 complex marker（URL）时不调用 LLM，直接判 complex", async () => {
+    let calls = 0;
+    const provider = new StubProvider(async () => {
+      calls += 1;
+      return {
+        content: JSON.stringify({
+          complexity: "simple",
+          intent: "noop",
+          contextRelevance: "unrelated",
+        }),
+        usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+      };
+    });
     const { env, events } = buildEnv(provider);
     const out = await runIntentPhase(
-      buildSafetyState(
-        "总结一下 https://bazel.build/rules/lib/globals/module?hl=zh-cn#use_repo_rule",
-      ),
+      buildSafetyState("summarize https://example.com"),
       env,
     );
 
+    expect(calls).toBe(0);
     expect(out.intent.complexity).toBe("complex");
     expect(
       events.some(
         (e) =>
-          e.type === "warning" &&
           e.phase === "intent" &&
-          String((e.payload as { reason?: string }).reason ?? "").includes(
-            "strong complex markers",
-          ),
+          e.type === "progress" &&
+          (e.payload as { stage?: string }).stage === "fast-path" &&
+          (e.payload as { reason?: string }).reason === "strong-complex-marker",
       ),
     ).toBe(true);
   });
 
-  test("LLM 判 simple 且输入含本地路径 → 强制升级为 complex", async () => {
-    const provider = new StubProvider(async () => ({
-      content: JSON.stringify({
-        complexity: "simple",
-        intent: "explain intent.ts",
-        contextRelevance: "unrelated",
-      }),
-      usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
-    }));
-    const { env } = buildEnv(provider);
+  test("fast-path 命中强 complex marker（本地路径）时不调用 LLM", async () => {
+    let calls = 0;
+    const provider = new StubProvider(async () => {
+      calls += 1;
+      return {
+        content: JSON.stringify({
+          complexity: "simple",
+          intent: "explain intent.ts",
+          contextRelevance: "unrelated",
+        }),
+        usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+      };
+    });
+    const { env, events } = buildEnv(provider);
     const out = await runIntentPhase(
       buildSafetyState("解释一下 packages/core/src/engine/phases/intent.ts 里 STRONG_SIMPLE_MARKERS"),
       env,
     );
 
+    expect(calls).toBe(0);
     expect(out.intent.complexity).toBe("complex");
+    expect(
+      events.some(
+        (e) =>
+          e.phase === "intent" &&
+          e.type === "progress" &&
+          (e.payload as { stage?: string }).stage === "fast-path" &&
+          (e.payload as { reason?: string }).reason === "strong-complex-marker",
+      ),
+    ).toBe(true);
+  });
+
+  test("fast-path 命中强 complex marker（当前时间）时不调用 LLM，直接判 complex", async () => {
+    let calls = 0;
+    const provider = new StubProvider(async () => {
+      calls += 1;
+      return {
+        content: JSON.stringify({
+          complexity: "simple",
+          intent: "look up the current time",
+          contextRelevance: "unrelated",
+        }),
+        usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+      };
+    });
+    const { env, events } = buildEnv(provider);
+    const out = await runIntentPhase(buildSafetyState("当前时间"), env);
+
+    expect(calls).toBe(0);
+    expect(out.intent.complexity).toBe("complex");
+    expect(out.intent.intent).toBe("当前时间");
+    expect(
+      events.some(
+        (e) =>
+          e.phase === "intent" &&
+          e.type === "progress" &&
+          (e.payload as { stage?: string }).stage === "fast-path" &&
+          (e.payload as { reason?: string }).reason === "strong-complex-marker",
+      ),
+    ).toBe(true);
+  });
+
+  test("fast-path 命中强 simple marker 时不调用 LLM，直接判 simple", async () => {
+    let calls = 0;
+    const provider = new StubProvider(async () => {
+      calls += 1;
+      return {
+        content: JSON.stringify({
+          complexity: "complex",
+          intent: "noop",
+          contextRelevance: "unrelated",
+        }),
+        usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+      };
+    });
+    const { env, events } = buildEnv(provider);
+    // STRONG_SIMPLE_MARKERS regex 3 命中"讲个"，长度 ≤ 40，无强 complex 信号 → fast-path 短路。
+    const out = await runIntentPhase(buildSafetyState("讲个笑话"), env);
+
+    expect(calls).toBe(0);
+    expect(out.intent.complexity).toBe("simple");
+    expect(out.intent.intent).toBe("讲个笑话");
+    expect(
+      events.some(
+        (e) =>
+          e.phase === "intent" &&
+          e.type === "progress" &&
+          (e.payload as { stage?: string }).stage === "fast-path" &&
+          (e.payload as { reason?: string }).reason === "strong-simple-short",
+      ),
+    ).toBe(true);
   });
 
   test("LLM 正确判 complex → 不重复 warning（守护只在 simple→complex 时触发）", async () => {
+    // 注意：URL 输入会被 fast-path 直接拦截，根本不会走到 LLM；
+    // 因此原 "LLM 判 complex" 语义无法用 URL 输入触发。改用一段长任务描述（无强 marker），
+    // 让 fast-path 不命中、LLM 真实被调用并返回 complex。
     const provider = new StubProvider(async () => ({
       content: JSON.stringify({
         complexity: "complex",
-        intent: "fetch bazel page",
+        intent: "deploy service to production",
         contextRelevance: "unrelated",
       }),
       usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
     }));
     const { env, events } = buildEnv(provider);
     await runIntentPhase(
-      buildSafetyState("总结一下 https://bazel.build/rules/lib/globals/module"),
+      buildSafetyState(
+        "请把刚才那个新版本部署到生产环境，并且通知所有相关人员，然后生成发布文档。",
+      ),
       env,
     );
 
@@ -598,6 +688,9 @@ describe("inferComplexityFallback + hasStrongComplexMarker (URL/路径/命令/�
   test.each([
     ["今天股价", "今天 A 股收盘点位"],
     ["实时天气", "现在北京的天气"],
+    ["当前时间", "当前时间"],
+    ["现在几点", "现在几点"],
+    ["current time", "current time"],
     ["latest news", "latest news on openai"],
   ] as const)("时效强信号：%s → complex", (_label, input) => {
     expect(hasStrongComplexMarker(input)).toBe(true);

@@ -102,6 +102,23 @@ tags: [example, security]
 规则 \`no-sensitive-output\` 提供，你无需在此重复声明，除非希望做增强或替换。
 `;
 
+// 框架 system prompt 默认全英文，靠这条 rule 兜底用户回复语言。
+// 必须无条件写入（不受 --no-examples 控制），否则中文用户首次 init 后会拿到英文回复。
+const RESPOND_IN_USER_LANGUAGE_RULE = `---
+name: respond-in-user-language
+description: Mirror the user's language in every reply (CN/EN auto)
+kind: rule
+type: rule
+scope: ["*"]
+---
+
+Respond in the same language as the latest user message.
+- If the user writes in Chinese, reply in Chinese.
+- If the user writes in English, reply in English.
+- Default to English when the language is ambiguous or mixed.
+- This rule is enforced for tool-use, direct-answer and fallback responses.
+`;
+
 const EXAMPLE_TOOL_MD = `---
 name: example-custom-tool
 description: 示例自定义工具描述符（可删除或按需修改）
@@ -165,7 +182,32 @@ const config: EngineConfig = {
     descriptorPaths: ['.tachu/rules', '.tachu/skills', '.tachu/tools', '.tachu/agents'],
     enableVectorIndexing: true,
   },
-  runtime: { planMode: false, maxConcurrency: 4, defaultTaskTimeoutMs: 30000, failFast: false },
+  runtime: {
+    planMode: false,
+    maxConcurrency: 4,
+    defaultTaskTimeoutMs: 30000,
+    failFast: false,
+    // Agentic 工具循环（tool-use 子流程）的执行约束。
+    toolLoop: {
+      maxSteps: 8,
+      parallelism: 4,
+      requireApprovalGlobal: false,
+      // 短任务路由（性能优化，按需开启）。
+      //
+      // 当本轮 tool-use 满足"工具数 ≤ maxToolNames 且 prompt 长度 ≤ maxPromptChars"
+      // 时，把能力路由从 high-reasoning 降级到 capability 指定的能力（默认
+      // fast-cheap）。典型效果："当前时间"这类单工具调用从 gpt-4o 切到
+      // gpt-4o-mini，单次往返从 5-6s 缩到 1-2s。
+      //
+      // 复杂任务（多工具组合 / 长 prompt）仍走默认 high-reasoning，质量不变。
+      shortTaskRoute: {
+        enabled: true,
+        capability: 'fast-cheap',
+        maxToolNames: 1,
+        maxPromptChars: 120,
+      },
+    },
+  },
   memory: {
     contextTokenLimit: 8000,
     compressionThreshold: 0.8,
@@ -184,6 +226,25 @@ const config: EngineConfig = {
       'system override',
       'reveal hidden prompt',
       'bypass safety',
+    ],
+    // run-shell 自动审批白名单（正则源串数组）。
+    //
+    // 命中条件（全部满足）才会跳过 onBeforeToolCall 审批回调：
+    //   1. 工具名为 run-shell
+    //   2. arguments.command 命中本数组中任一正则
+    //   3. arguments.args 为空（一旦带 args 风险面扩大，仍走人工审批）
+    //
+    // 默认覆盖一组纯只读命令；如需更严格的审批策略可清空数组，或按需扩充。
+    // 不要把含路径 / 通配符 / 重定向语义的命令加进来，那些应继续人工审批。
+    shellAutoApprovePatterns: [
+      '^date(\\b|$)',
+      '^pwd(\\b|$)',
+      '^whoami(\\b|$)',
+      '^hostname(\\b|$)',
+      '^uname(\\b|\\s)',
+      '^uptime(\\b|$)',
+      '^cal(\\b|\\s)',
+      '^printenv(\\b|\\s)',
     ],
   },
   models: {
@@ -353,6 +414,14 @@ export const initCommand = defineCommand({
     await writeFile(join(tachyDir, "tools", "README.md"), README_TOOLS, "utf8");
     await writeFile(join(tachyDir, "agents", "README.md"), README_AGENTS, "utf8");
     await writeFile(join(tachyDir, "sessions", ".gitkeep"), "", "utf8");
+
+    // 基础 rule：用户语言镜像。无条件写入（绕开 --no-examples），
+    // 因为框架 system prompt 全英文，靠这条 rule 兜底中/英文用户的回复语言体验。
+    await writeFile(
+      join(tachyDir, "rules", "respond-in-user-language.md"),
+      RESPOND_IN_USER_LANGUAGE_RULE,
+      "utf8",
+    );
 
     // 示例描述符（full 模板或未禁用）
     if (template === "full" || !noExamples) {

@@ -352,6 +352,61 @@ describe("OpenAIProviderAdapter", () => {
     expect(count).toBeGreaterThan(0);
     await expect(adapter.dispose()).resolves.toBeUndefined();
   });
+
+  it("exposes prompt_tokens_details.cached_tokens via usage.cachedPromptTokens", async () => {
+    const adapter = new OpenAIProviderAdapter({ apiKey: "test-key", timeoutMs: 100 });
+    (adapter as { client: unknown }).client = {
+      models: { list: async () => ({ data: [] }) },
+      chat: {
+        completions: {
+          create: async () => ({
+            choices: [
+              { finish_reason: "stop", message: { content: "ok" } },
+            ],
+            usage: {
+              prompt_tokens: 200,
+              completion_tokens: 5,
+              total_tokens: 205,
+              prompt_tokens_details: { cached_tokens: 60 },
+            },
+          }),
+        },
+      },
+    };
+    const response = await adapter.chat(
+      {
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: "hi" }],
+      },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
+    expect(response.usage.promptTokens).toBe(200);
+    expect(response.usage.completionTokens).toBe(5);
+    expect(response.usage.cachedPromptTokens).toBe(60);
+  });
+
+  it("omits cachedPromptTokens when prompt_tokens_details is absent or 0", async () => {
+    const adapter = new OpenAIProviderAdapter({ apiKey: "test-key", timeoutMs: 100 });
+    (adapter as { client: unknown }).client = {
+      models: { list: async () => ({ data: [] }) },
+      chat: {
+        completions: {
+          create: async () => ({
+            choices: [{ finish_reason: "stop", message: { content: "ok" } }],
+            usage: { prompt_tokens: 12, completion_tokens: 3, total_tokens: 15 },
+          }),
+        },
+      },
+    };
+    const response = await adapter.chat(
+      {
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: "hi" }],
+      },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
+    expect(response.usage.cachedPromptTokens).toBeUndefined();
+  });
 });
 
 describe("AnthropicProviderAdapter", () => {
@@ -407,8 +462,33 @@ describe("AnthropicProviderAdapter", () => {
     ]);
     expect(result.finishReason).toBe("tool_calls");
     expect(result.usage.promptTokens).toBe(15);
+    // Anthropic adapter 同时透传 cache_read_input_tokens 至 cachedPromptTokens 用于折扣展示
+    expect(result.usage.cachedPromptTokens).toBe(1);
     expect(capturedBody?.tool_choice).toEqual({ type: "tool", name: "search" });
     expect(capturedBody?.system).toBe("system rule");
+  });
+
+  it("omits cachedPromptTokens when cache_read_input_tokens is absent or 0", async () => {
+    const adapter = new AnthropicProviderAdapter({ apiKey: "test-key", timeoutMs: 100 });
+    (adapter as { client: unknown }).client = {
+      messages: {
+        create: async () => ({
+          content: [{ type: "text", text: "ok" }],
+          stop_reason: "end_turn",
+          usage: { input_tokens: 10, output_tokens: 4 },
+        }),
+        countTokens: async () => ({ input_tokens: 1 }),
+      },
+    };
+    const result = await adapter.chat(
+      {
+        model: "claude-3-5-sonnet-latest",
+        messages: [{ role: "user", content: "hi" }],
+      },
+      DEFAULT_ADAPTER_CALL_CONTEXT,
+    );
+    expect(result.usage.promptTokens).toBe(10);
+    expect(result.usage.cachedPromptTokens).toBeUndefined();
   });
 
   it("serializes assistant-with-toolCalls into Anthropic tool_use blocks on the wire", async () => {

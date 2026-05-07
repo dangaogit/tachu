@@ -39,6 +39,11 @@ export interface PhaseEnvironment {
     promptTokens: number;
     completionTokens: number;
     totalTokens: number;
+    /**
+     * Prompt caching 命中量（OpenAI `prompt_tokens_details.cached_tokens`
+     * / Anthropic `cache_read_input_tokens`）。可选；未命中时缺省。
+     */
+    cachedPromptTokens?: number;
   }) => void;
 }
 

@@ -419,14 +419,29 @@ export class OpenAIProviderAdapter implements ProviderAdapter {
       const content = extractContent(choice?.message?.content ?? "");
       const toolCalls = parseOpenAiToolCalls(choice?.message?.tool_calls);
       const finishReason = mapOpenAiFinishReason(choice?.finish_reason);
+      // OpenAI prompt caching：≥1024 token 的重复 prefix 命中后会在 usage
+      // 里多带 `prompt_tokens_details.cached_tokens`（cached 包含在 prompt_tokens 内）。
+      // 仅在 >0 时上报 cachedPromptTokens，便于 CLI / 账单按半价折扣展示。
+      const usageRaw = response.usage as
+        | {
+            prompt_tokens?: number;
+            completion_tokens?: number;
+            total_tokens?: number;
+            prompt_tokens_details?: { cached_tokens?: number };
+          }
+        | undefined;
+      const cachedPromptTokens = usageRaw?.prompt_tokens_details?.cached_tokens;
       return {
         content,
         ...(toolCalls ? { toolCalls } : {}),
         finishReason,
         usage: {
-          promptTokens: response.usage?.prompt_tokens ?? 0,
-          completionTokens: response.usage?.completion_tokens ?? 0,
-          totalTokens: response.usage?.total_tokens ?? 0,
+          promptTokens: usageRaw?.prompt_tokens ?? 0,
+          completionTokens: usageRaw?.completion_tokens ?? 0,
+          totalTokens: usageRaw?.total_tokens ?? 0,
+          ...(typeof cachedPromptTokens === "number" && cachedPromptTokens > 0
+            ? { cachedPromptTokens }
+            : {}),
         },
       };
     } catch (error) {

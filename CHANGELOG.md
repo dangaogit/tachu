@@ -5,6 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha.4] - 2026-05-07
+
+### Added
+
+#### `@tachu/extensions`
+
+- **`edit-file` tool** — 精确字符串替换，含唯一性校验、fuzzy 宽容匹配（行首空白差异）、`replaceAll` 批量替换；错误时返回 `matchCount` 辅助 LLM 调整 `oldString`
+- **`multi-edit` tool** — 在同一文件中原子地应用多处字符串替换；任一失败则全部回滚，不写磁盘
+- **`glob` tool** — 基于 `Bun.Glob` 的文件名模式查找，支持 `ignore` 排除、`maxResults` 截断
+- **`todo-write` / `todo-read` tool** — 会话级任务清单，持久化到 `.tachu/sessions/<id>/todos.json`；`merge=true` 按 id 合并，`false` 全量覆盖
+- **`git-status` tool** — `git status --porcelain=v2` 结构化输出，含分支、ahead/behind、staged/unstaged/untracked
+- **`git-diff` tool** — 支持 staged / ref 范围 / 指定文件，结构化 `FileDiff[]` 输出
+- **`git-log` tool** — 支持 limit/since/until/author/path 过滤，结构化 commit 列表
+- **`git-blame` tool** — `--porcelain` 格式逐行 author/commit 映射
+- **`git-show` tool** — 单 commit 元信息 + diff，支持 `maxBytes` 截断
+- **`git-branch` tool** — 本地/远端分支列表，含 upstream/ahead/behind
+- **`run-typecheck` tool** — 自动识别 `typecheck` script 或回退到 `bunx tsc --noEmit`，结构化错误列表（file/line/col/code/severity）
+- **`run-tests` tool** — 自动识别 `bun test` 或 `package.json test` script，结构化通过/失败/跳过数和失败用例详情
+- **`read-file` 升级** — 新增 `offset`/`limit` 分段读取、`withLineNumbers`（默认 true）6 位右对齐行号前缀；新增出参 `totalLines`/`hasMore`
+- **`apply-patch` 升级** — 上下文行宽容匹配（trim + ±3 行偏移容忍），减少 patch 因空白差异导致的 `VALIDATION_PATCH_CONFLICT`
+
+#### `@tachu/cli`
+
+- **授权持久化** — `ApprovalStore` JSONL 持久化（project 级 `.tachu/approvals.jsonl` + user 级 `~/.tachu/approvals.jsonl`）；`ApprovalMatcher` 支持 `any` / `argPattern` / `shellCommand` 三种匹配粒度；user 级路径通过 `new ApprovalStore(cwd, { userStoreDir })` 可注入，便于隔离测试
+- **审批提示升级** — 从 `y/N` 扩展为 `y/a/p/s/N`：`[a]` 始终允许工具（项目级）、`[p]` 允许此路径模式（项目级）、`[s]` 仅本 session 内允许；命中持久化授权时自动通过，不弹提示
+- **`tachu approval` 子命令组** — `list` / `revoke` / `clear` / `promote` / `add` / `export` / `import` 管理持久化授权记录
+
+#### `@tachu/core`
+
+- **`EngineConfig.intent` 可扩展字段** — `additionalComplexPatterns: string[]`（正则源串，编译后与内置 complex 规则取并集）、`fewShotExamples`（追加到 intent system prompt 末尾的 few-shot 示例）；业务层按领域注入，core 不内置任何领域知识
+- **`EngineConfig.toolUse` 可扩展字段** — `systemPromptSuffix: string`，追加到 tool-use system prompt 末尾的补充指令（如编码工作流指南），不污染 core
+
+### Changed
+
+#### `@tachu/core`
+
+- **`runtime.toolLoop.maxSteps` 默认值** 从 8 改为 25，适应复杂代码编写任务（探索→多文件改→typecheck→fix 循环）
+- **Intent phase — complex 信号拆分** — `STRONG_COMPLEX_MARKERS` 回归仅含真正普遍的信号（URL / 文件路径 / 反引号命令语法 / 实时数据）；原硬编码的命令名白名单（npm/bun/yarn 等）和领域词汇（package.json、dev script 等）从 core 撤出，改由 `config.intent.additionalComplexPatterns` 注入
+- **Tool-use system prompt 架构修正** — 撤回 `### Code editing workflow` 硬编码段（该段直接引用了 extensions 层的工具名，违反层间依赖）；改由 `config.toolUse.systemPromptSuffix` 在 CLI/business 层注入
+
+#### `@tachu/cli`
+
+- **`run-shell` 升级** — 默认 env 白名单扩展（含 `NODE_ENV` / `BUN_INSTALL` / `PNPM_HOME`）；session 级持久 cwd（同 session 内 cd 生效）；内置危险命令黑名单（`rm -rf /`、`| sh` 等）；`TACHU_SHELL_ENV_ALLOWLIST` / `TACHU_SHELL_DENY_PATTERNS` 环境变量可配置
+- **工具输出截断提示升级** — `read-file` 截断时给出 `offset/limit` 续读提示；其他工具给出缩小请求范围建议
+- **`tachu.config.ts` 参考配置更新** — 通过 `intent.additionalComplexPatterns` 和 `toolUse.systemPromptSuffix` 注入编码 Agent 专用规则，保持 core 边界清晰
+- **`tachu init` 模板更新** — 生成的 `tachu.config.ts` 含 `intent` / `toolUse` 注释示例，引导用户按领域扩展而非直接修改 core
+
 ## [1.0.0-alpha.3] - 2026-05-07
 
 ### Changed

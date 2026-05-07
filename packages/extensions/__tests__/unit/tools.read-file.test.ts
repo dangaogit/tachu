@@ -17,6 +17,13 @@ describe("read-file executor", () => {
 
   it("reads file content", async () => {
     const result = await readFileExecutor({ path: "a.txt" }, createToolContext(root));
+    // withLineNumbers 默认 true，行号前缀格式为 "     1|content"
+    expect(result.content).toContain("hello");
+    expect(result.bytes).toBe(5);
+  });
+
+  it("reads file content without line numbers", async () => {
+    const result = await readFileExecutor({ path: "a.txt", withLineNumbers: false }, createToolContext(root));
     expect(result.content).toBe("hello");
     expect(result.bytes).toBe(5);
   });

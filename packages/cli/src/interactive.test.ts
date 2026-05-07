@@ -263,10 +263,19 @@ describe("runInteractiveChat slash 命令", () => {
     await engine.dispose();
   });
 
-  it("未知命令提示帮助", async () => {
+  it("未识别的 / 前缀按普通消息交给引擎", async () => {
     const { store, engine } = await makeEnv();
     const out = await runWithInput(["/unknowncmd\n", "/exit\n"], engine, store);
-    expect(out).toContain("未知命令");
+    expect(out).not.toContain("未知命令");
+    expect(out).toContain("mock:/unknowncmd");
+    await engine.dispose();
+  });
+
+  it("/tmp/... 等形式不被误判为仅提示未知命令", async () => {
+    const { store, engine } = await makeEnv();
+    const out = await runWithInput(["/tmp/tachutest\n", "/exit\n"], engine, store);
+    expect(out).not.toContain("未知命令");
+    expect(out).toContain("mock:/tmp/tachutest");
     await engine.dispose();
   });
 

@@ -18,6 +18,18 @@ import * as rlp from "node:readline/promises";
 import { buildApprovalPrompt } from "./approval-prompt";
 import { setInteractivePrompter } from "./shared-prompter";
 import type { ToolApprovalRequest } from "@tachu/core";
+import type { ApprovalStore } from "./approval-store";
+
+/** 空 store：隔离真实 ~/.tachu/approvals.jsonl，确保 e2e 测试不受用户持久化数据影响 */
+const emptyStore = {
+  find: async () => null,
+  append: async (_r: unknown) => {},
+  appendUser: async (_r: unknown) => {},
+  list: async () => [],
+  revoke: async () => false,
+  clear: async () => 0,
+  promote: async () => false,
+} as unknown as ApprovalStore;
 
 const baseRequest: ToolApprovalRequest = {
   tool: "write-file",
@@ -49,7 +61,7 @@ describe("approval × 主循环 readline 集成", () => {
     });
     setInteractivePrompter((q) => rl.question(q));
 
-    const hook = buildApprovalPrompt({ output: stderr });
+    const hook = buildApprovalPrompt({ output: stderr, store: emptyStore });
 
     // 模拟用户输入序列：第 1 行 you>、审批 y、第 2 行 you>
     setTimeout(() => input.write("write cat ascii\n"), 10);
@@ -80,7 +92,7 @@ describe("approval × 主循环 readline 集成", () => {
     });
     setInteractivePrompter((q) => rl.question(q));
 
-    const hook = buildApprovalPrompt({ output: stderr });
+    const hook = buildApprovalPrompt({ output: stderr, store: emptyStore });
 
     setTimeout(() => input.write("do dangerous thing\n"), 10);
     setTimeout(() => input.write("n\n"), 40);
@@ -110,7 +122,7 @@ describe("approval × 主循环 readline 集成", () => {
     });
     setInteractivePrompter((q) => rl.question(q));
 
-    const hook = buildApprovalPrompt({ output: stderr });
+    const hook = buildApprovalPrompt({ output: stderr, store: emptyStore });
 
     setTimeout(() => input.write("hi\n"), 10);
     setTimeout(() => input.write("y\n"), 40);

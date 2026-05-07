@@ -1,5 +1,7 @@
 import type { Interface as ReadlineInterface } from "node:readline";
 import { createInterface } from "node:readline";
+import { randomUUID } from "node:crypto";
+import { dirname } from "node:path";
 import type {
   ToolApprovalDecision,
   ToolApprovalRequest,
@@ -7,6 +9,8 @@ import type {
 import { colorize } from "../renderer/color";
 import { isStderrTTY, isStdinTTY } from "../utils/tty";
 import { getInteractivePrompter, type InteractivePrompter } from "./shared-prompter";
+import { ApprovalStore } from "./approval-store";
+import type { ApprovalRecord } from "./approval-store";
 
 /**
  * CLI 审批交互构建选项。
@@ -48,12 +52,21 @@ export interface BuildApprovalPromptOptions {
    * 等一次性执行场景）。
    */
   ask?: InteractivePrompter;
+  /**
+   * 持久化授权 store，用于查询和写入 approved 记录。
+   * 未指定时惰性创建 `new ApprovalStore(process.cwd())`。
+   */
+  store?: ApprovalStore;
+  /**
+   * 当前 session ID，用于 session 级授权匹配。
+   */
+  currentSessionId?: string;
 }
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 
 /**
- * 构建一个工具审批回调，交互模式下会在 stderr 渲染提示并从 stdin 读取 `y/N`。
+ * 构建一个工具审批回调，交互模式下会在 stderr 渲染提示并从 stdin 读取选项。
  *
  * 非交互模式（stdin/stderr 非 TTY 或 `NO_TTY=1`）下默认拒绝，避免静默批准破坏性操作。
  */
@@ -73,24 +86,35 @@ export function buildApprovalPrompt(
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const input = options.input ?? process.stdin;
   const output = options.output ?? process.stderr;
+  const store = options.store ?? new ApprovalStore(process.cwd());
+  const currentSessionId = options.currentSessionId;
 
   return async (request: ToolApprovalRequest): Promise<ToolApprovalDecision> => {
     if (autoApproveEnv) {
       return { type: "approve" };
     }
 
+    // 先查持久化授权 store
+    const storedRecord = await store.find(
+      request.tool,
+      request.arguments as Record<string, unknown>,
+      currentSessionId,
+    );
+    if (storedRecord !== null) {
+      return { type: "approve" };
+    }
+
     // 共享 prompter（由交互式主循环注册，复用其 readline）路径：
-    // 即使 options 没显式传 ask，也尝试全局注册的 prompter，保证 chat 循环不受影响。
     const sharedPrompter = options.ask ?? getInteractivePrompter();
     if (sharedPrompter) {
-      return askViaSharedPrompter({ request, output, sharedPrompter });
+      return askViaSharedPrompter({ request, output, sharedPrompter, store, currentSessionId });
     }
 
     const interactive = stdinTty && stderrTty && !noTtyEnv;
     if (!interactive) {
       return defaultNonInteractive;
     }
-    return askYesNo({ request, input, output, timeoutMs });
+    return askYesNo({ request, input, output, timeoutMs, store, currentSessionId });
   };
 }
 
@@ -99,25 +123,23 @@ interface AskYesNoArgs {
   input: NodeJS.ReadableStream;
   output: NodeJS.WritableStream;
   timeoutMs: number;
+  store: ApprovalStore;
+  currentSessionId: string | undefined;
 }
 
 interface AskViaSharedArgs {
   request: ToolApprovalRequest;
   output: NodeJS.WritableStream;
   sharedPrompter: InteractivePrompter;
+  store: ApprovalStore;
+  currentSessionId: string | undefined;
 }
 
 /**
  * 通过外部注入的 prompter（如主循环的 `rl.question`）读取审批决策。
- *
- * 相较于 {@link askYesNo} 的好处：不会触发 `rl.close()`，不会 pause `process.stdin`，
- * 因此不会拖垮交互式主循环。
  */
 async function askViaSharedPrompter(args: AskViaSharedArgs): Promise<ToolApprovalDecision> {
-  const { request, output, sharedPrompter } = args;
-  // 先把"工具/副作用/触发原因/参数"等多行静态信息写到 stderr（避免 readline
-  // 自动刷新 line 时覆盖这些非可编辑内容），最后把单行的 "是否执行? [y/N] "
-  // 交给 prompter 作为 prompt —— 它负责渲染光标、回显用户输入。
+  const { request, output, sharedPrompter, store, currentSessionId } = args;
   const { info, question } = formatApprovalPrompt(request);
   output.write(info);
 
@@ -130,17 +152,16 @@ async function askViaSharedPrompter(args: AskViaSharedArgs): Promise<ToolApprova
       reason: `审批读取失败：${(err as Error)?.message ?? String(err)}`,
     };
   }
-  return parseAnswer(answer);
+  return parseAndPersist(answer, request, store, currentSessionId);
 }
 
 /**
- * 输出一条 approval 提示（stderr），从 stdin 读取单行；仅接受 `y`/`yes` 为批准，其它均视为拒绝。
+ * 输出一条 approval 提示（stderr），从 stdin 读取单行。
  *
- * ⚠️ 只在没有共享 prompter 的一次性执行场景（`tachu run`）下使用。对于交互式主循环，
- * 使用 {@link askViaSharedPrompter}，否则 `rl.close()` 会 pause 主循环的 stdin。
+ * ⚠️ 只在没有共享 prompter 的一次性执行场景（`tachu run`）下使用。
  */
 async function askYesNo(args: AskYesNoArgs): Promise<ToolApprovalDecision> {
-  const { request, input, output, timeoutMs } = args;
+  const { request, input, output, timeoutMs, store, currentSessionId } = args;
   const { info, question } = formatApprovalPrompt(request);
   output.write(info + question);
 
@@ -159,13 +180,10 @@ async function askYesNo(args: AskYesNoArgs): Promise<ToolApprovalDecision> {
       rl.off("line", onLine);
       rl.off("close", onClose);
       rl.close();
-      // Node `Interface.close()` 会调用 `this.pause()` → `input.pause()`，
-      // 对 `tachu run` 的一次性流程没有副作用；但如果用户换成了共享 prompter
-      // 外层循环，请改走 askViaSharedPrompter 路径，而不是在这里 resume 试图补救。
       resolve(decision);
     };
     const onLine = (line: string): void => {
-      finish(parseAnswer(line));
+      void parseAndPersist(line, request, store, currentSessionId).then(finish);
     };
     const onClose = (): void => {
       finish({ type: "deny", reason: "审批输入流已关闭" });
@@ -195,15 +213,75 @@ function formatApprovalPrompt(request: ToolApprovalRequest): { info: string; que
     `  副作用: ${sideEffect}\n` +
     `  触发原因: ${trigger}\n` +
     argsLine;
-  const question = `  是否执行? [y/N] `;
+  const question =
+    `是否执行?\n` +
+    `  [y] 仅本次\n` +
+    `  [a] 始终允许此工具（项目级）\n` +
+    `  [p] 允许此路径模式（项目级，仅适用于有 path 参数的工具）\n` +
+    `  [s] 仅本 session 内允许\n` +
+    `  [N] 拒绝\n` +
+    `请输入 y/a/p/s/N: `;
   return { info, question };
 }
 
-function parseAnswer(line: string): ToolApprovalDecision {
+async function parseAndPersist(
+  line: string,
+  request: ToolApprovalRequest,
+  store: ApprovalStore,
+  currentSessionId: string | undefined,
+): Promise<ToolApprovalDecision> {
   const answer = line.trim().toLowerCase();
+
   if (answer === "y" || answer === "yes") {
     return { type: "approve" };
   }
+
+  if (answer === "a") {
+    const record: ApprovalRecord = {
+      id: randomUUID(),
+      scope: "project",
+      tool: request.tool,
+      match: { kind: "any" },
+      createdAt: Date.now(),
+    };
+    await store.append(record);
+    return { type: "approve" };
+  }
+
+  if (answer === "p") {
+    const args = request.arguments as Record<string, unknown>;
+    const pathValue = typeof args.path === "string" ? args.path : undefined;
+    let match: ApprovalRecord["match"];
+    if (pathValue !== undefined) {
+      const dir = dirname(pathValue);
+      match = { kind: "argPattern", field: "path", pattern: `${dir}/**` };
+    } else {
+      match = { kind: "any" };
+    }
+    const record: ApprovalRecord = {
+      id: randomUUID(),
+      scope: "project",
+      tool: request.tool,
+      match,
+      createdAt: Date.now(),
+    };
+    await store.append(record);
+    return { type: "approve" };
+  }
+
+  if (answer === "s") {
+    const record: ApprovalRecord = {
+      id: randomUUID(),
+      scope: "project",
+      tool: request.tool,
+      match: { kind: "any" },
+      createdAt: Date.now(),
+      ...(currentSessionId !== undefined ? { sessionId: currentSessionId } : {}),
+    };
+    await store.append(record);
+    return { type: "approve" };
+  }
+
   return { type: "deny", reason: "用户在审批提示中选择拒绝" };
 }
 

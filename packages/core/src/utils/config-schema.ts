@@ -19,7 +19,7 @@ const DEFAULT_CONFIG: EngineConfig = {
     defaultTaskTimeoutMs: 30_000,
     failFast: false,
     toolLoop: {
-      maxSteps: 8,
+      maxSteps: 25,
       parallelism: 4,
       requireApprovalGlobal: false,
     },
@@ -449,7 +449,7 @@ export const validateEngineConfig = (raw: unknown): EngineConfig => {
           maxSteps: asNumber(
             raw.maxSteps,
             "runtime.toolLoop.maxSteps",
-            fallback.maxSteps ?? 8,
+            fallback.maxSteps ?? 25,
             { min: 1, max: 64 },
           ),
           parallelism: asNumber(
@@ -626,6 +626,36 @@ export const validateEngineConfig = (raw: unknown): EngineConfig => {
         }
         return list;
       })(),
+      ...(safety.shellEnvAllowlist !== undefined
+        ? {
+            shellEnvAllowlist: asStringArray(
+              safety.shellEnvAllowlist,
+              "safety.shellEnvAllowlist",
+              [],
+            ),
+          }
+        : {}),
+      ...(safety.shellDenyPatterns !== undefined
+        ? {
+            shellDenyPatterns: ((): string[] => {
+              const list = asStringArray(
+                safety.shellDenyPatterns,
+                "safety.shellDenyPatterns",
+                [],
+              );
+              for (const source of list) {
+                try {
+                  new RegExp(source);
+                } catch (err) {
+                  throw ValidationError.invalidConfig(
+                    `safety.shellDenyPatterns 包含非法正则 "${source}"：${(err as Error).message}`,
+                  );
+                }
+              }
+              return list;
+            })(),
+          }
+        : {}),
     },
     models: {
       capabilityMapping: parseCapabilityMapping(
@@ -668,6 +698,68 @@ export const validateEngineConfig = (raw: unknown): EngineConfig => {
           ? hooks.failureBehavior
           : DEFAULT_CONFIG.hooks.failureBehavior,
     },
+    // intent 可选：不存在时省略，business 层按需注入
+    ...(raw !== null && typeof raw === "object" && !Array.isArray(raw) && "intent" in raw && raw.intent !== undefined
+      ? {
+          intent: (() => {
+            const intentRaw = asRecord((raw as Record<string, unknown>).intent, "intent");
+            const patterns = intentRaw.additionalComplexPatterns !== undefined
+              ? asStringArray(intentRaw.additionalComplexPatterns, "intent.additionalComplexPatterns", [])
+              : undefined;
+            if (patterns) {
+              for (const source of patterns) {
+                try {
+                  new RegExp(source, "ui");
+                } catch (err) {
+                  throw ValidationError.invalidConfig(
+                    `intent.additionalComplexPatterns 包含非法正则 "${source}"：${(err as Error).message}`,
+                  );
+                }
+              }
+            }
+            const rawFewShots = intentRaw.fewShotExamples;
+            let fewShotExamples: Array<{ input: string; complexity: "simple" | "complex"; intent: string }> | undefined;
+            if (rawFewShots !== undefined) {
+              if (!Array.isArray(rawFewShots)) {
+                throw ValidationError.invalidConfig("intent.fewShotExamples 必须是数组");
+              }
+              fewShotExamples = (rawFewShots as unknown[]).map((item, idx) => {
+                const obj = asRecord(item, `intent.fewShotExamples[${idx}]`);
+                const input = asString(obj.input, `intent.fewShotExamples[${idx}].input`, "");
+                const complexity = obj.complexity === "simple" || obj.complexity === "complex"
+                  ? obj.complexity
+                  : (() => { throw ValidationError.invalidConfig(`intent.fewShotExamples[${idx}].complexity 必须是 "simple" 或 "complex"`); })();
+                const intentText = asString(obj.intent, `intent.fewShotExamples[${idx}].intent`, "");
+                if (!input.trim() || !intentText.trim()) {
+                  throw ValidationError.invalidConfig(`intent.fewShotExamples[${idx}].input / intent 不能为空`);
+                }
+                return { input, complexity, intent: intentText };
+              });
+            }
+            const result: NonNullable<EngineConfig["intent"]> = {};
+            if (patterns !== undefined) result.additionalComplexPatterns = patterns;
+            if (fewShotExamples !== undefined) result.fewShotExamples = fewShotExamples;
+            return result;
+          })(),
+        }
+      : {}),
+    // toolUse 可选
+    ...(raw !== null && typeof raw === "object" && !Array.isArray(raw) && "toolUse" in raw && (raw as Record<string, unknown>).toolUse !== undefined
+      ? {
+          toolUse: (() => {
+            const toolUseRaw = asRecord((raw as Record<string, unknown>).toolUse, "toolUse");
+            const result: NonNullable<EngineConfig["toolUse"]> = {};
+            if (toolUseRaw.systemPromptSuffix !== undefined) {
+              result.systemPromptSuffix = asString(
+                toolUseRaw.systemPromptSuffix,
+                "toolUse.systemPromptSuffix",
+                "",
+              );
+            }
+            return result;
+          })(),
+        }
+      : {}),
   };
 };
 

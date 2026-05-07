@@ -104,10 +104,11 @@ export interface ToolUseInput {
 /**
  * 单次 Agentic Loop 调用 LLM 的超时（毫秒）。
  *
- * 比 direct-answer 的 60s 略宽：Agentic 任务通常需要模型做更多的"工具规划"
- * 思考。实际生效还受 `ctx.executionContext.budget.maxWallTimeMs` 约束。
+ * 宽于 direct-answer 的 60s，并与 OpenAI/Anthropic Provider 默认请求超时（120s）
+ * 对齐，避免模型在 tool 规划阶段被 Provider 层先行掐断。实际生效还受
+ * `ctx.executionContext.budget.maxWallTimeMs` 约束。
  */
-const TOOL_USE_LLM_TIMEOUT_MS = 90_000;
+const TOOL_USE_LLM_TIMEOUT_MS = 120_000;
 
 /**
  * 单次工具调用本身的最长等待（毫秒）。
@@ -126,7 +127,7 @@ const TOOL_USE_TOOL_TIMEOUT_MS = 60_000;
  *   2. 强调 **最终回复必须是自然语言 + Markdown**，不能是 JSON 或工具调用壳
  *   3. 强调工具失败时要自行修复或降级，不要反复请求同一失败工具
  */
-const TOOL_USE_SYSTEM_PROMPT = `You are the agentic tool-loop sub-flow of the Tachu engine (built-in sub-flow: tool-use).
+const TOOL_USE_SYSTEM_PROMPT_BASE = `You are the agentic tool-loop sub-flow of the Tachu engine (built-in sub-flow: tool-use).
 
 ### How to work
 - You may call the provided tools across multiple turns via function calling. After each call, the system returns the real tool output to you as a \`tool\` role message.
@@ -146,6 +147,18 @@ const TOOL_USE_SYSTEM_PROMPT = `You are the agentic tool-loop sub-flow of the Ta
 - The system caps the number of loop steps; exceeding it raises an error. Stop calling tools as soon as you are ready to answer.
 
 Respond in the same language as the latest user message; default to English when ambiguous.`;
+
+/**
+ * 动态构建 tool-use system prompt。
+ *
+ * 若 config 注入了业务补充指令（`config.toolUse.systemPromptSuffix`），追加在 core prompt 之后。
+ * 典型用途：编码 Agent 的 workflow 指南（"改前先读 / 改后 typecheck"），不污染 core。
+ */
+const buildToolUseSystemPrompt = (config: import("../../types").EngineConfig): string => {
+  const suffix = config.toolUse?.systemPromptSuffix;
+  if (!suffix || suffix.trim().length === 0) return TOOL_USE_SYSTEM_PROMPT_BASE;
+  return `${TOOL_USE_SYSTEM_PROMPT_BASE}\n\n${suffix.trim()}`;
+};
 
 /**
  * `tool-use` Sub-flow 对话历史中最多保留的近 N 条历史。
@@ -260,7 +273,7 @@ const buildInitialMessages = (
 ): Message[] => {
   if (input.toolNames && input.toolNames.length > 0) {
     const messages: Message[] = [
-      { role: "system", content: TOOL_USE_SYSTEM_PROMPT },
+      { role: "system", content: buildToolUseSystemPrompt(ctx.config)},
       { role: "user", content: input.prompt },
     ];
     if (input.hint && input.hint.length > 0) {
@@ -273,10 +286,10 @@ const buildInitialMessages = (
   const messages: Message[] = hasSystem
     ? [
         ...base.filter((m) => m.role === "system"),
-        { role: "system", content: TOOL_USE_SYSTEM_PROMPT },
+        { role: "system", content: buildToolUseSystemPrompt(ctx.config)},
         ...base.filter((m) => m.role !== "system"),
       ]
-    : [{ role: "system", content: TOOL_USE_SYSTEM_PROMPT }, ...base];
+    : [{ role: "system", content: buildToolUseSystemPrompt(ctx.config)}, ...base];
   if (input.hint && input.hint.length > 0) {
     messages.push({ role: "system", content: `补充指令（来自宿主）：${input.hint}` });
   }
@@ -290,7 +303,7 @@ const buildFallbackMessages = async (
   input: ToolUseInput,
   ctx: ToolUseContext,
 ): Promise<Message[]> => {
-  const messages: Message[] = [{ role: "system", content: TOOL_USE_SYSTEM_PROMPT }];
+  const messages: Message[] = [{ role: "system", content: buildToolUseSystemPrompt(ctx.config)}];
   try {
     const window = await ctx.memorySystem.load(ctx.sessionId, ctx.adapterContext);
     const history = window.entries
@@ -387,10 +400,13 @@ const MAX_TOOL_OUTPUT_CHARS = 16 * 1024;
  * 截断提示同时给出"完整长度"，让 LLM 判断是否有必要换个更窄的工具重新请求（例如
  * `fetch-url` 之后再调一个支持 `offset` 的工具）。
  */
-const clipToolOutputForLlm = (text: string): string => {
+const clipToolOutputForLlm = (text: string, toolName?: string): string => {
   if (text.length <= MAX_TOOL_OUTPUT_CHARS) return text;
   const head = text.slice(0, MAX_TOOL_OUTPUT_CHARS);
-  return `${head}\n\n... [工具输出已截断，完整长度 ${text.length} 字符]`;
+  const hint = toolName === "read-file"
+    ? `\n\n... [输出已截断，完整长度 ${text.length} 字符。使用 read-file 并携带 offset/limit 参数读取后续内容]`
+    : `\n\n... [输出已截断，完整长度 ${text.length} 字符。如需完整内容，请缩小请求范围或分段读取]`;
+  return head + hint;
 };
 
 /**
@@ -402,7 +418,7 @@ const clipToolOutputForLlm = (text: string): string => {
  *
  * 所有分支统一经过 {@link clipToolOutputForLlm} 的字符上限兜底。
  */
-const serializeToolOutput = (output: unknown): string => {
+const serializeToolOutput = (output: unknown, toolName?: string): string => {
   let raw: string;
   if (typeof output === "string") {
     raw = output;
@@ -415,7 +431,7 @@ const serializeToolOutput = (output: unknown): string => {
       raw = String(output);
     }
   }
-  return clipToolOutputForLlm(raw);
+  return clipToolOutputForLlm(raw, toolName);
 };
 
 interface ExecutedToolRecord {
@@ -630,7 +646,7 @@ const executeSingleToolCall = async (
   try {
     const output = await ctx.taskExecutor(toolTask, toolCtx, toolSignal);
     const durationMs = Date.now() - startedAt;
-    const content = serializeToolOutput(output);
+    const content = serializeToolOutput(output, call.name);
     ctx.onToolLoopEvent?.({
       type: "tool-call-end",
       callId: call.id,
@@ -731,7 +747,7 @@ const resolveToolLoopLimits = (
 ): { maxSteps: number; parallelism: number } => {
   const toolLoop = config.runtime.toolLoop ?? {};
   return {
-    maxSteps: toolLoop.maxSteps ?? 8,
+    maxSteps: toolLoop.maxSteps ?? 25,
     parallelism: toolLoop.parallelism ?? 4,
   };
 };
@@ -787,7 +803,7 @@ const resolveToolDefinitions = (input: ToolUseInput, ctx: ToolUseContext): ToolD
  * 执行 Agentic Loop：LLM 思考 → 工具调用 → 观察结果 → ... → 最终文本回复。
  *
  * 约束：
- *   - 最多 `config.runtime.toolLoop.maxSteps` 轮（默认 8）
+ *   - 最多 `config.runtime.toolLoop.maxSteps` 轮（默认 25）
  *   - 单轮多工具并发上限 `config.runtime.toolLoop.parallelism`（默认 4）
  *   - 工具不存在时不直接失败，而是把错误作为 tool message 回给 LLM，让它自己修复
  *   - 工具执行失败同理——不中止整条 loop；让 LLM 决定下一步
@@ -970,7 +986,7 @@ export const executeToolUse = async (
 export const TOOL_USE_CONSTANTS = {
   LLM_TIMEOUT_MS: TOOL_USE_LLM_TIMEOUT_MS,
   TOOL_TIMEOUT_MS: TOOL_USE_TOOL_TIMEOUT_MS,
-  SYSTEM_PROMPT: TOOL_USE_SYSTEM_PROMPT,
+  SYSTEM_PROMPT_BASE: TOOL_USE_SYSTEM_PROMPT_BASE,
   HISTORY_LIMIT: TOOL_USE_HISTORY_LIMIT,
   MAX_TOOL_OUTPUT_CHARS,
 } as const;

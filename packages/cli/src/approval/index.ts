@@ -7,3 +7,9 @@ export {
   setInteractivePrompter,
   type InteractivePrompter,
 } from "./shared-prompter";
+export {
+  ApprovalStore,
+  type ApprovalMatchKind,
+  type ApprovalRecord,
+} from "./approval-store";
+export { matchesRecord } from "./approval-matcher";

@@ -26,7 +26,7 @@ Tachu 以 Bun 原生 TypeScript Monorepo 形式发布，包含三个包：零依
 
 ## 项目状态（Project Status）
 
-**当前发布版本：** `1.0.0-alpha.2`（`alpha` dist-tag）
+**当前发布版本：** `1.0.0-alpha.4`（`alpha` dist-tag）
 
 这是一次**架构骨架**发布——基础设施基本就绪，但几个依赖 LLM 的阶段仍是占位实现。下表是唯一的事实来源；README 其他位置的任何声称都必须能在这张表里找到对应。
 
@@ -227,7 +227,7 @@ bun add -g @tachu/cli@alpha
 安装完成后验证：
 
 ```bash
-tachu --version   # 预期输出 1.0.0-alpha.2 或更新
+tachu --version   # 预期输出 1.0.0-alpha.4 或更新
 ```
 
 ---
@@ -929,7 +929,24 @@ Tachu 保证 **用户看到的每一次响应都是可读的自然语言答复**
 
 Tachu 按 `1.0.0-alpha.n` → `1.0.0-beta.n` → `1.0.0` 三条通道演进。下面每个里程碑都对应真实、可发布、有测试的交付物，不是愿望清单。
 
-### 1.0.0-alpha.2 —— 适配器调用上下文（当前）
+### 1.0.0-alpha.4 —— 代码编写能力 + 架构边界修正（当前）
+
+- [x] `@tachu/extensions` 新增 14 个工具：`edit-file`、`multi-edit`、`glob`、`todo-write/read`、`git-status/diff/log/blame/show/branch`、`run-typecheck`、`run-tests`
+- [x] `read-file` 新增 `offset`/`limit` 分段读取、`withLineNumbers`（默认开启）、`totalLines`/`hasMore`
+- [x] `apply-patch` fuzzy 上下文匹配（trim + ±3 行偏移容忍）
+- [x] `run-shell` 扩展 env 白名单、session 级持久 cwd、内置危险命令黑名单
+- [x] 授权持久化：`ApprovalStore` JSONL（project + user 作用域）、`y/a/p/s/N` 提示、`tachu approval` 子命令组
+- [x] `EngineConfig.intent.additionalComplexPatterns` / `fewShotExamples` —— 业务层注入领域特定 complex 信号；core 不再内置任何领域知识
+- [x] `EngineConfig.toolUse.systemPromptSuffix` —— 领域工作流指令（如编码指南）在 CLI 层注入，不硬编码于 core
+- [x] `toolLoop.maxSteps` 默认值 8 → 25
+
+### 1.0.0-alpha.3 —— Shell 自动审批、shortTaskRoute、提示词优化
+
+- [x] `safety.shellAutoApprovePatterns` 按配置自动审批匹配的 shell 命令
+- [x] `toolLoop.shortTaskRoute` 短单工具循环降级到 `fast-cheap` 能力
+- [x] Intent 阶段强 simple / 强 complex 快速路径
+
+### 1.0.0-alpha.2 —— 适配器调用上下文
 
 - [x] `ProviderAdapter` / `VectorStore` / `MemorySystem` 接入 `AdapterCallContext`；引擎与各阶段下传执行上下文（trace；可选租户 / 作用域标识）。
 

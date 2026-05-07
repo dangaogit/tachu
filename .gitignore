@@ -64,3 +64,6 @@ packages/web-fetch-server/coverage/
 packages/web-fetch-server/.ms-playwright/
 
 reports
+
+# ───────── Tachu approval store ─────────
+.tachu/approvals.jsonl

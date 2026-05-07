@@ -24,14 +24,17 @@ function out(sink: SlashSink, text: string, color?: Color): void {
   sink.emit(color ? colorize(text, color) : text);
 }
 
+/** 内置斜杠命令的处理结果。`passthrough`：非内置命令，整行应作为普通用户消息交给引擎。 */
+export type SlashCommandResult = "exit" | "continue" | "passthrough";
+
 /**
- * 处理单行 `/command ...`，返回是否退出主循环。
+ * 处理单行 `/command ...`，返回是否退出主循环；非内置命令返回 `passthrough`。
  */
 export async function executeSlashCommand(
   line: string,
   ctx: SlashContext,
   sink: SlashSink,
-): Promise<"exit" | "continue"> {
+): Promise<SlashCommandResult> {
   const parts = line.slice(1).trim().split(/\s+/);
   const cmd = parts[0]?.toLowerCase() ?? "";
   const { sessionHolder, store, memorySystem, messageCountFor, loadHistory, saveSession } =
@@ -164,8 +167,7 @@ export async function executeSlashCommand(
     }
 
     default: {
-      out(sink, `未知命令：/${cmd}。输入 /help 查看帮助。\n`, "yellow");
-      return "continue";
+      return "passthrough";
     }
   }
 }

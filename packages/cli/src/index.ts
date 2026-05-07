@@ -6,6 +6,7 @@ import { chatCommand } from "./commands/chat";
 import { initCommand } from "./commands/init";
 import { runCommand } from "./commands/run";
 import { sessionCommand } from "./commands/session";
+import { approvalCommand } from "./commands/approval";
 
 const resolveVersion = (): string => {
   // 运行期从上级目录的 package.json 读版本号，确保 CLI 输出始终与发布版本一致。
@@ -54,6 +55,7 @@ const main = defineCommand({
     run: runCommand,
     chat: chatCommand,
     session: sessionCommand,
+    approval: approvalCommand,
   },
 });
 

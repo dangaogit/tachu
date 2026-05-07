@@ -675,14 +675,24 @@ describe("inferComplexityFallback + hasStrongComplexMarker (URL/路径/命令/�
   });
 
   test.each([
-    ["中文 运行 git", "运行 git log --oneline"],
-    ["中文 执行 bun test", "请执行 bun test"],
-    ["英文 run npm", "run npm install"],
+    ["反引号命令中文", "运行 `git log --oneline`"],
+    ["反引号命令英文", "run `npm install`"],
+    ["反引号执行", "请执行 `bun test`"],
     ["读取日志", "读取一下日志"],
     ["list directory", "list the directory"],
   ] as const)("命令/动作强信号：%s → complex", (_label, input) => {
     expect(hasStrongComplexMarker(input)).toBe(true);
     expect(inferComplexityFallback(input)).toBe("complex");
+  });
+
+  test("不带反引号的具名命令（npm/bun）不再由 core 内置规则命中，需业务层注入 additionalComplexPatterns", () => {
+    // 这些在 core 中不命中是预期行为——具体命令名是领域知识，由 CLI config 注入
+    expect(hasStrongComplexMarker("运行 git log --oneline")).toBe(false);
+    expect(hasStrongComplexMarker("run npm install")).toBe(false);
+    expect(hasStrongComplexMarker("请执行 bun test")).toBe(false);
+    // 但通过 additionalPatterns 注入后会命中
+    const patterns = [/\b(?:run|exec|execute)\s+`?(?:git|npm|bun|yarn)\b/i];
+    expect(hasStrongComplexMarker("run npm install", patterns)).toBe(true);
   });
 
   test.each([
@@ -700,5 +710,36 @@ describe("inferComplexityFallback + hasStrongComplexMarker (URL/路径/命令/�
   test("纯知识问答即便含“总结/翻译”也保持 simple（无 URL/路径/命令时）", () => {
     expect(inferComplexityFallback("总结一下冒泡排序的思想")).toBe("simple");
     expect(inferComplexityFallback("翻译一下 hello world")).toBe("simple");
+  });
+});
+
+describe("hasStrongComplexMarker — additionalPatterns 注入（业务层扩展验证）", () => {
+  const { hasStrongComplexMarker, inferComplexityFallback } = intentInternals;
+
+  test("不注入 additionalPatterns 时领域词汇不命中（core 边界正确）", () => {
+    expect(hasStrongComplexMarker("在根目录增加启动脚本")).toBe(false);
+    expect(hasStrongComplexMarker("增加 react-query 依赖")).toBe(false);
+    expect(hasStrongComplexMarker("update the build script")).toBe(false);
+    expect(hasStrongComplexMarker("修改 package.json")).toBe(false);
+  });
+
+  test("注入 additionalPatterns 后业务词汇正确命中", () => {
+    const patterns = [
+      /(?:在|到|向)\s*(?:根目录|项目|工程|仓库|工作区)[\s\S]{0,30}(?:增加|添加|修改|配置)/u,
+      /(?:增加|添加|修改)[\s\S]{0,30}(?:脚本|script|依赖|package\.json)/ui,
+      /\b(?:add|update|configure)[\s\S]{0,40}\b(?:script|command|workflow)\b/i,
+      /\bpackage\.json\b/i,
+    ];
+    expect(hasStrongComplexMarker("在根目录增加启动脚本", patterns)).toBe(true);
+    expect(hasStrongComplexMarker("增加 react-query 依赖", patterns)).toBe(true);
+    expect(hasStrongComplexMarker("update the build script", patterns)).toBe(true);
+    expect(hasStrongComplexMarker("修改 package.json", patterns)).toBe(true);
+    expect(inferComplexityFallback("在根目录增加启动脚本", patterns)).toBe("complex");
+  });
+
+  test("纯文本代码生成即便注入了业务 patterns 也保持 simple", () => {
+    const patterns = [/(?:增加|添加|修改)[\s\S]{0,30}(?:脚本|script|依赖)/ui];
+    expect(inferComplexityFallback("写一个 bash 脚本来启动应用", patterns)).toBe("simple");
+    expect(inferComplexityFallback("写一段 TypeScript 代码", patterns)).toBe("simple");
   });
 });

@@ -612,8 +612,12 @@ function InkChatRoot({
             /* ignore */
           }
           onExit();
+          return;
         }
-        return;
+        if (result === "continue") {
+          return;
+        }
+        /* passthrough：非内置 `/…`，与普通消息同样进入引擎 */
       }
 
       setHistory((h) => [...h, { kind: "user", text: trimmed }]);

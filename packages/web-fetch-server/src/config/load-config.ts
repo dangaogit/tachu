@@ -340,14 +340,71 @@ export function loadConfig(
       readRaw(env, "WEB_FETCH_SERVICE_NAME") ?? "tachu-web-fetch-server",
   };
 
+  const allowedSearchProviders = new Set(["stub", "brave", "searxng", "tavily"]);
   let searchProvider = readRaw(env, "WEB_SEARCH_PROVIDER") ?? "stub";
-  if (searchProvider !== "stub") {
+  if (!allowedSearchProviders.has(searchProvider)) {
     console.warn(
       `[web-fetch-server] WEB_SEARCH_PROVIDER=${JSON.stringify(
         searchProvider,
-      )} is not available before Stage 4; falling back to "stub"`,
+      )} is unknown; falling back to "stub"`,
     );
     searchProvider = "stub";
+  }
+
+  if (searchProvider === "brave" || searchProvider === "tavily") {
+    const key = readRaw(env, "WEB_SEARCH_PROVIDER_API_KEY");
+    if (key === undefined) {
+      throw new ConfigValidationError(
+        "WEB_SEARCH_PROVIDER_API_KEY",
+        `WEB_SEARCH_PROVIDER=${searchProvider} requires WEB_SEARCH_PROVIDER_API_KEY`,
+      );
+    }
+  }
+
+  if (searchProvider === "searxng") {
+    const ep = readRaw(env, "WEB_SEARCH_PROVIDER_ENDPOINT");
+    if (ep === undefined) {
+      throw new ConfigValidationError(
+        "WEB_SEARCH_PROVIDER_ENDPOINT",
+        'WEB_SEARCH_PROVIDER=searxng requires WEB_SEARCH_PROVIDER_ENDPOINT (e.g. https://searx.example.org)',
+      );
+    }
+    let u: URL;
+    try {
+      u = new URL(ep);
+    } catch {
+      throw new ConfigValidationError(
+        "WEB_SEARCH_PROVIDER_ENDPOINT",
+        `must be a valid absolute URL (http/https); got ${JSON.stringify(ep)}`,
+      );
+    }
+    if (u.protocol !== "http:" && u.protocol !== "https:") {
+      throw new ConfigValidationError(
+        "WEB_SEARCH_PROVIDER_ENDPOINT",
+        `must use http or https scheme; got ${JSON.stringify(ep)}`,
+      );
+    }
+  }
+
+  if (searchProvider === "tavily") {
+    const ep = readRaw(env, "WEB_SEARCH_PROVIDER_ENDPOINT");
+    if (ep !== undefined) {
+      let u: URL;
+      try {
+        u = new URL(ep);
+      } catch {
+        throw new ConfigValidationError(
+          "WEB_SEARCH_PROVIDER_ENDPOINT",
+          `must be a valid absolute URL (http/https); got ${JSON.stringify(ep)}`,
+        );
+      }
+      if (u.protocol !== "http:" && u.protocol !== "https:") {
+        throw new ConfigValidationError(
+          "WEB_SEARCH_PROVIDER_ENDPOINT",
+          `must use http or https scheme; got ${JSON.stringify(ep)}`,
+        );
+      }
+    }
   }
 
   const search: WebFetchServerSearch = {

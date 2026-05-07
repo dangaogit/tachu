@@ -24,7 +24,7 @@ Tachu ships as a Bun-native TypeScript monorepo with three packages: the zero-de
 
 ## Project Status
 
-**Current release:** `1.0.0-alpha.2` on the `alpha` dist-tag.
+**Current release:** `1.0.0-alpha.4` on the `alpha` dist-tag.
 
 This is the **first public alpha** — most infrastructure is in place, but several LLM-backed stages are still stubbed. The table below is the single source of truth; every claim made elsewhere in this README must be cross-checked against it.
 
@@ -228,7 +228,7 @@ bun add -g @tachu/cli@alpha
 After global installation, verify with:
 
 ```bash
-tachu --version   # expect 1.0.0-alpha.2 or newer
+tachu --version   # expect 1.0.0-alpha.4 or newer
 ```
 
 ---
@@ -937,7 +937,25 @@ The contract is enforced by `packages/core/src/engine/phases/fallback-contract.t
 Tachu follows a `1.0.0-alpha.n` → `1.0.0-beta.n` → `1.0.0` release lane. Each
 cut-line below is a real, shippable deliverable with tests, not a wish list.
 
-### 1.0.0-alpha.2 — Adapter call context (current)
+### 1.0.0-alpha.4 — Code editing capabilities + architecture boundary fix (current)
+
+- [x] 14 new tools in `@tachu/extensions`: `edit-file`, `multi-edit`, `glob`, `todo-write/read`, `git-status/diff/log/blame/show/branch`, `run-typecheck`, `run-tests`
+- [x] `read-file` — `offset`/`limit` pagination, `withLineNumbers` (default on), `totalLines`/`hasMore`
+- [x] `apply-patch` — fuzzy context matching (trim + ±3-line offset tolerance)
+- [x] `run-shell` — extended env allowlist, session-persistent cwd, built-in deny patterns
+- [x] Persistent tool approval — `ApprovalStore` JSONL (project + user scope), `y/a/p/s/N` prompt, `tachu approval` subcommand group
+- [x] `EngineConfig.intent.additionalComplexPatterns` / `fewShotExamples` — business layer injects domain-specific complex signals; core carries no domain knowledge
+- [x] `EngineConfig.toolUse.systemPromptSuffix` — domain workflow instructions (e.g. code editing guide) injected at CLI layer, not hard-coded in core
+- [x] `toolLoop.maxSteps` default raised 8 → 25
+
+### 1.0.0-alpha.3 — Shell auto-approve, shortTaskRoute, prompt optimisations
+
+- [x] `safety.shellAutoApprovePatterns` auto-approve matching shell commands (config-driven)
+- [x] `toolLoop.shortTaskRoute` routes short single-tool loops to `fast-cheap` capability
+- [x] Intent phase fast-paths for strong simple / strong complex heuristics
+- [x] Internal system prompts English-first; prompt assembler tool listing drops JSON Schema
+
+### 1.0.0-alpha.2 — Adapter call context
 
 - [x] `AdapterCallContext` on `ProviderAdapter` / `VectorStore` / `MemorySystem`; engine and phases pass execution-derived context (trace id; optional tenant / scope identifiers).
 

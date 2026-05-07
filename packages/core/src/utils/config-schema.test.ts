@@ -137,7 +137,7 @@ describe("validateEngineConfig", () => {
   test("runtime.toolLoop: 默认值回填（ADR-0002）", () => {
     const config = validateEngineConfig({});
     expect(config.runtime.toolLoop).toBeDefined();
-    expect(config.runtime.toolLoop?.maxSteps).toBe(8);
+    expect(config.runtime.toolLoop?.maxSteps).toBe(25);
     expect(config.runtime.toolLoop?.parallelism).toBe(4);
     expect(config.runtime.toolLoop?.requireApprovalGlobal).toBe(false);
   });
@@ -181,7 +181,7 @@ describe("validateEngineConfig", () => {
 
   test("runtime.toolLoop: null / undefined 均兜底为默认对象", () => {
     const withNull = validateEngineConfig({ runtime: { toolLoop: null } });
-    expect(withNull.runtime.toolLoop?.maxSteps).toBe(8);
+    expect(withNull.runtime.toolLoop?.maxSteps).toBe(25);
     const withUndef = validateEngineConfig({ runtime: {} });
     expect(withUndef.runtime.toolLoop?.parallelism).toBe(4);
   });
@@ -275,6 +275,54 @@ describe("validateEngineConfig", () => {
     expect(() =>
       validateEngineConfig({
         safety: { shellAutoApprovePatterns: "not-an-array" },
+      }),
+    ).toThrow(ValidationError);
+  });
+
+  test("safety.shellEnvAllowlist: 未指定时字段缺省", () => {
+    const config = validateEngineConfig({});
+    expect(config.safety.shellEnvAllowlist).toBeUndefined();
+  });
+
+  test("safety.shellEnvAllowlist: 接受字符串数组", () => {
+    const config = validateEngineConfig({
+      safety: { shellEnvAllowlist: ["PATH", "HOME", "CUSTOM_VAR"] },
+    });
+    expect(config.safety.shellEnvAllowlist).toEqual(["PATH", "HOME", "CUSTOM_VAR"]);
+  });
+
+  test("safety.shellEnvAllowlist: 类型错误抛 ValidationError", () => {
+    expect(() =>
+      validateEngineConfig({
+        safety: { shellEnvAllowlist: "PATH,HOME" },
+      }),
+    ).toThrow(ValidationError);
+  });
+
+  test("safety.shellDenyPatterns: 未指定时字段缺省", () => {
+    const config = validateEngineConfig({});
+    expect(config.safety.shellDenyPatterns).toBeUndefined();
+  });
+
+  test("safety.shellDenyPatterns: 接受合法正则源串数组", () => {
+    const config = validateEngineConfig({
+      safety: { shellDenyPatterns: ["\\|\\s*sh\\b", "mkfs\\b"] },
+    });
+    expect(config.safety.shellDenyPatterns).toEqual(["\\|\\s*sh\\b", "mkfs\\b"]);
+  });
+
+  test("safety.shellDenyPatterns: 非法正则源串抛 ValidationError", () => {
+    expect(() =>
+      validateEngineConfig({
+        safety: { shellDenyPatterns: ["[unclosed("] },
+      }),
+    ).toThrow(ValidationError);
+  });
+
+  test("safety.shellDenyPatterns: 类型错误抛 ValidationError", () => {
+    expect(() =>
+      validateEngineConfig({
+        safety: { shellDenyPatterns: "pattern" },
       }),
     ).toThrow(ValidationError);
   });

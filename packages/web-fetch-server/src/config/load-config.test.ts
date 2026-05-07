@@ -95,11 +95,20 @@ describe("loadConfig", () => {
       messages.push(args.map(String).join(" "));
     };
     try {
-      const c = loadConfig({ WEB_SEARCH_PROVIDER: "tavily" });
+      const c = loadConfig({ WEB_SEARCH_PROVIDER: "not-a-real-provider" });
       expect(c.search.provider).toBe("stub");
-      expect(messages.some((m) => m.includes("tavily"))).toBe(true);
+      expect(messages.some((m) => m.includes("not-a-real-provider"))).toBe(true);
     } finally {
       console.warn = warn;
     }
+  });
+
+  test("accepts tavily when API key is set", () => {
+    const c = loadConfig({
+      WEB_SEARCH_PROVIDER: "tavily",
+      WEB_SEARCH_PROVIDER_API_KEY: "tvly-xxx",
+    });
+    expect(c.search.provider).toBe("tavily");
+    expect(c.search.apiKey).toBe("tvly-xxx");
   });
 });

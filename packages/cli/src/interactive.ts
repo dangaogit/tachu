@@ -381,7 +381,11 @@ export async function runInteractiveChatReadline(
         if (result === "exit") {
           break;
         }
-        continue;
+        if (result === "passthrough") {
+          /* 未识别的 `/…` 整行交给下方对话链路 */
+        } else {
+          continue;
+        }
       }
 
       // 普通对话 —— 历史由 engine 内部 session phase 自动 append 到 MemorySystem，

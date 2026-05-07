@@ -30,7 +30,7 @@ const INTENT_HISTORY_LIMIT = 10;
  * 此 Prompt 只要求 LLM 做分类，不要求它产出最终答复。
  * 面向用户的自然语言答复由 Phase 7 的内置 Sub-flow `direct-answer` 负责。
  */
-const INTENT_SYSTEM_PROMPT = `You are the intent classifier for the Tachu engine (Phase 3: Intent Analysis).
+const INTENT_SYSTEM_PROMPT_BASE = `You are the intent classifier for the Tachu engine (Phase 3: Intent Analysis).
 Your job is **classification only**. Do NOT produce the final user-facing reply — that is handled by the downstream direct-answer sub-flow.
 
 ### Complexity criteria
@@ -47,6 +47,7 @@ Decide based on whether the request needs real tools / external resources, NOT o
 3. Input contains a shell or git command (\`npm i\`, \`git log\`, \`bun test\`, \`rm -rf\`, \`curl …\`), or asks you to "run / execute" one.
 4. Input asks for current time / now / today's date / latest / realtime / stock / weather / news / exchange rate — anything the model's static knowledge cannot cover.
 5. Input asks to read, write, modify, or delete a specific file, directory, repository, or database; or to open a PR / publish a release.
+6. Input asks to add, update, configure, or remove something **in the project** — scripts, dependencies, config files, CI/CD workflows, dev-server setup — even without an explicit file path; because this requires the tool-use sub-flow to actually read and write project files. Distinguish from pure code generation: "写一个脚本" (write a script → text output) is simple; "在项目里增加一个启动脚本" (add a script to the project → modify package.json) is complex.
 
 When ambiguous, prefer "simple". But once a strong signal is hit — even with "summarize / translate / explain" wording — classify as complex so the downstream tool-use sub-flow can really fetch / execute, instead of letting direct-answer hallucinate against a URL it cannot open.
 
@@ -92,6 +93,27 @@ Output: {"complexity":"simple","intent":"text-to-image: a small cat","contextRel
 Respond in the same language as the latest user message; default to English when ambiguous.`;
 
 /**
+ * 动态构建 intent system prompt。
+ *
+ * 若 config 注入了业务 few-shot 示例，追加在内置示例之后；core prompt 本体不变。
+ */
+const buildIntentSystemPrompt = (config: import("../../types").EngineConfig): string => {
+  const fewShots = config.intent?.fewShotExamples;
+  if (!fewShots || fewShots.length === 0) return INTENT_SYSTEM_PROMPT_BASE;
+  const injected = fewShots
+    .map(
+      (ex) =>
+        `Example (${ex.complexity})\nInput: ${ex.input}\nOutput: ${JSON.stringify({
+          complexity: ex.complexity,
+          intent: ex.intent,
+          contextRelevance: "unrelated",
+        })}`,
+    )
+    .join("\n\n");
+  return `${INTENT_SYSTEM_PROMPT_BASE}\n\n${injected}`;
+};
+
+/**
  * 强"simple"请求匹配正则。
  *
  * 触发场景：用户直白陈述"我需要/给我/help me/i need X"这类请求。
@@ -132,13 +154,16 @@ const WEAK_COMPLEX_MARKERS: readonly string[] = [
 /**
  * 强"complex"信号：命中任一即 complex，**优先级高于 STRONG_SIMPLE_MARKERS**。
  *
- * 动机（回归根因）：
- *   "总结一下 https://example.com/xxx" 在旧规则下被 STRONG_SIMPLE_MARKERS 的 "总结"
- *   命中而判为 simple，进而走 direct-answer 子流程；LLM 无法真的抓取 URL，只能口头
- *   承诺"我将获取该页面的内容并进行总结，请稍等"，整个 turn 以空承诺收尾。
+ * 只含**真正普遍**的信号——任何领域的 Agent 遇到这类输入都需要工具：
+ *   - URL → 需要 web-fetch
+ *   - 文件/目录路径 → 需要 file 工具
+ *   - 反引号命令语法 → 需要 shell 工具
+ *   - 文件/目录读写动词 → 需要 file 工具
+ *   - 实时数据（时间/天气/股价）→ 需要实时查询工具
  *
- *   这里把"输入里含 URL / 本地路径 / 命令行指令"等**需要外部工具才能完成**的信号，
- *   单独提升为强 complex 标记，压倒"总结/翻译/解释/列出…"这类措辞白名单。
+ * ⚠️ 领域相关信号（特定命令名如 npm/bun/git、项目配置文件如 package.json）
+ *    **不应**硬编码在此处。应通过 `EngineConfig.intent.additionalComplexPatterns`
+ *    由业务层（如 @tachu/cli 的 tachu.config.ts）注入。
  */
 const STRONG_COMPLEX_MARKERS: readonly RegExp[] = [
   // 任意 http(s) URL —— 让 tool-use 子流程去 fetch，而非 direct-answer 硬编。
@@ -151,51 +176,69 @@ const STRONG_COMPLEX_MARKERS: readonly RegExp[] = [
   /(?:^|[\s"'`(])(?:packages|apps|src|app|lib|docs|tests?|scripts|examples)\/[\w.\-/]+/i,
   // Windows 绝对路径（C:\x\y）
   /\b[a-zA-Z]:\\[\w\s.\-\\]+/,
-  // shell/git/pkg 常见命令动词（"运行 / 执行 / 跑 + 命令"）
-  /(?:运行|执行|跑一下|请跑|请执行)[\s：:]*[`"']?(?:git|npm|bun|yarn|pnpm|node|curl|wget|ls|cat|rm|cp|mv|mkdir|rg|grep|sed|awk|docker|kubectl|brew|apt|pip|uv|cargo)\b/i,
-  // 英文命令触发
-  /\b(?:run|exec|execute)\s+`?(?:git|npm|bun|yarn|pnpm|node|curl|wget|ls|cat|rm|cp|mv|mkdir|rg|grep|sed|awk|docker|kubectl|brew|apt|pip|uv|cargo)\b/i,
+  // 反引号包裹的命令（`cmd arg` 语法本身是"执行命令"的普遍信号，不依赖具体命令名）
+  /(?:运行|执行|跑一下|请跑|请执行)[\s\uff1a:]*`[^`]+`/u,
+  /\b(?:run|exec|execute|invoke)\s+`[^`]+`/i,
   // "读 / 打开 / 列出 xxx 文件或目录"动作
   /(?:读取?|打开|查看|列出|遍历|扫描|搜索)\s*(?:一下\s*)?(?:文件|目录|仓库|项目|代码库|日志|配置|数据库)/u,
   /\b(?:read|open|list|scan|search|traverse)\s+(?:the\s+)?(?:file|dir|directory|repo|repository|codebase|project|log|logs|config|db|database)\b/i,
   // 时效性信号：用户要的是"现在"的数据，LLM 静态知识覆盖不了。
-  // 当前时间 / 日期是最短路径的 shell 工具任务，不能交给 direct-answer 静态回答。
   /(?:当前|现在|此刻|今天|今日).{0,12}(?:时间|日期|几点|几号)/u,
   /(?:时间|日期|几点|几号).{0,12}(?:当前|现在|此刻|今天|今日)/u,
   /^\s*(?:时间|日期|几点|几号|当前时间|当前日期)\s*$/u,
   /\b(?:current\s+(?:date|time)|date\s+now|time\s+now|what'?s\s+the\s+time|today'?s\s+date)\b/i,
-  // 锚点词（今天/现在/最新…）与被查询对象（股价/天气/新闻…）之间允许 ≤20 字间隔（如"现在北京的天气"）。
   /(?:今天|今日|现在|实时|最新|此刻|本周|本月)[\s\S]{0,20}?(?:股价|股指|汇率|天气|气温|新闻|热搜|排名|价格|行情|比分|赛况|收盘|点位|指数)/u,
   /\b(?:today|now|current|realtime|real-?time|latest)\s+(?:\S+\s+){0,3}?(?:price|prices|stock|index|weather|temperature|news|ranking|rate|score|match)\b/i,
 ];
 
 /**
- * 判断输入是否命中任一强 complex 标记。
+ * 编译 `config.intent.additionalComplexPatterns` 为 RegExp 数组，带 WeakMap 缓存。
+ *
+ * `validateEngineConfig` 已保证每条源串合法，这里只缓存编译结果避免重复 compile。
  */
-const hasStrongComplexMarker = (text: string): boolean =>
-  STRONG_COMPLEX_MARKERS.some((pattern) => pattern.test(text));
+const additionalPatternCache = new WeakMap<readonly string[], RegExp[]>();
+
+const compileAdditionalPatterns = (patterns: readonly string[] | undefined): readonly RegExp[] => {
+  if (!patterns || patterns.length === 0) return [];
+  const cached = additionalPatternCache.get(patterns);
+  if (cached) return cached;
+  const compiled = patterns.map((source) => new RegExp(source, "ui"));
+  additionalPatternCache.set(patterns, compiled);
+  return compiled;
+};
+
+/**
+ * 判断输入是否命中强 complex 标记（内置 + 业务注入）。
+ *
+ * @param text 用户输入（已 trim）
+ * @param additionalPatterns 业务层编译后的额外 patterns（来自 config.intent.additionalComplexPatterns）
+ */
+const hasStrongComplexMarker = (text: string, additionalPatterns?: readonly RegExp[]): boolean => {
+  if (STRONG_COMPLEX_MARKERS.some((p) => p.test(text))) return true;
+  if (additionalPatterns && additionalPatterns.some((p) => p.test(text))) return true;
+  return false;
+};
 
 /**
  * 关键词启发式复杂度判断（仅在 LLM 不可用时作为回退）。
  *
  * 判定顺序（自上而下）：
- *   1. 命中 STRONG_COMPLEX_MARKERS（URL/路径/命令/时效查询）→ 立即判 complex，
- *      压倒所有 simple 白名单措辞。
- *   2. 命中 STRONG_SIMPLE_MARKERS → 判 simple（不看长度、不看弱 complex）。
- *   3. 长度 > 120 字 或 命中弱 complex 关键词 → 判 complex。
- *   4. 其余 → simple（保守归类，避免错走工具链失败路径）。
+ *   1. 命中 STRONG_COMPLEX_MARKERS 或业务注入 patterns → 立即判 complex
+ *   2. 命中 STRONG_SIMPLE_MARKERS → 判 simple
+ *   3. 长度 > 120 字 或 命中弱 complex 关键词 → 判 complex
+ *   4. 其余 → simple
  */
-const inferComplexityFallback = (text: string): "simple" | "complex" => {
+const inferComplexityFallback = (
+  text: string,
+  additionalPatterns?: readonly RegExp[],
+): "simple" | "complex" => {
   const trimmed = text.trim();
   if (trimmed.length === 0) return "simple";
 
-  // 最高优先级：任何"需要外部工具 / 实时数据"的信号一律 complex，
-  // 压倒"总结/翻译/解释/列出…"这类白名单措辞。
-  if (hasStrongComplexMarker(trimmed)) {
+  if (hasStrongComplexMarker(trimmed, additionalPatterns)) {
     return "complex";
   }
 
-  // 其次：直白请求白名单（"我需要 X"/"i need X"/"讲个笑话"等），一律 simple。
   if (STRONG_SIMPLE_MARKERS.some((pattern) => pattern.test(trimmed))) {
     return "simple";
   }
@@ -413,7 +456,7 @@ const buildIntentMessages = async (
   env: PhaseEnvironment,
   userContent: Message["content"],
 ): Promise<Message[]> => {
-  const messages: Message[] = [{ role: "system", content: INTENT_SYSTEM_PROMPT }];
+  const messages: Message[] = [{ role: "system", content: buildIntentSystemPrompt(env.config) }];
 
   try {
     const window = await env.memorySystem.load(state.context.sessionId, env.adapterContext);
@@ -549,6 +592,11 @@ export const runIntentPhase = async (
   let working: SafetyPhaseOutput = { ...state };
   const contentForHeuristic = flattenInputForIntentHeuristic(working.input);
 
+  // 编译业务层注入的额外 complex patterns（WeakMap 缓存，只在首次命中时 compile）
+  const additionalPatterns = compileAdditionalPatterns(
+    env.config.intent?.additionalComplexPatterns,
+  );
+
   /** CLI `/draw`、`--text-to-image` 等显式入口：跳过 Intent LLM，直接路由文生图。 */
   if (
     envelopeNeedsTextToImage(working.input) &&
@@ -567,9 +615,8 @@ export const runIntentPhase = async (
     };
   }
 
-  // fast-path: 命中强 complex marker（URL / 路径 / 命令 / 时效查询等）→ 直接判 complex，跳过 intent LLM。
-  // 这些信号本身就保证 LLM 不论怎么判都会被事后守护强制升级为 complex；提前短路可省一次 1.6k+ token 调用。
-  if (hasStrongComplexMarker(contentForHeuristic)) {
+  // fast-path: 命中强 complex marker（内置 + 业务注入）→ 直接判 complex，跳过 intent LLM。
+  if (hasStrongComplexMarker(contentForHeuristic, additionalPatterns)) {
     env.observability.emit({
       timestamp: Date.now(),
       traceId: working.context.traceId,
@@ -590,8 +637,6 @@ export const runIntentPhase = async (
   }
 
   // fast-path: 短输入命中强 simple marker 且不含强 complex → 直接 simple。
-  // 限制长度 ≤ 40 是为了把短问候 / 单句请求和复杂多句任务区分开；后者即使命中
-  // STRONG_SIMPLE_MARKERS 关键词，也可能是"先帮我列出 X 然后再做 Y…"这种多步任务，仍需 LLM 仔细分类。
   const trimmedHeuristic = contentForHeuristic.trim();
   if (
     trimmedHeuristic.length > 0 &&
@@ -667,10 +712,10 @@ export const runIntentPhase = async (
     const applyT2I =
       intent.textToImage === true &&
       !envelopeNeedsVision(working.input) &&
-      !hasStrongComplexMarker(contentForHeuristic);
+      !hasStrongComplexMarker(contentForHeuristic, additionalPatterns);
     if (applyT2I) {
       working = { ...working, input: withTextToImageMetadata(working.input) };
-    } else if (intent.textToImage === true && hasStrongComplexMarker(contentForHeuristic)) {
+    } else if (intent.textToImage === true && hasStrongComplexMarker(contentForHeuristic, additionalPatterns)) {
       intent = { ...intent, textToImage: false };
       env.observability.emit({
         timestamp: Date.now(),
@@ -689,7 +734,7 @@ export const runIntentPhase = async (
     const heuristicInput = applyTextToImageHeuristicToEnvelope(working.input);
     const t2i = envelopeNeedsTextToImage(heuristicInput);
     intent = {
-      complexity: inferComplexityFallback(contentForHeuristic),
+      complexity: inferComplexityFallback(contentForHeuristic, additionalPatterns),
       intent: contentForHeuristic.slice(0, 200),
       contextRelevance: "related",
       ...(t2i ? { textToImage: true as const } : {}),
@@ -699,14 +744,11 @@ export const runIntentPhase = async (
     }
   } else if (
     intent.complexity === "simple" &&
-    hasStrongComplexMarker(contentForHeuristic) &&
+    hasStrongComplexMarker(contentForHeuristic, additionalPatterns) &&
     !envelopeNeedsTextToImage(working.input) &&
     intent.textToImage !== true
   ) {
-    // 事后守护：即便 LLM 判为 simple，只要输入里含 URL / 路径 / 命令 / 时效查询等
-    // 必须外部工具才能解决的强信号，一律强制升级为 complex。防止 LLM 的措辞偏见
-    // （如"总结一下 <URL>"被归为 simple）把请求卡在 direct-answer 的死胡同里，
-    // 让后续 Phase 5 Planning 能据此路由到 tool-use 子流程。
+    // 事后守护：即便 LLM 判为 simple，只要输入里含强信号（内置 + 业务注入），一律强制升级为 complex。
     env.observability.emit({
       timestamp: Date.now(),
       traceId: working.context.traceId,

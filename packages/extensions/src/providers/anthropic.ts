@@ -45,7 +45,8 @@ interface ExtendedChatRequest extends ChatRequest {
       };
 }
 
-const DEFAULT_TIMEOUT_MS = 60_000;
+/** 须 ≥ `@tachu/core` tool-use 的 LLM 层超时；否则 Provider 会先 60s 掐断，Agentic 首包易失败。 */
+const DEFAULT_TIMEOUT_MS = 120_000;
 
 /**
  * Anthropic `/v1/models` 返回结构（SDK 0.30+ 提供 `client.models.list`）。

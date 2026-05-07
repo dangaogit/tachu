@@ -176,7 +176,7 @@ export interface ToolLoopConfig {
    * 单次请求里 LLM 思考 + 工具调用的最大往返步数。
    *
    * 超出上限则 `tool-use` 子流程抛 `TOOL_LOOP_STEPS_EXHAUSTED`。
-   * 默认 8，覆盖绝大多数 "多工具组合" 场景，同时防止 runaway。
+   * 默认 25，满足代码编辑等复杂多步工作流；防止 runaway 同时覆盖更深任务链。
    */
   maxSteps?: number;
   /**
@@ -347,6 +347,22 @@ export interface EngineConfig {
      * 留空（默认）→ 所有 `run-shell` 调用一律按 `descriptor.requiresApproval` 决定是否审批。
      */
     shellAutoApprovePatterns?: string[];
+    /**
+     * `run-shell` 执行器的环境变量白名单。
+     *
+     * 覆盖内置默认白名单（PATH / HOME / LANG / TERM / USER / SHELL /
+     * NODE_ENV / BUN_INSTALL / PNPM_HOME / NPM_CONFIG_PREFIX）。
+     * 同时也可通过进程环境变量 `TACHU_SHELL_ENV_ALLOWLIST`（逗号分隔）覆盖。
+     */
+    shellEnvAllowlist?: string[];
+    /**
+     * `run-shell` 执行器的危险命令黑名单（正则源字符串数组）。
+     *
+     * 每条 pattern 会被编译为 RegExp 并与 input.command 匹配；命中则抛
+     * `ValidationError("SHELL_COMMAND_DENIED", ...)`，阻止执行。
+     * 也可通过进程环境变量 `TACHU_SHELL_DENY_PATTERNS`（`||` 分隔）追加额外 pattern。
+     */
+    shellDenyPatterns?: string[];
   };
   models: {
     capabilityMapping: Record<string, ModelRoute>;
@@ -377,6 +393,46 @@ export interface EngineConfig {
   hooks: {
     writeHookTimeout: number;
     failureBehavior: "continue" | "abort";
+  };
+  /**
+   * Intent 阶段分类可扩展配置。
+   *
+   * Core 只内置真正普遍的 complex 信号（URL / 文件路径 / 实时数据等）；
+   * 领域特定的匹配规则（shell 命令名、项目文件修改动词等）由业务层通过此字段注入，
+   * 与引擎内置规则取并集生效。
+   */
+  intent?: {
+    /**
+     * 额外的强 complex 正则源串（JavaScript RegExp 源，不含 `/` 围栏）。
+     *
+     * 每条源串会在运行时被编译为 `/pattern/ui` 并加入 complex 快速路径检测。
+     * 编译失败时 `validateEngineConfig` 会以 `VALIDATION_INVALID_CONFIG` 拒绝。
+     */
+    additionalComplexPatterns?: string[];
+    /**
+     * 注入到 intent 分类 system prompt 末尾的 few-shot 示例。
+     *
+     * 格式与内置示例相同；由业务层补充领域样本，不改变 core prompt 本体。
+     */
+    fewShotExamples?: Array<{
+      input: string;
+      complexity: "simple" | "complex";
+      intent: string;
+    }>;
+  };
+  /**
+   * Tool-use sub-flow 可扩展配置。
+   *
+   * Core 的 tool-use system prompt 只描述通用循环语义；领域工作流指导
+   * （如编码 Agent 的"改前先读 / 改后 typecheck"）通过此字段追加，不污染 core。
+   */
+  toolUse?: {
+    /**
+     * 追加到 tool-use system prompt 末尾的补充指令。
+     *
+     * 典型用途：编码 Agent 的 workflow 指南、特定领域的工具使用惯例。
+     */
+    systemPromptSuffix?: string;
   };
 }
 

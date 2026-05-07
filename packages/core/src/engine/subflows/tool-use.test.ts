@@ -1108,7 +1108,7 @@ describe("executeToolUse (ADR-0002 Agentic Loop)", () => {
     expect(content.length).toBeLessThanOrEqual(
       TOOL_USE_CONSTANTS.MAX_TOOL_OUTPUT_CHARS + 200,
     );
-    expect(content).toContain("[工具输出已截断");
+    expect(content).toContain("[输出已截断");
     expect(content).toContain(String(oversized.length));
     expect(content.startsWith("A")).toBe(true);
   });
@@ -1145,7 +1145,7 @@ describe("executeToolUse (ADR-0002 Agentic Loop)", () => {
     expect(content.length).toBeLessThanOrEqual(
       TOOL_USE_CONSTANTS.MAX_TOOL_OUTPUT_CHARS + 200,
     );
-    expect(content).toContain("[工具输出已截断");
+    expect(content).toContain("[输出已截断");
     // 截断前半段必须是合法的 JSON 前缀（以 `{` 开头，包含 items 关键字）
     expect(content.startsWith("{")).toBe(true);
     expect(content).toContain('"items"');
@@ -1172,7 +1172,7 @@ describe("executeToolUse (ADR-0002 Agentic Loop)", () => {
     const secondCall = calls[1];
     const toolMsg = secondCall!.messages.find((m) => m.role === "tool");
     const content = toolMsg!.content as string;
-    expect(content).not.toContain("[工具输出已截断");
+    expect(content).not.toContain("[输出已截断");
     expect(content).toContain("a.txt");
     expect(content).toContain("b.ts");
   });

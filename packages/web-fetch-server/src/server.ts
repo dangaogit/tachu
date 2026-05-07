@@ -17,7 +17,7 @@ import { handleHealthz } from "./routes/healthz.js";
 import { toHttpResponse } from "./errors/unifier.js";
 import { handleExtract, type ExtractRouteDeps } from "./routes/extract.js";
 import { handleSearch } from "./routes/search.js";
-import { SearchProviderRegistry } from "./search/provider.js";
+import { createSearchRegistryFromConfig } from "./search/registry-factory.js";
 
 /** 装配层可选依赖（主要用于测试注入 pipeline / logger）。 */
 export interface CreateServerDeps {
@@ -147,7 +147,7 @@ export function createServer(
 ): WebFetchServerHandle {
   const { pool, deps } = resolveCreateServerPoolAndDeps(poolOrOpts, maybeOpts);
   const rateLimiter = createRateLimiterFromConfig(cfg);
-  const searchRegistry = new SearchProviderRegistry();
+  const searchRegistry = createSearchRegistryFromConfig(cfg);
   const rootLogger: Logger =
     deps?.logger ?? createLogger({ level: cfg.observability.logLevel });
 

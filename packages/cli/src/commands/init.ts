@@ -318,6 +318,13 @@ const config: EngineConfig = {
   // },
   observability: { enabled: true, maskSensitiveData: true },
   hooks: { writeHookTimeout: 5000, failureBehavior: 'continue' },
+
+  // ── 领域扩展（按需启用）──────────────────────────────────────────────────────
+  // core 只内置普遍信号（URL / 文件路径 / 实时数据）；领域特定规则（命令名白名单、
+  // 项目配置修改动词、tool-use 工作流指南）通过 intent / toolUse 字段注入。
+  // 详见 https://github.com/dangaogit/tachu#intent--tooluse-config
+  // intent: { additionalComplexPatterns: [], fewShotExamples: [] },
+  // toolUse: { systemPromptSuffix: '' },
 };
 
 export default config;

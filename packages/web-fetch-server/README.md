@@ -115,14 +115,20 @@ NODE_ENV=production bun run --filter '@tachu/web-fetch-server' start
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | string | *(空)* | 指标等 OTLP HTTP 端点（OpenTelemetry 约定） |
 | `OTEL_EXPORTER_OTLP_HEADERS` | string | *(空)* | `k1=v1,k2=v2` |
 
-### 4.8 搜索（占位，Stage 4）
+### 4.8 搜索（`POST /v1/search`）
 
 | 变量 | 类型 | 默认 | 说明 |
 | --- | --- | --- | --- |
-| `WEB_SEARCH_PROVIDER` | string | `stub` | 当前仅 `stub`；后续扩展见 ADR |
-| `WEB_SEARCH_PROVIDER_API_KEY` | string | *(空)* | 真实 provider API Key |
-| `WEB_SEARCH_PROVIDER_ENDPOINT` | string | *(空)* | 自建 endpoint |
-| `WEB_SEARCH_DEFAULT_MAX_RESULTS` | number | `10` | 默认返回条数 |
+| `WEB_SEARCH_PROVIDER` | string | `stub` | `stub`：不启用搜索 API（`/v1/search` 503）；`brave` \| `tavily` \| `searxng`：见下文 |
+| `WEB_SEARCH_PROVIDER_API_KEY` | string | *(空)* | **`brave` / `tavily` 必填**：对应厂商 API Key |
+| `WEB_SEARCH_PROVIDER_ENDPOINT` | string | *(空)* | **`searxng` 必填**：实例根 URL（如 `https://searx.example.org`）；`tavily` 可选覆盖默认 `https://api.tavily.com/search` |
+| `WEB_SEARCH_DEFAULT_MAX_RESULTS` | number | `10` | 默认返回条数（上限 30） |
+
+**示例（Brave）**：`WEB_SEARCH_PROVIDER=brave` + `WEB_SEARCH_PROVIDER_API_KEY=<Brave Search API subscription token>`。
+
+**示例（自建 SearXNG）**：`WEB_SEARCH_PROVIDER=searxng` + `WEB_SEARCH_PROVIDER_ENDPOINT=https://你的实例`。
+
+**示例（Tavily）**：`WEB_SEARCH_PROVIDER=tavily` + `WEB_SEARCH_PROVIDER_API_KEY=<Tavily key>`。
 
 ### 4.9 客户端工具（`@tachu/extensions`）
 
@@ -210,7 +216,7 @@ docker compose -f packages/web-fetch-server/docker-compose.yml up --build
 ## 9. 与 `web-fetch` / `web-search` 工具的关系
 
 - **web-fetch**：客户端实现在 [`packages/extensions/src/tools/web-fetch/`](../extensions/src/tools/web-fetch/)，通过 `TACHU_WEB_FETCH_ENDPOINT` 等环境变量连接本服务，主调 `POST /v1/extract`。
-- **web-search**：与 web-fetch **共用同一 Server 基址与 token**，主调 `POST /v1/search`；当前默认 provider 为 stub，行为以 [ADR-0003a §Endpoint 3](../../docs/adr/decisions/0003a-web-fetch-api-contract.md) 为准。
+- **web-search**：与 web-fetch **共用同一 Server 基址与 token**，主调 `POST /v1/search`；未配置真实 provider（`WEB_SEARCH_PROVIDER=stub`）时返回 503；配置 `brave` / `tavily` / `searxng` 后由服务端转发至对应 API。契约见 [ADR-0003a §Endpoint 3](../../docs/adr/decisions/0003a-web-fetch-api-contract.md)。
 
 ## 相关契约（Further reading）
 

@@ -120,6 +120,27 @@ const parsePatch = (rawPatch: string): FilePatch[] => {
   return files;
 };
 
+/**
+ * 在 sourceLines 的 [baseIndex - radius, baseIndex + radius] 范围内查找首个精确匹配行。
+ * 返回匹配的绝对行索引，未找到返回 null。
+ */
+const findOffsetMatch = (
+  sourceLines: string[],
+  baseIndex: number,
+  expected: string,
+  radius: number,
+): number | null => {
+  const lo = Math.max(0, baseIndex - radius);
+  const hi = Math.min(sourceLines.length - 1, baseIndex + radius);
+  for (let i = lo; i <= hi; i++) {
+    if (i === baseIndex) continue; // already tried exact match
+    if (sourceLines[i] === expected) {
+      return i;
+    }
+  }
+  return null;
+};
+
 const applyFilePatch = (
   original: string,
   patch: FilePatch,
@@ -140,6 +161,23 @@ const applyFilePatch = (
       if (line.type === " ") {
         const actual = sourceLines[sourceIndex];
         if (actual !== line.content) {
+          // 1. 空白宽容匹配
+          if (actual?.trim() === line.content.trim()) {
+            result.push(actual);
+            sourceIndex += 1;
+            continue;
+          }
+          // 2. 行偏移容忍：在 ±3 行内扫描精确匹配
+          const scanOffset = findOffsetMatch(sourceLines, sourceIndex, line.content, 3);
+          if (scanOffset !== null) {
+            // 把跳过的行原样保留
+            for (let s = sourceIndex; s < scanOffset; s++) {
+              result.push(sourceLines[s] ?? "");
+            }
+            result.push(sourceLines[scanOffset] ?? "");
+            sourceIndex = scanOffset + 1;
+            continue;
+          }
           throw new ValidationError(
             "VALIDATION_PATCH_CONFLICT",
             `上下文不匹配: expected "${line.content}" got "${actual ?? "<eof>"}"`,
@@ -152,6 +190,20 @@ const applyFilePatch = (
       if (line.type === "-") {
         const actual = sourceLines[sourceIndex];
         if (actual !== line.content) {
+          // 1. 空白宽容匹配
+          if (actual?.trim() === line.content.trim()) {
+            sourceIndex += 1;
+            continue;
+          }
+          // 2. 行偏移容忍：在 ±3 行内扫描精确匹配
+          const scanOffset = findOffsetMatch(sourceLines, sourceIndex, line.content, 3);
+          if (scanOffset !== null) {
+            for (let s = sourceIndex; s < scanOffset; s++) {
+              result.push(sourceLines[s] ?? "");
+            }
+            sourceIndex = scanOffset + 1;
+            continue;
+          }
           throw new ValidationError(
             "VALIDATION_PATCH_CONFLICT",
             `删除行不匹配: expected "${line.content}" got "${actual ?? "<eof>"}"`,

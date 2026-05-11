@@ -33,7 +33,11 @@ content`,
 kind: tool
 name: read-file
 description: read file from workspace
+version: 1.2.0
+displayName: Read File
 execute: readFile
+x-cube:
+  owner: core
 inputSchema:
   type: object
   properties:
@@ -75,6 +79,9 @@ skill instructions`,
     expect(loaded.length).toBe(4);
     expect(registry.get("rule", "test-rule")).not.toBeNull();
     expect(registry.get("tool", "read-file")?.kind).toBe("tool");
+    expect(registry.get("tool", "read-file", "1.2.0")?.displayName).toBe("Read File");
+    const toolDescriptor = registry.get("tool", "read-file") as unknown as Record<string, unknown>;
+    expect((toolDescriptor["x-cube"] as { owner: string }).owner).toBe("core");
     expect(registry.get("agent", "review-agent")?.maxDepth).toBe(2);
     expect(registry.get("skill", "explain-code")?.instructions).toContain("skill instructions");
   });

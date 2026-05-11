@@ -1,6 +1,7 @@
 import type { EngineOutput, Message, OutputMetadata } from "../../types";
 import type { ValidationPhaseOutput } from "./validation";
 import type { PhaseEnvironment } from "./index";
+import { buildLlmCallAbortSignal, resolveLlmTimeouts } from "../llm-timeouts";
 
 /**
  * `task-direct-answer` 是 Phase 5 为兜底路径分配的固定任务 ID。
@@ -144,30 +145,6 @@ const safeEmit = (
 };
 
 /**
- * 构造带超时保护的 AbortSignal；与阶段取消信号合并。
- *
- * 与 `intent.ts` / `direct-answer.ts` 同款实现。
- */
-const buildFallbackAbortSignal = (outer: AbortSignal, timeoutMs: number): AbortSignal => {
-  if (outer.aborted) return outer;
-  const controller = new AbortController();
-  const onOuterAbort = (): void => controller.abort(outer.reason);
-  outer.addEventListener("abort", onOuterAbort, { once: true });
-  const timer = setTimeout(() => {
-    controller.abort(new Error(`fallback summary LLM call timed out after ${timeoutMs}ms`));
-  }, timeoutMs);
-  controller.signal.addEventListener(
-    "abort",
-    () => {
-      clearTimeout(timer);
-      outer.removeEventListener("abort", onOuterAbort);
-    },
-    { once: true },
-  );
-  return controller.signal;
-};
-
-/**
  * 尝试用一次 LLM 调用生成友好兜底答复（Best-effort）。
  *
  * 失败语义：
@@ -250,7 +227,12 @@ Generate the fallback reply per the system prompt's hard rules.`;
     },
   });
 
-  const signal = buildFallbackAbortSignal(env.activeAbortSignal, FALLBACK_LLM_TIMEOUT_MS);
+  const llmTimeouts = resolveLlmTimeouts(env.config, "output");
+  const signal = buildLlmCallAbortSignal(
+    env.activeAbortSignal,
+    Math.min(FALLBACK_LLM_TIMEOUT_MS, llmTimeouts.llmStreamingMs),
+    "streaming",
+  );
   try {
     const response = await adapter.chat({ model, messages }, env.adapterContext, signal);
     env.onProviderUsage?.(response.usage);

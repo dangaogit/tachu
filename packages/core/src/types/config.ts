@@ -245,6 +245,22 @@ export interface EngineConfig {
      * 经 `validateEngineConfig` 时默认为 `true`；显式设为 `false` 则全程非流式 `chat()`。
      */
     streamingOutput?: boolean;
+    /**
+     * LLM 超时配置（按 phase 覆盖）。
+     *
+     * `byPhase` 覆盖优先级高于 budget 全局默认；未命中时回落到 budget。
+     */
+    timeouts?: {
+      byPhase?: Record<
+        string,
+        {
+          /** 等待首个输出（TTFB）超时。 */
+          llmWaitFirstTokenMs?: number;
+          /** 首个输出之后的单次 LLM 调用持续时长上限。 */
+          llmStreamingMs?: number;
+        }
+      >;
+    };
   };
   memory: {
     contextTokenLimit: number;
@@ -299,7 +315,26 @@ export interface EngineConfig {
   budget: {
     maxTokens: number;
     maxToolCalls: number;
+    /**
+     * run 级墙钟时间兜底（包含阻塞时间）。
+     *
+     * 主要用于防止异常路径无限运行；默认值建议保持较大。
+     */
     maxWallTimeMs: number;
+    /**
+     * `tool-use` 循环活跃时长上限（不含用户阻塞时间）。
+     */
+    maxToolLoopActiveMs?: number;
+    /**
+     * 单次 LLM 调用等待首输出（TTFB）超时。
+     */
+    llmWaitFirstTokenMs?: number;
+    /**
+     * 单次 LLM 调用在“开始输出后”的持续时长上限。
+     *
+     * 对非流式调用，整次调用按该值校验。
+     */
+    llmStreamingMs?: number;
   };
   safety: {
     maxInputSizeBytes: number;

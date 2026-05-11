@@ -21,6 +21,11 @@ import type {
 } from "../../types";
 import type { AdapterCallContext } from "../../types/context";
 import type { TaskExecutor } from "../scheduler";
+import {
+  buildLlmCallAbortSignal,
+  isBudgetTimeoutAbort,
+  resolveLlmTimeouts,
+} from "../llm-timeouts";
 
 /**
  * `tool-use` 内置 Sub-flow 运行时上下文（ADR-0002）。
@@ -51,6 +56,10 @@ export interface ToolUseContext {
   onProviderUsage?: (usage: ChatUsage) => void;
   onToolLoopEvent?: (chunk: StreamChunk) => void;
   onToolCall?: (record: ToolCallRecord) => void;
+  onToolLoopActiveStart?: () => void;
+  onToolLoopActiveEnd?: () => void;
+  onUserBlockingStart?: () => void;
+  onUserBlockingEnd?: () => void;
   /**
    * 工具执行前的审批回调（ADR-0002 Stage 4）。
    *
@@ -107,15 +116,6 @@ export interface ToolUseInput {
  * 宽于 direct-answer 的 60s，并与 OpenAI/Anthropic Provider 默认请求超时（120s）
  * 对齐，避免模型在 tool 规划阶段被 Provider 层先行掐断。实际生效还受
  * `ctx.executionContext.budget.maxWallTimeMs` 约束。
- */
-const TOOL_USE_LLM_TIMEOUT_MS = 120_000;
-
-/**
- * 单次工具调用本身的最长等待（毫秒）。
- *
- * 该值是 **TaskExecutor 之上的软超时**——TaskScheduler 在主干已经按
- * `runtime.defaultTaskTimeoutMs` 给过一道超时；这里再做一次保险，防止下游
- * executor 未响应 AbortSignal 时把整条 loop 卡住。
  */
 const TOOL_USE_TOOL_TIMEOUT_MS = 60_000;
 
@@ -180,25 +180,6 @@ const memoryEntryToMessage = (entry: MemoryEntry): Message | null => {
 /**
  * 组合外部 abort 与 LLM 超时的复合 Signal。
  */
-const buildToolUseLlmSignal = (outer: AbortSignal, timeoutMs: number): AbortSignal => {
-  if (outer.aborted) return outer;
-  const controller = new AbortController();
-  const onOuterAbort = (): void => controller.abort(outer.reason);
-  outer.addEventListener("abort", onOuterAbort, { once: true });
-  const timer = setTimeout(() => {
-    controller.abort(new Error(`tool-use LLM call timed out after ${timeoutMs}ms`));
-  }, timeoutMs);
-  controller.signal.addEventListener(
-    "abort",
-    () => {
-      clearTimeout(timer);
-      outer.removeEventListener("abort", onOuterAbort);
-    },
-    { once: true },
-  );
-  return controller.signal;
-};
-
 const buildToolExecutionSignal = (outer: AbortSignal, timeoutMs: number): AbortSignal => {
   if (outer.aborted) return outer;
   const controller = new AbortController();
@@ -570,10 +551,13 @@ const executeSingleToolCall = async (
     });
     let decision: ToolApprovalDecision;
     try {
+      ctx.onUserBlockingStart?.();
       decision = await ctx.onBeforeToolCall(approvalRequest);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       decision = { type: "deny", reason: `审批回调抛出异常：${message}` };
+    } finally {
+      ctx.onUserBlockingEnd?.();
     }
     if (decision.type === "deny") {
       const reason = decision.reason?.trim().length
@@ -853,7 +837,9 @@ export const executeToolUse = async (
 
   let finalContent: string | null = null;
 
-  for (let step = 1; step <= maxSteps; step += 1) {
+  ctx.onToolLoopActiveStart?.();
+  try {
+    for (let step = 1; step <= maxSteps; step += 1) {
     if (ctx.signal.aborted) {
       throw new Error("tool-use 循环被外部取消");
     }
@@ -867,7 +853,12 @@ export const executeToolUse = async (
       payload: { step, maxSteps },
     });
 
-    const llmSignal = buildToolUseLlmSignal(ctx.signal, TOOL_USE_LLM_TIMEOUT_MS);
+    const llmTimeouts = resolveLlmTimeouts(ctx.config, "tool-use");
+    const llmSignal = buildLlmCallAbortSignal(
+      ctx.signal,
+      llmTimeouts.llmStreamingMs,
+      "streaming",
+    );
     const llmStartedAt = Date.now();
     let response: Awaited<ReturnType<typeof adapter.chat>>;
     try {
@@ -881,6 +872,10 @@ export const executeToolUse = async (
         llmSignal,
       );
     } catch (error) {
+      const timeoutAbort = isBudgetTimeoutAbort(llmSignal);
+      if (timeoutAbort) {
+        throw timeoutAbort;
+      }
       // Provider 抛错（典型：402 付费问题、401 key 失效、429 限流、超时等）
       // 必须先把原因 emit 到 observability，再把错误向上抛。否则 tool-use phase
       // 的 exit 事件不会落地，用户只能看到 output 阶段的通用 fallback 文案，
@@ -972,19 +967,22 @@ export const executeToolUse = async (
     }
   }
 
-  if (finalContent === null) {
-    ctx.onToolLoopEvent?.({
-      type: "tool-loop-final",
-      steps: maxSteps,
-      success: false,
-    });
-    throw ToolLoopError.stepsExhausted(maxSteps);
+    if (finalContent === null) {
+      ctx.onToolLoopEvent?.({
+        type: "tool-loop-final",
+        steps: maxSteps,
+        success: false,
+      });
+      throw ToolLoopError.stepsExhausted(maxSteps);
+    }
+    return finalContent;
+  } finally {
+    ctx.onToolLoopActiveEnd?.();
+    ctx.onUserBlockingEnd?.();
   }
-  return finalContent;
 };
 
 export const TOOL_USE_CONSTANTS = {
-  LLM_TIMEOUT_MS: TOOL_USE_LLM_TIMEOUT_MS,
   TOOL_TIMEOUT_MS: TOOL_USE_TOOL_TIMEOUT_MS,
   SYSTEM_PROMPT_BASE: TOOL_USE_SYSTEM_PROMPT_BASE,
   HISTORY_LIMIT: TOOL_USE_HISTORY_LIMIT,

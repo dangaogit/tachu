@@ -11,6 +11,10 @@ describe("descriptor type guards", () => {
       isBaseDescriptor({
         name: "tool-1",
         description: "with optional fields",
+        version: "1.2.3",
+        displayName: "Tool 1",
+        deprecated: false,
+        deprecatedMessage: "use tool-2",
         tags: ["a", "b"],
         trigger: { type: "always" },
       }),

@@ -37,9 +37,43 @@ const requireString = (value: unknown, field: string): string => {
 const toDescriptor = (data: Record<string, unknown>, content: string): AnyDescriptor => {
   const kind = typeof data.kind === "string" ? data.kind : undefined;
   const type = typeof data.type === "string" ? data.type : undefined;
+  const knownFields = new Set([
+    "name",
+    "description",
+    "version",
+    "displayName",
+    "deprecated",
+    "deprecatedMessage",
+    "tags",
+    "trigger",
+    "requires",
+    "kind",
+    "type",
+    "scope",
+    "sideEffect",
+    "idempotent",
+    "requiresApproval",
+    "timeout",
+    "inputSchema",
+    "outputSchema",
+    "execute",
+    "instructions",
+    "resources",
+    "maxDepth",
+    "availableTools",
+  ]);
+  const extraFields = Object.fromEntries(
+    Object.entries(data).filter(([field]) => !knownFields.has(field)),
+  );
   const base = {
+    ...extraFields,
     name: requireString(data.name, "name"),
     description: requireString(data.description, "description"),
+    version: typeof data.version === "string" ? data.version : undefined,
+    displayName: typeof data.displayName === "string" ? data.displayName : undefined,
+    deprecated: data.deprecated === true,
+    deprecatedMessage:
+      typeof data.deprecatedMessage === "string" ? data.deprecatedMessage : undefined,
     tags: Array.isArray(data.tags)
       ? data.tags.filter((item): item is string => typeof item === "string")
       : undefined,

@@ -341,6 +341,28 @@ export class BudgetExhaustedError extends EngineError {
       context: { used, max },
     });
   }
+
+  static toolLoopActiveTimeExceeded(used: number, max: number): BudgetExhaustedError {
+    return new BudgetExhaustedError(
+      "BUDGET_TOOL_LOOP_ACTIVE_EXHAUSTED",
+      "工具循环活跃时长预算耗尽",
+      {
+        context: { used, max },
+      },
+    );
+  }
+
+  static llmWaitExceeded(used: number, max: number): BudgetExhaustedError {
+    return new BudgetExhaustedError("BUDGET_LLM_WAIT_EXHAUSTED", "等待模型输出超时", {
+      context: { used, max },
+    });
+  }
+
+  static llmStreamingExceeded(used: number, max: number): BudgetExhaustedError {
+    return new BudgetExhaustedError("BUDGET_LLM_STREAMING_EXHAUSTED", "模型输出持续时长超时", {
+      context: { used, max },
+    });
+  }
 }
 
 /**
@@ -401,10 +423,30 @@ export class TimeoutError extends EngineError {
  * 注册中心错误。
  */
 export class RegistryError extends EngineError {
-  static duplicate(kind: string, name: string): RegistryError {
-    return new RegistryError("REGISTRY_DUPLICATE", `${kind} 重复注册: ${name}`, {
-      context: { kind, name },
+  static duplicate(kind: string, name: string, version?: string): RegistryError {
+    return new RegistryError(
+      "REGISTRY_DUPLICATE",
+      `${kind} 重复注册: ${version ? `${name}@${version}` : name}`,
+      {
+        context: { kind, name, version },
+      },
+    );
+  }
+
+  static invalidVersion(kind: string, name: string, version: string): RegistryError {
+    return new RegistryError("REGISTRY_INVALID_VERSION", `描述符版本非法: ${kind}/${name}@${version}`, {
+      context: { kind, name, version },
     });
+  }
+
+  static deprecatedMessageRequired(kind: string, name: string): RegistryError {
+    return new RegistryError(
+      "REGISTRY_DEPRECATED_MESSAGE_REQUIRED",
+      `描述符 ${kind}/${name} 标记 deprecated=true 时必须提供 deprecatedMessage`,
+      {
+        context: { kind, name },
+      },
+    );
   }
 
   static missingDependency(kind: string, name: string): RegistryError {

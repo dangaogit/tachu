@@ -842,6 +842,15 @@ MCP（Model Context Protocol）工具通过 **McpToolAdapter**
 | 结果验证     | ✓        | ✓        |
 | 输出规范     | ✓        | ✓        |
 
+### Descriptor 协议扩展契约（MUST）
+
+- Registry 作为协议层基础设施，必须允许同名 Descriptor 的多版本共存；冲突定义为 `kind + name + version` 全相同。
+- `BaseDescriptor.version` 使用 semver；未声明版本时按 `0.0.0` 参与治理。
+- 默认查询 `get(kind, name)` 必须向后兼容：返回 latest（稳定版优先；若无稳定版则取最高 pre-release）。
+- 显式查询 `get(kind, name, version)` 必须是精确匹配，不做 range 解析。
+- Registry 必须保留 Descriptor 的未知顶层字段，并在 `get(...)` 返回时原样可读，保障下游扩展契约稳定。
+- 业务扩展字段命名建议：`x-<vendor>-<field>` 或命名空间块（如 `x-cube: { ... }`）。
+
 ---
 
 ## 十五、技术选型（候选，待最终决策）

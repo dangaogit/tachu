@@ -22,6 +22,10 @@ export type TriggerCondition =
 export interface BaseDescriptor {
   name: string;
   description: string;
+  version?: string | undefined;
+  displayName?: string | undefined;
+  deprecated?: boolean | undefined;
+  deprecatedMessage?: string | undefined;
   tags?: string[] | undefined;
   trigger?: TriggerCondition | undefined;
   requires?: DependencyRef[] | undefined;

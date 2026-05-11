@@ -243,6 +243,18 @@ export class Engine {
    * `EngineOutput.metadata.generatedImages`。
    */
   private readonly activeRunGeneratedImages = new Map<string, GeneratedImage[]>();
+  /**
+   * 活跃 runStream 的 tool-loop 计时控制回调（排除用户阻塞时间）。
+   */
+  private readonly activeRunToolLoopTimingControls = new Map<
+    string,
+    {
+      onToolLoopActiveStart: () => void;
+      onToolLoopActiveEnd: () => void;
+      onUserBlockingStart: () => void;
+      onUserBlockingEnd: () => void;
+    }
+  >();
 
   /**
    * `tool-use` 工具审批回调（ADR-0002 Stage 4）。
@@ -533,6 +545,7 @@ export class Engine {
               }
             : undefined;
         const generatedImagesSink = this.activeRunGeneratedImages.get(context.traceId);
+        const toolLoopTiming = this.activeRunToolLoopTimingControls.get(context.traceId);
         const onGeneratedImages = generatedImagesSink
           ? (images: GeneratedImage[]): void => {
               for (const img of images) {
@@ -559,6 +572,7 @@ export class Engine {
           ...(onToolCall !== undefined ? { onToolCall } : {}),
           ...(onAssistantDelta !== undefined ? { onAssistantDelta } : {}),
           ...(onGeneratedImages !== undefined ? { onGeneratedImages } : {}),
+          ...(toolLoopTiming !== undefined ? toolLoopTiming : {}),
           ...(this.onBeforeToolCall !== undefined
             ? { onBeforeToolCall: this.onBeforeToolCall }
             : {}),
@@ -660,6 +674,12 @@ export class Engine {
     this.activeRunToolCallSinks.set(normalizedContext.traceId, toolLoopToolCalls);
     const generatedImagesBucket: GeneratedImage[] = [];
     this.activeRunGeneratedImages.set(normalizedContext.traceId, generatedImagesBucket);
+    this.activeRunToolLoopTimingControls.set(normalizedContext.traceId, {
+      onToolLoopActiveStart: () => orchestrator.beginToolLoopActiveTimer(),
+      onToolLoopActiveEnd: () => orchestrator.endToolLoopActiveTimer(),
+      onUserBlockingStart: () => orchestrator.beginUserBlocking(),
+      onUserBlockingEnd: () => orchestrator.endUserBlocking(),
+    });
 
     const adapterContext = adapterCallContextFromExecution(normalizedContext);
     const phaseEnv: PhaseEnvironment = {
@@ -980,6 +1000,7 @@ export class Engine {
       this.activeRunToolCallSinks.delete(normalizedContext.traceId);
       this.activeRunDeltaOutbox.delete(normalizedContext.traceId);
       this.activeRunGeneratedImages.delete(normalizedContext.traceId);
+      this.activeRunToolLoopTimingControls.delete(normalizedContext.traceId);
     }
   }
 

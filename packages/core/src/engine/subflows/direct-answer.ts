@@ -7,6 +7,12 @@ import { messagesNeedVision } from "../../utils/input-vision";
 import type { ChatUsage, ProviderAdapter } from "../../modules/provider";
 import type { ObservabilityEmitter } from "../../modules/observability";
 import type { AssembledPrompt } from "../../prompt/assembler";
+import {
+  buildLlmCallAbortSignal,
+  createLlmStreamAbortController,
+  isBudgetTimeoutAbort,
+  resolveLlmTimeouts,
+} from "../llm-timeouts";
 
 /**
  * `direct-answer` Sub-flow 执行所需的运行时上下文。
@@ -95,8 +101,6 @@ const DIRECT_ANSWER_HISTORY_LIMIT = 10;
  *
  * 比 Phase 3 的 30s 略长：因为这里真正承担"写完整答复"职责，允许模型输出更长。
  */
-const DIRECT_ANSWER_LLM_TIMEOUT_MS = 60_000;
-
 /**
  * direct-answer Sub-flow 默认 System Prompt。
  *
@@ -142,30 +146,6 @@ const memoryEntryToMessage = (entry: MemoryEntry): Message | null => {
   const content =
     typeof entry.content === "string" ? entry.content : JSON.stringify(entry.content);
   return { role: entry.role, content };
-};
-
-/**
- * 组合取消信号 + 超时的复合 AbortSignal。
- *
- * 如果外部信号已 abort，直接透传，避免继续挂一个无意义的 setTimeout。
- */
-const buildDirectAnswerAbortSignal = (outer: AbortSignal, timeoutMs: number): AbortSignal => {
-  if (outer.aborted) return outer;
-  const controller = new AbortController();
-  const onOuterAbort = (): void => controller.abort(outer.reason);
-  outer.addEventListener("abort", onOuterAbort, { once: true });
-  const timer = setTimeout(() => {
-    controller.abort(new Error(`direct-answer LLM call timed out after ${timeoutMs}ms`));
-  }, timeoutMs);
-  controller.signal.addEventListener(
-    "abort",
-    () => {
-      clearTimeout(timer);
-      outer.removeEventListener("abort", onOuterAbort);
-    },
-    { once: true },
-  );
-  return controller.signal;
 };
 
 /**
@@ -291,7 +271,7 @@ export const executeDirectAnswer = async (
     throw new Error("direct-answer 缺少必填字段 input.prompt");
   }
 
-  const signal = buildDirectAnswerAbortSignal(ctx.signal, DIRECT_ANSWER_LLM_TIMEOUT_MS);
+  const llmTimeouts = resolveLlmTimeouts(ctx.config, "direct-answer");
   const messages: Message[] =
     input.textToImage === true
       ? [{ role: "user", content: input.prompt.trim() }]
@@ -321,6 +301,7 @@ export const executeDirectAnswer = async (
     },
   });
 
+  let activeBudgetSignal: AbortSignal | undefined;
   try {
     // 文生图强制非流式：ChatStream 的 `finish` 事件不承载 `images`，走 chat() 才能
     // 从 ChatResponse.images 拿到结构化列表并透传给 onGeneratedImages。
@@ -330,30 +311,39 @@ export const executeDirectAnswer = async (
       ctx.onAssistantDelta !== undefined;
 
     if (useStream) {
+      const streamAbort = createLlmStreamAbortController(ctx.signal, llmTimeouts);
+      activeBudgetSignal = streamAbort.signal;
       let content = "";
       let usage: ChatUsage = {
         promptTokens: 0,
         completionTokens: 0,
         totalTokens: 0,
       };
-      for await (const part of adapter.chatStream(
-        { model: route.model, messages },
-        ctx.adapterContext,
-        signal,
-      )) {
-        if (part.type === "text-delta") {
-          content += part.delta;
-          ctx.onAssistantDelta?.(part.delta);
-        } else if (part.type === "finish") {
-          if (part.usage !== undefined) {
-            usage = part.usage;
+      try {
+        for await (const part of adapter.chatStream(
+          { model: route.model, messages },
+          ctx.adapterContext,
+          streamAbort.signal,
+        )) {
+          if (part.type === "text-delta") {
+            if (part.delta.length > 0) {
+              streamAbort.markFirstOutput();
+            }
+            content += part.delta;
+            ctx.onAssistantDelta?.(part.delta);
+          } else if (part.type === "finish") {
+            if (part.usage !== undefined) {
+              usage = part.usage;
+            }
+          } else if (
+            part.type === "tool-call-delta" ||
+            part.type === "tool-call-complete"
+          ) {
+            throw new Error("direct-answer 流式响应不应包含 tool_call");
           }
-        } else if (
-          part.type === "tool-call-delta" ||
-          part.type === "tool-call-complete"
-        ) {
-          throw new Error("direct-answer 流式响应不应包含 tool_call");
         }
+      } finally {
+        streamAbort.dispose();
       }
       ctx.onProviderUsage?.(usage);
       const trimmed = content.trim();
@@ -377,6 +367,12 @@ export const executeDirectAnswer = async (
       return trimmed;
     }
 
+    const signal = buildLlmCallAbortSignal(
+      ctx.signal,
+      llmTimeouts.llmStreamingMs,
+      "streaming",
+    );
+    activeBudgetSignal = signal;
     const response = await adapter.chat(
       { model: route.model, messages },
       ctx.adapterContext,
@@ -408,6 +404,12 @@ export const executeDirectAnswer = async (
     }
     return content;
   } catch (error) {
+    const budgetTimeout = activeBudgetSignal
+      ? isBudgetTimeoutAbort(activeBudgetSignal)
+      : null;
+    if (budgetTimeout) {
+      throw budgetTimeout;
+    }
     ctx.observability.emit({
       timestamp: Date.now(),
       traceId: ctx.traceId,
@@ -427,6 +429,5 @@ export const executeDirectAnswer = async (
 
 export const DIRECT_ANSWER_CONSTANTS = {
   HISTORY_LIMIT: DIRECT_ANSWER_HISTORY_LIMIT,
-  LLM_TIMEOUT_MS: DIRECT_ANSWER_LLM_TIMEOUT_MS,
   SYSTEM_PROMPT: DIRECT_ANSWER_SYSTEM_PROMPT,
 } as const;

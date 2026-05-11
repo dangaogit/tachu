@@ -7,6 +7,7 @@ import type { ModelRouter } from "./model-router";
 import type { ProviderAdapter } from "./provider";
 import type { Tokenizer } from "../prompt/tokenizer";
 import type { VectorStore } from "../vector";
+import { buildLlmCallAbortSignal, resolveLlmTimeouts } from "../engine/llm-timeouts";
 
 /**
  * 记忆条目。
@@ -439,6 +440,12 @@ export class InMemoryMemorySystem implements MemorySystem {
     }
 
     try {
+      const llmTimeouts = resolveLlmTimeouts(this.config, "memory");
+      const signal = buildLlmCallAbortSignal(
+        new AbortController().signal,
+        llmTimeouts.llmStreamingMs,
+        "streaming",
+      );
       const response = await provider.chat(
         {
           model: route.model,
@@ -457,6 +464,7 @@ export class InMemoryMemorySystem implements MemorySystem {
           maxTokens: 256,
         },
         this.resolveAdapterContext(sessionId),
+        signal,
       );
       const content = response.content.trim();
       return content.length > 0 ? content.slice(0, 2_000) : null;

@@ -19,6 +19,15 @@ const createConfig = (override?: Partial<EngineConfig["budget"]>): EngineConfig 
     maxTokens: override?.maxTokens ?? 100,
     maxToolCalls: override?.maxToolCalls ?? 2,
     maxWallTimeMs: override?.maxWallTimeMs ?? 10_000,
+    ...(override?.maxToolLoopActiveMs !== undefined
+      ? { maxToolLoopActiveMs: override.maxToolLoopActiveMs }
+      : {}),
+    ...(override?.llmWaitFirstTokenMs !== undefined
+      ? { llmWaitFirstTokenMs: override.llmWaitFirstTokenMs }
+      : {}),
+    ...(override?.llmStreamingMs !== undefined
+      ? { llmStreamingMs: override.llmStreamingMs }
+      : {}),
   },
   safety: {
     maxInputSizeBytes: 1_024,
@@ -92,5 +101,34 @@ describe("ExecutionOrchestrator", () => {
       new DefaultObservabilityEmitter(),
     );
     expect(() => orchestrator.getActivePlan()).toThrow("No active plan");
+  });
+
+  test("tool-loop active budget excludes user blocking time", async () => {
+    const orchestrator = new ExecutionOrchestrator(
+      createConfig({ maxToolCalls: 99, maxTokens: 99, maxToolLoopActiveMs: 25 }),
+      { traceId: "tb", sessionId: "sb" },
+      new DefaultObservabilityEmitter(),
+    );
+
+    orchestrator.beginToolLoopActiveTimer();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    orchestrator.beginUserBlocking();
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    orchestrator.endUserBlocking();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(() => orchestrator.recordToolCall()).not.toThrow();
+    orchestrator.endToolLoopActiveTimer();
+  });
+
+  test("tool-loop active budget throws when active time exceeds limit", async () => {
+    const orchestrator = new ExecutionOrchestrator(
+      createConfig({ maxToolCalls: 99, maxTokens: 99, maxToolLoopActiveMs: 10 }),
+      { traceId: "ta", sessionId: "sa" },
+      new DefaultObservabilityEmitter(),
+    );
+
+    orchestrator.beginToolLoopActiveTimer();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(() => orchestrator.endToolLoopActiveTimer()).toThrow(BudgetExhaustedError);
   });
 });

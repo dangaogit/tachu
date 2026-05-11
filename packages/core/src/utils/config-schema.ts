@@ -40,7 +40,10 @@ const DEFAULT_CONFIG: EngineConfig = {
   budget: {
     maxTokens: 80_000,
     maxToolCalls: 40,
-    maxWallTimeMs: 300_000,
+    maxWallTimeMs: 43_200_000,
+    maxToolLoopActiveMs: 43_200_000,
+    llmWaitFirstTokenMs: 90_000,
+    llmStreamingMs: 43_200_000,
   },
   safety: {
     maxInputSizeBytes: 10 * 1024 * 1024,
@@ -498,6 +501,39 @@ export const validateEngineConfig = (raw: unknown): EngineConfig => {
         "runtime.streamingOutput",
         DEFAULT_CONFIG.runtime.streamingOutput ?? false,
       ),
+      ...(runtime.timeouts !== undefined
+        ? {
+            timeouts: (() => {
+              const rawTimeouts = asRecord(runtime.timeouts, "runtime.timeouts");
+              const byPhaseRaw =
+                rawTimeouts.byPhase !== undefined
+                  ? asRecord(rawTimeouts.byPhase, "runtime.timeouts.byPhase")
+                  : {};
+              const byPhase: Record<
+                string,
+                { llmWaitFirstTokenMs?: number; llmStreamingMs?: number }
+              > = {};
+              for (const [phase, value] of Object.entries(byPhaseRaw)) {
+                const entry = asRecord(value, `runtime.timeouts.byPhase.${phase}`);
+                byPhase[phase] = {
+                  llmWaitFirstTokenMs: asNumber(
+                    entry.llmWaitFirstTokenMs,
+                    `runtime.timeouts.byPhase.${phase}.llmWaitFirstTokenMs`,
+                    DEFAULT_CONFIG.budget.llmWaitFirstTokenMs ?? 90_000,
+                    { min: 1_000 },
+                  ),
+                  llmStreamingMs: asNumber(
+                    entry.llmStreamingMs,
+                    `runtime.timeouts.byPhase.${phase}.llmStreamingMs`,
+                    DEFAULT_CONFIG.budget.llmStreamingMs ?? 43_200_000,
+                    { min: 1_000 },
+                  ),
+                };
+              }
+              return { byPhase };
+            })(),
+          }
+        : {}),
     },
     memory: {
       contextTokenLimit: asNumber(
@@ -571,6 +607,24 @@ export const validateEngineConfig = (raw: unknown): EngineConfig => {
         budget.maxWallTimeMs,
         "budget.maxWallTimeMs",
         DEFAULT_CONFIG.budget.maxWallTimeMs,
+        { min: 1_000 },
+      ),
+      maxToolLoopActiveMs: asNumber(
+        budget.maxToolLoopActiveMs,
+        "budget.maxToolLoopActiveMs",
+        DEFAULT_CONFIG.budget.maxToolLoopActiveMs ?? 43_200_000,
+        { min: 1_000 },
+      ),
+      llmWaitFirstTokenMs: asNumber(
+        budget.llmWaitFirstTokenMs,
+        "budget.llmWaitFirstTokenMs",
+        DEFAULT_CONFIG.budget.llmWaitFirstTokenMs ?? 90_000,
+        { min: 1_000 },
+      ),
+      llmStreamingMs: asNumber(
+        budget.llmStreamingMs,
+        "budget.llmStreamingMs",
+        DEFAULT_CONFIG.budget.llmStreamingMs ?? 43_200_000,
         { min: 1_000 },
       ),
     },

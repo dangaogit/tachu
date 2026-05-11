@@ -22,8 +22,12 @@ export class ExecutionOrchestrator {
     tokens: 0,
     toolCalls: 0,
     wallTimeMs: 0,
+    toolLoopActiveMs: 0,
   };
   private readonly startedAt = Date.now();
+  private toolLoopActiveStartedAt: number | null = null;
+  private toolLoopBlockedStartedAt: number | null = null;
+  private toolLoopBlockedAccumulatedMs = 0;
 
   constructor(
     private readonly config: EngineConfig,
@@ -143,6 +147,7 @@ export class ExecutionOrchestrator {
     tokens: number;
     toolCalls: number;
     wallTimeMs: number;
+    toolLoopActiveMs: number;
   } {
     return {
       promptTokens: this.used.promptTokens,
@@ -151,7 +156,48 @@ export class ExecutionOrchestrator {
       tokens: this.used.tokens,
       toolCalls: this.used.toolCalls,
       wallTimeMs: Date.now() - this.startedAt,
+      toolLoopActiveMs: this.getCurrentToolLoopActiveMs(Date.now()),
     };
+  }
+
+  beginToolLoopActiveTimer(): void {
+    if (this.toolLoopActiveStartedAt !== null) {
+      return;
+    }
+    this.toolLoopActiveStartedAt = Date.now();
+    this.toolLoopBlockedAccumulatedMs = 0;
+    this.toolLoopBlockedStartedAt = null;
+  }
+
+  endToolLoopActiveTimer(): void {
+    const now = Date.now();
+    if (this.toolLoopActiveStartedAt === null) {
+      return;
+    }
+    if (this.toolLoopBlockedStartedAt !== null) {
+      this.toolLoopBlockedAccumulatedMs += now - this.toolLoopBlockedStartedAt;
+      this.toolLoopBlockedStartedAt = null;
+    }
+    this.used.toolLoopActiveMs +=
+      now - this.toolLoopActiveStartedAt - this.toolLoopBlockedAccumulatedMs;
+    this.toolLoopActiveStartedAt = null;
+    this.toolLoopBlockedAccumulatedMs = 0;
+    this.assertBudget();
+  }
+
+  beginUserBlocking(): void {
+    if (this.toolLoopActiveStartedAt === null || this.toolLoopBlockedStartedAt !== null) {
+      return;
+    }
+    this.toolLoopBlockedStartedAt = Date.now();
+  }
+
+  endUserBlocking(): void {
+    if (this.toolLoopBlockedStartedAt === null) {
+      return;
+    }
+    this.toolLoopBlockedAccumulatedMs += Date.now() - this.toolLoopBlockedStartedAt;
+    this.toolLoopBlockedStartedAt = null;
   }
 
   private assertBudget(): void {
@@ -171,6 +217,29 @@ export class ExecutionOrchestrator {
         this.config.budget.maxWallTimeMs,
       );
     }
+    const toolLoopActiveMs = this.getCurrentToolLoopActiveMs(Date.now());
+    const maxToolLoopActiveMs = this.config.budget.maxToolLoopActiveMs;
+    if (
+      typeof maxToolLoopActiveMs === "number" &&
+      toolLoopActiveMs > maxToolLoopActiveMs
+    ) {
+      throw BudgetExhaustedError.toolLoopActiveTimeExceeded(
+        toolLoopActiveMs,
+        maxToolLoopActiveMs,
+      );
+    }
+  }
+
+  private getCurrentToolLoopActiveMs(now: number): number {
+    let current = this.used.toolLoopActiveMs;
+    if (this.toolLoopActiveStartedAt === null) {
+      return current;
+    }
+    const blocked =
+      this.toolLoopBlockedAccumulatedMs +
+      (this.toolLoopBlockedStartedAt !== null ? now - this.toolLoopBlockedStartedAt : 0);
+    current += now - this.toolLoopActiveStartedAt - blocked;
+    return current;
   }
 }
 

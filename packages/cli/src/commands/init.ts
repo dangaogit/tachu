@@ -207,6 +207,12 @@ const config: EngineConfig = {
         maxPromptChars: 120,
       },
     },
+    timeouts: {
+      byPhase: {
+        // 按 phase 覆盖 LLM 超时（可选）。未命中时回退到 budget 的全局默认。
+        // 'planning': { llmWaitFirstTokenMs: 120000, llmStreamingMs: 43200000 },
+      },
+    },
   },
   memory: {
     contextTokenLimit: 8000,
@@ -216,7 +222,18 @@ const config: EngineConfig = {
     archivePath: '.tachu/archive.jsonl',
     vectorIndexLimit: 10000,
   },
-  budget: { maxTokens: 50000, maxToolCalls: 50, maxWallTimeMs: 300000 },
+  budget: {
+    maxTokens: 50000,
+    maxToolCalls: 50,
+    // run 级墙钟兜底（含阻塞时间）
+    maxWallTimeMs: 43_200_000,
+    // tool-use 活跃时长预算（不含用户阻塞等待）
+    maxToolLoopActiveMs: 43_200_000,
+    // 单次 LLM 调用：等待首 token（TTFB）超时
+    llmWaitFirstTokenMs: 90_000,
+    // 单次 LLM 调用：开始输出后的持续时长上限（非流式整次调用按此值）
+    llmStreamingMs: 43_200_000,
+  },
   safety: {
     maxInputSizeBytes: 1_000_000,
     maxRecursionDepth: 10,

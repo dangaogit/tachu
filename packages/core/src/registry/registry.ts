@@ -1,4 +1,5 @@
 import { RegistryError } from "../errors";
+import { compare as compareSemver, prerelease, valid as validSemver } from "semver";
 import type {
   AgentDescriptor,
   AnyDescriptor,
@@ -56,7 +57,7 @@ export interface Registry {
    * @param kind 描述符类型
    * @param name 描述符名称
    */
-  unregister(kind: DescriptorKind, name: string): Promise<void>;
+  unregister(kind: DescriptorKind, name: string, version?: string): Promise<void>;
   /**
    * 获取单个描述符。
    *
@@ -65,6 +66,9 @@ export interface Registry {
    * @returns 匹配项，不存在时返回 null
    */
   get<K extends DescriptorKind>(kind: K, name: string): DescriptorMap[K] | null;
+  get<K extends DescriptorKind>(kind: K, name: string, version: string): DescriptorMap[K] | null;
+  getLatest<K extends DescriptorKind>(kind: K, name: string): DescriptorMap[K] | null;
+  listVersions<K extends DescriptorKind>(kind: K, name: string): string[];
   /**
    * 列出描述符。
    *
@@ -95,10 +99,11 @@ export interface Registry {
  * 统一描述符注册中心。
  */
 export class DescriptorRegistry implements Registry {
-  private readonly rules = new Map<string, RuleDescriptor>();
-  private readonly skills = new Map<string, SkillDescriptor>();
-  private readonly tools = new Map<string, ToolDescriptor>();
-  private readonly agents = new Map<string, AgentDescriptor>();
+  private static readonly DEFAULT_VERSION = "0.0.0";
+  private readonly rules = new Map<string, Map<string, RuleDescriptor>>();
+  private readonly skills = new Map<string, Map<string, SkillDescriptor>>();
+  private readonly tools = new Map<string, Map<string, ToolDescriptor>>();
+  private readonly agents = new Map<string, Map<string, AgentDescriptor>>();
   private readonly vectorStore: VectorStore | undefined;
   private readonly reservedNames: ReadonlySet<string>;
 
@@ -128,19 +133,26 @@ export class DescriptorRegistry implements Registry {
     if (this.reservedNames.has(descriptor.name)) {
       throw RegistryError.reservedName(descriptor.name);
     }
-    const bucket = this.getBucket(descriptor.kind);
-    if (bucket.has(descriptor.name)) {
-      throw RegistryError.duplicate(descriptor.kind, descriptor.name);
+    this.validateGovernanceFields(descriptor);
+    const normalizedVersion = this.normalizeVersion(
+      descriptor.kind,
+      descriptor.name,
+      descriptor.version,
+    );
+    const versionBucket = this.getOrCreateVersionBucket(descriptor.kind, descriptor.name);
+    if (versionBucket.has(normalizedVersion)) {
+      throw RegistryError.duplicate(descriptor.kind, descriptor.name, normalizedVersion);
     }
-    bucket.set(descriptor.name, descriptor as never);
+    versionBucket.set(normalizedVersion, descriptor as never);
 
     if (this.vectorStore) {
       await this.vectorStore.upsert(
-        `${descriptor.kind}:${descriptor.name}`,
+        `${descriptor.kind}:${descriptor.name}@${normalizedVersion}`,
         `${descriptor.description}\n${descriptor.tags?.join(",") ?? ""}`,
         {
           kind: descriptor.kind,
           name: descriptor.name,
+          version: normalizedVersion,
           description: descriptor.description,
           tags: descriptor.tags ?? [],
         },
@@ -148,33 +160,77 @@ export class DescriptorRegistry implements Registry {
     }
   }
 
-  async unregister(kind: DescriptorKind, name: string): Promise<void> {
+  async unregister(kind: DescriptorKind, name: string, version?: string): Promise<void> {
     if (this.reservedNames.has(name)) {
       throw RegistryError.reservedName(name);
     }
-    this.getBucket(kind).delete(name);
+    const bucket = this.getBucket(kind);
+    const versionBucket = bucket.get(name);
+    if (!versionBucket) {
+      return;
+    }
+
+    if (version) {
+      const normalizedVersion = this.normalizeVersion(kind, name, version);
+      versionBucket.delete(normalizedVersion);
+      if (versionBucket.size === 0) {
+        bucket.delete(name);
+      }
+      if (this.vectorStore) {
+        await this.vectorStore.delete(`${kind}:${name}@${normalizedVersion}`);
+      }
+      return;
+    }
+
+    bucket.delete(name);
     if (this.vectorStore) {
-      await this.vectorStore.delete(`${kind}:${name}`);
+      const vectorStore = this.vectorStore;
+      const deletes = [...versionBucket.keys()].map((existingVersion) =>
+        vectorStore.delete(`${kind}:${name}@${existingVersion}`),
+      );
+      await Promise.all(deletes);
     }
   }
 
-  get<K extends DescriptorKind>(kind: K, name: string): DescriptorMap[K] | null {
-    const entry = this.getBucket(kind).get(name);
+  get<K extends DescriptorKind>(kind: K, name: string): DescriptorMap[K] | null;
+  get<K extends DescriptorKind>(kind: K, name: string, version: string): DescriptorMap[K] | null;
+  get<K extends DescriptorKind>(kind: K, name: string, version?: string): DescriptorMap[K] | null {
+    if (version) {
+      const normalizedVersion = this.normalizeVersion(kind, name, version);
+      const versionBucket = this.getBucket(kind).get(name);
+      const entry = versionBucket?.get(normalizedVersion);
+      return (entry as DescriptorMap[K] | undefined) ?? null;
+    }
+    return this.getLatest(kind, name);
+  }
+
+  getLatest<K extends DescriptorKind>(kind: K, name: string): DescriptorMap[K] | null {
+    const versionBucket = this.getBucket(kind).get(name);
+    if (!versionBucket || versionBucket.size === 0) {
+      return null;
+    }
+    const latestVersion = this.pickLatestVersion(versionBucket);
+    const entry = latestVersion ? versionBucket.get(latestVersion) : null;
     return (entry as DescriptorMap[K] | undefined) ?? null;
+  }
+
+  listVersions<K extends DescriptorKind>(kind: K, name: string): string[] {
+    const versionBucket = this.getBucket(kind).get(name);
+    if (!versionBucket || versionBucket.size === 0) {
+      return [];
+    }
+    return [...versionBucket.keys()].sort((left, right) => compareSemver(right, left));
   }
 
   list<K extends DescriptorKind>(
     kind?: K,
   ): K extends undefined ? AnyDescriptor[] : DescriptorMap[K][] {
     if (!kind) {
-      return [
-        ...this.rules.values(),
-        ...this.skills.values(),
-        ...this.tools.values(),
-        ...this.agents.values(),
-      ] as K extends undefined ? AnyDescriptor[] : DescriptorMap[K][];
+      return this.listLatestAcrossKinds() as K extends undefined
+        ? AnyDescriptor[]
+        : DescriptorMap[K][];
     }
-    return [...this.getBucket(kind).values()] as K extends undefined
+    return this.listLatestInKind(kind) as K extends undefined
       ? AnyDescriptor[]
       : DescriptorMap[K][];
   }
@@ -201,7 +257,7 @@ export class DescriptorRegistry implements Registry {
   }
 
   validateDependencies(): void {
-    const descriptors = this.list();
+    const descriptors = this.listAllVersions();
     for (const descriptor of descriptors) {
       for (const dep of descriptor.requires ?? []) {
         if (!this.exists(dep)) {
@@ -210,38 +266,134 @@ export class DescriptorRegistry implements Registry {
       }
     }
 
-    const nodes = descriptors.map((descriptor) => ({
-      id: `${descriptor.kind}:${descriptor.name}`,
+    const nodeIds = new Set(descriptors.map((descriptor) => `${descriptor.kind}:${descriptor.name}`));
+    const nodes = [...nodeIds].map((id) => ({
+      id,
       type: "sub-flow" as const,
-      ref: descriptor.name,
+      ref: id,
       input: {},
     }));
-    const edges = descriptors.flatMap((descriptor) =>
-      (descriptor.requires ?? []).map((dep) => ({
-        from: `${descriptor.kind}:${descriptor.name}`,
-        to: `${dep.kind}:${dep.name}`,
-      })),
-    );
+    const edgeMap = new Map<string, { from: string; to: string }>();
+    for (const descriptor of descriptors) {
+      for (const dep of descriptor.requires ?? []) {
+        const from = `${descriptor.kind}:${descriptor.name}`;
+        const to = `${dep.kind}:${dep.name}`;
+        edgeMap.set(`${from}->${to}`, { from, to });
+      }
+    }
+    const edges = [...edgeMap.values()];
     topologicalSort(nodes, edges);
   }
 
   private exists(dep: DependencyRef): boolean {
-    return this.getBucket(dep.kind).has(dep.name);
+    const versions = this.getBucket(dep.kind).get(dep.name);
+    return Boolean(versions && versions.size > 0);
   }
 
   private getBucket<K extends DescriptorKind>(
     kind: K,
-  ): Map<string, DescriptorMap[K]> {
+  ): Map<string, Map<string, DescriptorMap[K]>> {
     if (kind === "rule") {
-      return this.rules as unknown as Map<string, DescriptorMap[K]>;
+      return this.rules as unknown as Map<string, Map<string, DescriptorMap[K]>>;
     }
     if (kind === "skill") {
-      return this.skills as unknown as Map<string, DescriptorMap[K]>;
+      return this.skills as unknown as Map<string, Map<string, DescriptorMap[K]>>;
     }
     if (kind === "tool") {
-      return this.tools as unknown as Map<string, DescriptorMap[K]>;
+      return this.tools as unknown as Map<string, Map<string, DescriptorMap[K]>>;
     }
-    return this.agents as unknown as Map<string, DescriptorMap[K]>;
+    return this.agents as unknown as Map<string, Map<string, DescriptorMap[K]>>;
+  }
+
+  private getOrCreateVersionBucket<K extends DescriptorKind>(
+    kind: K,
+    name: string,
+  ): Map<string, DescriptorMap[K]> {
+    const bucket = this.getBucket(kind);
+    const existing = bucket.get(name);
+    if (existing) {
+      return existing;
+    }
+    const created = new Map<string, DescriptorMap[K]>();
+    bucket.set(name, created as never);
+    return created;
+  }
+
+  private listLatestAcrossKinds(): AnyDescriptor[] {
+    return [
+      ...this.listLatestInKind("rule"),
+      ...this.listLatestInKind("skill"),
+      ...this.listLatestInKind("tool"),
+      ...this.listLatestInKind("agent"),
+    ];
+  }
+
+  private listLatestInKind<K extends DescriptorKind>(kind: K): DescriptorMap[K][] {
+    const bucket = this.getBucket(kind);
+    const latest: DescriptorMap[K][] = [];
+    for (const versionBucket of bucket.values()) {
+      const latestVersion = this.pickLatestVersion(versionBucket);
+      if (!latestVersion) {
+        continue;
+      }
+      const descriptor = versionBucket.get(latestVersion);
+      if (descriptor) {
+        latest.push(descriptor);
+      }
+    }
+    return latest;
+  }
+
+  private listAllVersions(): AnyDescriptor[] {
+    return [
+      ...this.flattenBucket(this.rules),
+      ...this.flattenBucket(this.skills),
+      ...this.flattenBucket(this.tools),
+      ...this.flattenBucket(this.agents),
+    ];
+  }
+
+  private flattenBucket<K extends DescriptorKind>(
+    bucket: Map<string, Map<string, DescriptorMap[K]>>,
+  ): DescriptorMap[K][] {
+    const descriptors: DescriptorMap[K][] = [];
+    for (const versionBucket of bucket.values()) {
+      descriptors.push(...versionBucket.values());
+    }
+    return descriptors;
+  }
+
+  private normalizeVersion(kind: DescriptorKind, name: string, rawVersion: string | undefined): string {
+    if (rawVersion === undefined || rawVersion.trim().length === 0) {
+      return DescriptorRegistry.DEFAULT_VERSION;
+    }
+    const normalized = validSemver(rawVersion.trim());
+    if (!normalized) {
+      throw RegistryError.invalidVersion(kind, name, rawVersion);
+    }
+    return normalized;
+  }
+
+  private pickLatestVersion<T>(versionBucket: Map<string, T>): string | null {
+    const versions = [...versionBucket.keys()];
+    if (versions.length === 0) {
+      return null;
+    }
+    const stableVersions = versions.filter((version) => prerelease(version) === null);
+    const candidates = stableVersions.length > 0 ? stableVersions : versions;
+    return candidates.sort((left, right) => compareSemver(right, left))[0] ?? null;
+  }
+
+  private validateGovernanceFields(descriptor: AnyDescriptor): void {
+    if (descriptor.deprecated !== true) {
+      return;
+    }
+    if (
+      descriptor.deprecatedMessage === undefined ||
+      descriptor.deprecatedMessage.trim().length === 0
+    ) {
+      throw RegistryError.deprecatedMessageRequired(descriptor.kind, descriptor.name);
+    }
   }
 }
 

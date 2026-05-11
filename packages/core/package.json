@@ -53,6 +53,7 @@
   },
   "dependencies": {
     "gray-matter": "catalog:",
+    "semver": "^7.8.0",
     "tiktoken": "catalog:"
   },
   "scripts": {
@@ -62,5 +63,8 @@
     "bench": "bun test ./benchmarks/scheduler.bench.ts ./benchmarks/vector-store.bench.ts ./benchmarks/prompt-assembler.bench.ts",
     "test": "bun test",
     "test:coverage": "bun test --coverage"
+  },
+  "devDependencies": {
+    "@types/semver": "^7.7.1"
   }
 }

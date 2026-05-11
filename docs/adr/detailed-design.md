@@ -66,11 +66,22 @@ cli → core
 interface BaseDescriptor {
   name: string;              // 唯一标识
   description: string;       // 自然语言描述（用于语义发现）
+  version?: string;          // semver；未声明时按 0.0.0 处理
+  displayName?: string;      // 面向 UI/列表展示的人类可读名
+  deprecated?: boolean;      // 治理标记：是否已废弃
+  deprecatedMessage?: string; // deprecated=true 时必须提供迁移提示
   tags?: string[];           // 标签（过滤和分类）
   trigger?: TriggerCondition; // 激活条件
   requires?: DependencyRef[]; // 显式依赖引用
 }
 ```
+
+#### 描述符扩展字段契约（MUST）
+
+- `DescriptorRegistry.register(descriptor)` 必须保留描述符的未知顶层字段（passthrough），不得在注册层剥离。
+- `DescriptorRegistry.get(...)` 返回对象必须包含原始未知字段，保证协议向前兼容。
+- 建议业务扩展字段使用 `x-<vendor>-<field>` 或命名空间块（如 `x-cube: { ... }`）避免与未来核心字段碰撞。
+- 版本解析规则：`get(kind, name)` 返回 latest（稳定版优先；若无稳定版则取最高 pre-release）；显式 `get(kind, name, version)` 走精确匹配。
 
 #### TriggerCondition
 

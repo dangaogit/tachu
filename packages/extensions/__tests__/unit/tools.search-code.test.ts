@@ -50,4 +50,13 @@ describe("search-code executor", () => {
       (Bun as unknown as { spawn: typeof Bun.spawn }).spawn = originalSpawn;
     }
   });
+
+  it("auto-downgrades invalid regex pattern to fixed-string search", async () => {
+    await writeFile(`${root}/regex.ts`, "const call = JSON.stringify(value);\n");
+    const result = await searchCodeExecutor(
+      { pattern: "JSON.stringify(", path: ".", fileGlob: "*.ts" },
+      createToolContext(root),
+    );
+    expect(result.matches.some((item) => item.text.includes("JSON.stringify("))).toBe(true);
+  });
 });

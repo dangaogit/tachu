@@ -93,6 +93,10 @@ export interface InternalSubflowContext {
    * 与 `ExecutionOrchestrator`。仅 `tool-use` 消费。
    */
   onToolCall?: (record: ToolCallRecord) => void;
+  onToolLoopActiveStart?: () => void;
+  onToolLoopActiveEnd?: () => void;
+  onUserBlockingStart?: () => void;
+  onUserBlockingEnd?: () => void;
   /**
    * `direct-answer` 流式正文分片（需 `runtime.streamingOutput` 与 Provider `chatStream`）。
    */
@@ -204,6 +208,18 @@ export class InternalSubflowRegistry {
           ? { onToolLoopEvent: ctx.onToolLoopEvent }
           : {}),
         ...(ctx.onToolCall !== undefined ? { onToolCall: ctx.onToolCall } : {}),
+        ...(ctx.onToolLoopActiveStart !== undefined
+          ? { onToolLoopActiveStart: ctx.onToolLoopActiveStart }
+          : {}),
+        ...(ctx.onToolLoopActiveEnd !== undefined
+          ? { onToolLoopActiveEnd: ctx.onToolLoopActiveEnd }
+          : {}),
+        ...(ctx.onUserBlockingStart !== undefined
+          ? { onUserBlockingStart: ctx.onUserBlockingStart }
+          : {}),
+        ...(ctx.onUserBlockingEnd !== undefined
+          ? { onUserBlockingEnd: ctx.onUserBlockingEnd }
+          : {}),
         ...(ctx.onBeforeToolCall !== undefined
           ? { onBeforeToolCall: ctx.onBeforeToolCall }
           : {}),

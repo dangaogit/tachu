@@ -11,6 +11,7 @@ describe("DescriptorRegistry", () => {
       kind: "tool",
       name: "read-file",
       description: "read file",
+      version: "1.0.0",
       tags: ["fs", "io"],
       trigger: { type: "always" },
       sideEffect: "readonly",
@@ -24,6 +25,7 @@ describe("DescriptorRegistry", () => {
       kind: "rule",
       name: "safe-output",
       description: "ensure safe output",
+      version: "1.0.0",
       type: "rule",
       scope: ["output"],
       content: "never output secrets",
@@ -32,6 +34,9 @@ describe("DescriptorRegistry", () => {
     });
 
     expect(registry.get("tool", "read-file")?.name).toBe("read-file");
+    expect(registry.get("tool", "read-file", "1.0.0")?.name).toBe("read-file");
+    expect(registry.getLatest("tool", "read-file")?.name).toBe("read-file");
+    expect(registry.listVersions("tool", "read-file")).toEqual(["1.0.0"]);
     expect(registry.list("rule")).toHaveLength(1);
     expect(registry.list().length).toBe(2);
     expect(registry.query({ tags: ["security"] })).toHaveLength(1);
@@ -42,12 +47,13 @@ describe("DescriptorRegistry", () => {
     expect(vectorStore.size()).toBe(1);
   });
 
-  test("rejects duplicate names", async () => {
+  test("rejects duplicate version under same name", async () => {
     const registry = new DescriptorRegistry();
     await registry.register({
       kind: "rule",
       name: "r1",
       description: "rule 1",
+      version: "1.0.0",
       type: "rule",
       scope: ["*"],
       content: "rule",
@@ -57,11 +63,173 @@ describe("DescriptorRegistry", () => {
         kind: "rule",
         name: "r1",
         description: "rule 1 duplicate",
+        version: "1.0.0",
         type: "rule",
         scope: ["*"],
         content: "rule",
       }),
     ).rejects.toBeInstanceOf(RegistryError);
+  });
+
+  test("allows same name with multiple versions and resolves latest", async () => {
+    const registry = new DescriptorRegistry();
+    await registry.register({
+      kind: "tool",
+      name: "read-file",
+      description: "legacy",
+      version: "1.2.3-beta.1",
+      sideEffect: "readonly",
+      idempotent: true,
+      requiresApproval: false,
+      timeout: 1_000,
+      inputSchema: { type: "object" },
+      execute: "readFile",
+    });
+    await registry.register({
+      kind: "tool",
+      name: "read-file",
+      description: "stable",
+      version: "1.2.2",
+      sideEffect: "readonly",
+      idempotent: true,
+      requiresApproval: false,
+      timeout: 1_000,
+      inputSchema: { type: "object" },
+      execute: "readFile",
+    });
+    await registry.register({
+      kind: "tool",
+      name: "read-file",
+      description: "latest stable",
+      version: "1.3.0",
+      sideEffect: "readonly",
+      idempotent: true,
+      requiresApproval: false,
+      timeout: 1_000,
+      inputSchema: { type: "object" },
+      execute: "readFile",
+    });
+
+    expect(registry.get("tool", "read-file")?.description).toBe("latest stable");
+    expect(registry.get("tool", "read-file", "1.2.3-beta.1")?.description).toBe("legacy");
+    expect(registry.list("tool")).toHaveLength(1);
+    expect(registry.listVersions("tool", "read-file")).toEqual(["1.3.0", "1.2.3-beta.1", "1.2.2"]);
+  });
+
+  test("falls back to prerelease latest when stable versions absent", async () => {
+    const registry = new DescriptorRegistry();
+    await registry.register({
+      kind: "skill",
+      name: "planner",
+      description: "beta one",
+      version: "2.0.0-beta.1",
+      instructions: "plan",
+    });
+    await registry.register({
+      kind: "skill",
+      name: "planner",
+      description: "beta two",
+      version: "2.0.0-beta.2",
+      instructions: "plan",
+    });
+
+    expect(registry.get("skill", "planner")?.description).toBe("beta two");
+  });
+
+  test("treats descriptors without version as 0.0.0", async () => {
+    const registry = new DescriptorRegistry();
+    await registry.register({
+      kind: "agent",
+      name: "review-agent",
+      description: "no version",
+      sideEffect: "readonly",
+      idempotent: true,
+      requiresApproval: false,
+      timeout: 1_000,
+      maxDepth: 1,
+      instructions: "review",
+    });
+    expect(registry.get("agent", "review-agent", "0.0.0")?.description).toBe("no version");
+    expect(registry.listVersions("agent", "review-agent")).toEqual(["0.0.0"]);
+  });
+
+  test("rejects invalid semver version", async () => {
+    const registry = new DescriptorRegistry();
+    await expect(
+      registry.register({
+        kind: "rule",
+        name: "invalid-version",
+        description: "bad",
+        version: "latest",
+        type: "rule",
+        scope: ["*"],
+        content: "rule",
+      }),
+    ).rejects.toBeInstanceOf(RegistryError);
+  });
+
+  test("requires deprecatedMessage when deprecated=true", async () => {
+    const registry = new DescriptorRegistry();
+    await expect(
+      registry.register({
+        kind: "rule",
+        name: "legacy",
+        description: "legacy",
+        deprecated: true,
+        type: "rule",
+        scope: ["*"],
+        content: "legacy rule",
+      }),
+    ).rejects.toBeInstanceOf(RegistryError);
+  });
+
+  test("preserves unknown descriptor fields in register/get flow", async () => {
+    const registry = new DescriptorRegistry();
+    await registry.register({
+      kind: "skill",
+      name: "x-skill",
+      description: "with vendor fields",
+      instructions: "run",
+      "x-cube": {
+        owner: "cube",
+      },
+      "x-vendor-priority": 7,
+    } as never);
+
+    const descriptor = registry.get("skill", "x-skill") as unknown as Record<string, unknown>;
+    expect(descriptor["x-vendor-priority"]).toBe(7);
+    expect((descriptor["x-cube"] as { owner: string }).owner).toBe("cube");
+  });
+
+  test("unregister accepts explicit version", async () => {
+    const registry = new DescriptorRegistry();
+    await registry.register({
+      kind: "tool",
+      name: "read-file",
+      description: "v1",
+      version: "1.0.0",
+      sideEffect: "readonly",
+      idempotent: true,
+      requiresApproval: false,
+      timeout: 1_000,
+      inputSchema: { type: "object" },
+      execute: "readFile",
+    });
+    await registry.register({
+      kind: "tool",
+      name: "read-file",
+      description: "v2",
+      version: "2.0.0",
+      sideEffect: "readonly",
+      idempotent: true,
+      requiresApproval: false,
+      timeout: 1_000,
+      inputSchema: { type: "object" },
+      execute: "readFile",
+    });
+
+    await registry.unregister("tool", "read-file", "2.0.0");
+    expect(registry.get("tool", "read-file")?.description).toBe("v1");
   });
 
   test("validates missing dependency and dependency cycle", async () => {

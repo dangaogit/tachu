@@ -4,10 +4,16 @@ import type { InputEnvelope } from "../../types/io";
 import type { MemoryEntry } from "../../modules/memory";
 import type { ModelRouter } from "../../modules/model-router";
 import type { ProviderAdapter } from "../../modules/provider";
+import { BudgetExhaustedError } from "../../errors";
 import { envelopeNeedsTextToImage, envelopeNeedsVision } from "../../utils/input-vision";
 import { applyTextToImageHeuristicToEnvelope } from "../../utils/text-to-image-heuristic";
 import type { SafetyPhaseOutput } from "./safety";
 import type { PhaseEnvironment } from "./index";
+import {
+  buildLlmCallAbortSignal,
+  isBudgetTimeoutAbort,
+  resolveLlmTimeouts,
+} from "../llm-timeouts";
 
 /**
  * Intent LLM 调用的默认超时时间（毫秒）。
@@ -15,8 +21,6 @@ import type { PhaseEnvironment } from "./index";
  * 该值被故意设得短一些，因为 Phase 3 处于关键路径上 —— 每轮对话都会经过；
  * 如果 LLM 此处卡住，后面所有阶段都无法开始。超时后自动回退到启发式判断。
  */
-const INTENT_LLM_TIMEOUT_MS = 30_000;
-
 /**
  * Intent 阶段带入 LLM 的历史消息上限。
  *
@@ -424,31 +428,6 @@ const withTextToImageMetadata = (input: InputEnvelope): InputEnvelope => ({
 });
 
 /**
- * 构造带超时保护的 AbortSignal；与阶段取消信号合并。
- *
- * 如果宿主已经取消（例如 last-message-wins 抢占），直接透传。
- * 否则叠加一个 timeoutMs 的自动超时。
- */
-const buildIntentAbortSignal = (outer: AbortSignal, timeoutMs: number): AbortSignal => {
-  if (outer.aborted) return outer;
-  const controller = new AbortController();
-  const onOuterAbort = (): void => controller.abort(outer.reason);
-  outer.addEventListener("abort", onOuterAbort, { once: true });
-  const timer = setTimeout(() => {
-    controller.abort(new Error(`intent LLM call timed out after ${timeoutMs}ms`));
-  }, timeoutMs);
-  controller.signal.addEventListener(
-    "abort",
-    () => {
-      clearTimeout(timer);
-      outer.removeEventListener("abort", onOuterAbort);
-    },
-    { once: true },
-  );
-  return controller.signal;
-};
-
-/**
  * 组装要喂给 intent LLM 的 Message 列表：system + 最近 N 轮历史 + 本轮用户输入。
  */
 const buildIntentMessages = async (
@@ -491,7 +470,12 @@ const callIntentLLM = async (
   sessionId: string,
   traceId: string,
 ): Promise<IntentResult | null> => {
-  const signal = buildIntentAbortSignal(env.activeAbortSignal, INTENT_LLM_TIMEOUT_MS);
+  const llmTimeouts = resolveLlmTimeouts(env.config, "intent");
+  const signal = buildLlmCallAbortSignal(
+    env.activeAbortSignal,
+    llmTimeouts.llmStreamingMs,
+    "streaming",
+  );
   const startedAt = Date.now();
   env.observability.emit({
     timestamp: startedAt,
@@ -553,6 +537,10 @@ const callIntentLLM = async (
       contextRelevance: "related",
     };
   } catch (error) {
+    const budgetTimeout = isBudgetTimeoutAbort(signal);
+    if (budgetTimeout) {
+      throw budgetTimeout;
+    }
     env.observability.emit({
       timestamp: Date.now(),
       traceId,
@@ -695,6 +683,10 @@ export const runIntentPhase = async (
       });
     }
   } catch (error) {
+    // 预算超时必须中断当前 run，而非回退启发式继续。
+    if (error instanceof BudgetExhaustedError) {
+      throw error;
+    }
     env.observability.emit({
       timestamp: Date.now(),
       traceId: working.context.traceId,

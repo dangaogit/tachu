@@ -23,6 +23,47 @@ interface SearchCodeOutput {
   truncated: boolean;
 }
 
+const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const isRegexSyntaxError = (stderr: string): boolean =>
+  /(regex parse error|invalid regular expression|unclosed group|missing \))/i.test(stderr);
+
+const runRgSearch = async (
+  input: SearchCodeInput,
+  root: string,
+  maxResults: number,
+  useFixedStrings: boolean,
+): Promise<{ code: number; stdout: string; stderr: string }> => {
+  const args = [
+    "--line-number",
+    "--no-heading",
+    "--color",
+    "never",
+    input.caseSensitive ? "--case-sensitive" : "--ignore-case",
+    "--max-count",
+    String(maxResults),
+  ];
+  if (useFixedStrings) {
+    args.push("--fixed-strings");
+  }
+  if (input.fileGlob) {
+    args.push("--glob", input.fileGlob);
+  }
+  args.push(input.pattern, root);
+  const process = Bun.spawn({
+    cmd: ["rg", ...args],
+    stdout: "pipe",
+    stderr: "pipe",
+    cwd: root,
+  });
+  const [stdout, stderr] = await Promise.all([
+    new Response(process.stdout).text(),
+    new Response(process.stderr).text(),
+  ]);
+  const code = await process.exited;
+  return { code, stdout, stderr };
+};
+
 const parseRgOutput = (
   output: string,
   maxResults: number,
@@ -59,30 +100,12 @@ export const searchCodeExecutor: ToolExecutor<SearchCodeInput, SearchCodeOutput>
   const maxResults = input.maxResults ?? 100;
 
   try {
-    const args = [
-      "--line-number",
-      "--no-heading",
-      "--color",
-      "never",
-      input.caseSensitive ? "--case-sensitive" : "--ignore-case",
-      "--max-count",
-      String(maxResults),
-    ];
-    if (input.fileGlob) {
-      args.push("--glob", input.fileGlob);
+    let { code, stdout, stderr } = await runRgSearch(input, root, maxResults, false);
+    if (code === 2 && isRegexSyntaxError(stderr)) {
+      // 常见场景：LLM 把字面量（如 JSON.stringify(）当正则传入导致解析失败。
+      // 自动降级为 fixed-string 搜索，减少一次失败-重试往返。
+      ({ code, stdout, stderr } = await runRgSearch(input, root, maxResults, true));
     }
-    args.push(input.pattern, root);
-    const process = Bun.spawn({
-      cmd: ["rg", ...args],
-      stdout: "pipe",
-      stderr: "pipe",
-      cwd: root,
-    });
-    const [stdout, stderr] = await Promise.all([
-      new Response(process.stdout).text(),
-      new Response(process.stderr).text(),
-    ]);
-    const code = await process.exited;
     if (code !== 0 && code !== 1) {
       throw new Error(stderr || `rg exited with code ${code}`);
     }
@@ -95,7 +118,13 @@ export const searchCodeExecutor: ToolExecutor<SearchCodeInput, SearchCodeOutput>
       truncated: parsed.truncated,
     };
   } catch {
-    const matcher = new RegExp(input.pattern, input.caseSensitive ? "g" : "gi");
+    let matcher: RegExp;
+    try {
+      matcher = new RegExp(input.pattern, input.caseSensitive ? "g" : "gi");
+    } catch {
+      // JS 回退路径同样兼容非法正则：转义后按字面量匹配。
+      matcher = new RegExp(escapeRegExp(input.pattern), input.caseSensitive ? "g" : "gi");
+    }
     const matches: SearchCodeMatch[] = [];
     let truncated = false;
 

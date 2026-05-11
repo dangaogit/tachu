@@ -26,7 +26,7 @@ Tachu 以 Bun 原生 TypeScript Monorepo 形式发布，包含三个包：零依
 
 ## 项目状态（Project Status）
 
-**当前发布版本：** `1.0.0-alpha.4`（`alpha` dist-tag）
+**当前发布版本：** `1.0.0-alpha.5`（`alpha` dist-tag）
 
 这是一次**架构骨架**发布——基础设施基本就绪，但几个依赖 LLM 的阶段仍是占位实现。下表是唯一的事实来源；README 其他位置的任何声称都必须能在这张表里找到对应。
 
@@ -227,7 +227,7 @@ bun add -g @tachu/cli@alpha
 安装完成后验证：
 
 ```bash
-tachu --version   # 预期输出 1.0.0-alpha.4 或更新
+tachu --version   # 预期输出 1.0.0-alpha.5 或更新
 ```
 
 ---
@@ -929,7 +929,16 @@ Tachu 保证 **用户看到的每一次响应都是可读的自然语言答复**
 
 Tachu 按 `1.0.0-alpha.n` → `1.0.0-beta.n` → `1.0.0` 三条通道演进。下面每个里程碑都对应真实、可发布、有测试的交付物，不是愿望清单。
 
-### 1.0.0-alpha.4 —— 代码编写能力 + 架构边界修正（当前）
+### 1.0.0-alpha.5 —— Descriptor 治理 + 超时预算加固（当前）
+
+- [x] `BaseDescriptor` 治理元数据：`version`、`displayName`、`deprecated`、`deprecatedMessage`
+- [x] `DescriptorRegistry` 版本化解析：同名多版本共存，支持 `get(kind,name,version)`、`getLatest`、`listVersions`，默认 latest 采用“稳定版优先”
+- [x] 描述符扩展字段 passthrough 契约：未知顶层字段在 loader + registry 全链路保留
+- [x] Registry 一致性校验：`deprecated=true` 必须提供 `deprecatedMessage`；非法 semver 显式报错
+- [x] 运行时超时拆分：`llmWaitFirstTokenMs`、`llmStreamingMs`、`maxToolLoopActiveMs`（排除用户阻塞等待），并支持 phase 级覆盖
+- [x] `search-code` 容错：非法正则自动降级为 fixed-string 搜索，避免整轮直接失败
+
+### 1.0.0-alpha.4 —— 代码编写能力 + 架构边界修正
 
 - [x] `@tachu/extensions` 新增 14 个工具：`edit-file`、`multi-edit`、`glob`、`todo-write/read`、`git-status/diff/log/blame/show/branch`、`run-typecheck`、`run-tests`
 - [x] `read-file` 新增 `offset`/`limit` 分段读取、`withLineNumbers`（默认开启）、`totalLines`/`hasMore`

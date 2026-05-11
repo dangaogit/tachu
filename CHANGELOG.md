@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha.5] - 2026-05-11
+
+### Added
+
+#### `@tachu/core`
+
+- **Descriptor governance fields** — `BaseDescriptor` 新增可选 `version` / `displayName` / `deprecated` / `deprecatedMessage`，用于版本治理与迁移提示
+- **Version-aware registry APIs** — `DescriptorRegistry` 新增 `get(kind,name,version)`、`getLatest(kind,name)`、`listVersions(kind,name)`，支持同名多版本共存与精确查询
+- **Timeout policy split** — 新增 `llmWaitFirstTokenMs`、`llmStreamingMs`、`maxToolLoopActiveMs` 三类预算项，并支持 `runtime.timeouts.byPhase` 分阶段覆盖
+- **LLM timeout utility layer** — 新增 `engine/llm-timeouts.ts`，统一 LLM 调用超时解析与信号构造
+
+#### `@tachu/extensions`
+
+- **`search-code` regex self-healing** — 当正则语法非法时自动降级为 fixed-string 搜索，减少因参数细节导致的整轮失败
+
+### Changed
+
+#### `@tachu/core`
+
+- **DescriptorRegistry storage model** — 从单一 `name -> descriptor` 升级为 `name -> version -> descriptor`；重复冲突判定调整为 `kind + name + version`
+- **Latest selection semantics** — `get(kind,name)` 保持向后兼容但改为 latest 解析（稳定版优先；无稳定版时取最高 pre-release）
+- **Unknown field passthrough contract** — `RegistryLoader` 与 `DescriptorRegistry` 明确保留未知顶层字段，`register -> get` 往返不丢失扩展字段
+- **Deprecation consistency check** — `deprecated === true` 且缺失 `deprecatedMessage` 时在 `registry.register()` 统一抛出 `RegistryError`
+- **Tool-loop budget accounting** — 新增“活跃时长”统计，审批/HITL/交互等待记为阻塞时间并从 tool-loop 预算中扣除
+
+#### `@tachu/cli`
+
+- **`tachu init` template budget defaults** — 默认预算更新为 12h 级运行兜底，并生成 LLM 超时拆分字段与 phase 覆盖注释模板
+
+#### Docs
+
+- **ADR contract updates** — `architecture-design.md` 与 `detailed-design.md` 补充 Descriptor 扩展字段契约与版本治理规则
+- **README / README_ZH roadmap** — 当前里程碑更新为 `1.0.0-alpha.5`，新增本版本交付摘要
+
 ## [1.0.0-alpha.4] - 2026-05-07
 
 ### Added

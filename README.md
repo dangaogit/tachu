@@ -24,7 +24,7 @@ Tachu ships as a Bun-native TypeScript monorepo with three packages: the zero-de
 
 ## Project Status
 
-**Current release:** `1.0.0-alpha.4` on the `alpha` dist-tag.
+**Current release:** `1.0.0-alpha.5` on the `alpha` dist-tag.
 
 This is the **first public alpha** — most infrastructure is in place, but several LLM-backed stages are still stubbed. The table below is the single source of truth; every claim made elsewhere in this README must be cross-checked against it.
 
@@ -228,7 +228,7 @@ bun add -g @tachu/cli@alpha
 After global installation, verify with:
 
 ```bash
-tachu --version   # expect 1.0.0-alpha.4 or newer
+tachu --version   # expect 1.0.0-alpha.5 or newer
 ```
 
 ---
@@ -937,7 +937,16 @@ The contract is enforced by `packages/core/src/engine/phases/fallback-contract.t
 Tachu follows a `1.0.0-alpha.n` → `1.0.0-beta.n` → `1.0.0` release lane. Each
 cut-line below is a real, shippable deliverable with tests, not a wish list.
 
-### 1.0.0-alpha.4 — Code editing capabilities + architecture boundary fix (current)
+### 1.0.0-alpha.5 — Descriptor governance + timeout budgeting hardening (current)
+
+- [x] `BaseDescriptor` governance metadata: `version`, `displayName`, `deprecated`, `deprecatedMessage`
+- [x] `DescriptorRegistry` version-aware resolution: same-name multi-version coexistence, `get(kind,name,version)`, `getLatest`, `listVersions`, and stable-first latest selection
+- [x] Descriptor passthrough contract: unknown top-level fields are preserved through loader + registry round-trip
+- [x] Registry validation: `deprecated=true` now requires `deprecatedMessage`; invalid semver is rejected with explicit registry errors
+- [x] Runtime timeout split: `llmWaitFirstTokenMs`, `llmStreamingMs`, `maxToolLoopActiveMs` (excluding user-blocking waits), plus phase-level timeout overrides
+- [x] `search-code` resilience: invalid regex patterns auto-downgrade to fixed-string matching instead of failing the turn
+
+### 1.0.0-alpha.4 — Code editing capabilities + architecture boundary fix
 
 - [x] 14 new tools in `@tachu/extensions`: `edit-file`, `multi-edit`, `glob`, `todo-write/read`, `git-status/diff/log/blame/show/branch`, `run-typecheck`, `run-tests`
 - [x] `read-file` — `offset`/`limit` pagination, `withLineNumbers` (default on), `totalLines`/`hasMore`

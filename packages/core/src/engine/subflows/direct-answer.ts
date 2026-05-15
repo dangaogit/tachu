@@ -1,4 +1,4 @@
-import type { EngineConfig, GeneratedImage, Message } from "../../types";
+import type { EngineConfig, GeneratedImage, GeneratedMedia, Message } from "../../types";
 import type { AdapterCallContext } from "../../types/context";
 import type { ModelRoute } from "../../types/config";
 import type { MemoryEntry, MemorySystem } from "../../modules/memory";
@@ -13,6 +13,12 @@ import {
   isBudgetTimeoutAbort,
   resolveLlmTimeouts,
 } from "../llm-timeouts";
+import {
+  createLlmUsageTracker,
+  estimateMessagesTokens,
+  type EmitLlmUsageTelemetry,
+  type LlmUsageTracker,
+} from "../llm-usage-telemetry";
 
 /**
  * `direct-answer` Sub-flow 执行所需的运行时上下文。
@@ -58,10 +64,24 @@ export interface DirectAnswerContext {
     completionTokens: number;
     totalTokens: number;
   }) => void;
+  emitUsageTelemetry?: EmitLlmUsageTelemetry | undefined;
+  currentPhaseStepId?: string | undefined;
+  nextStreamId?: (() => string) | undefined;
   /**
    * 流式正文分片回调（与 `config.runtime.streamingOutput` 及 Engine 注入配套）。
    */
   onAssistantDelta?: (text: string) => void;
+  /**
+   * 模型 reasoning_content 流式分片回调。
+   *
+   * 触发条件：仅当 Provider 下发 `ChatStreamChunk.reasoning-delta`（流式）
+   * 或 `ChatResponse.reasoningContent` 非空（非流式）时由本 sub-flow 调用。
+   * 由 Engine 注入，回调内部应把片段 enqueue 到顶层 `StreamChunk.reasoning-delta`。
+   *
+   * 与 `onAssistantDelta` 严格分离：reasoning 仅用于 SSE 展示，不会被回灌
+   * 为下一轮 LLM 上下文（DeepSeek 官方明确禁止 reasoning_content 回灌）。
+   */
+  onAssistantReasoningDelta?: (text: string) => void;
   /**
    * 文生图响应的结构化图片回传（与 {@link OutputMetadata.generatedImages} 对齐）。
    *
@@ -73,6 +93,10 @@ export interface DirectAnswerContext {
    * 强制走非流式 Provider.chat。
    */
   onGeneratedImages?: (images: GeneratedImage[]) => void;
+  /**
+   * 通用多模态产物回传（图片 / 音频 / 视频 / 文件）。
+   */
+  onGeneratedMedia?: (media: GeneratedMedia[]) => void;
 }
 
 /**
@@ -302,7 +326,30 @@ export const executeDirectAnswer = async (
   });
 
   let activeBudgetSignal: AbortSignal | undefined;
+  let usageTracker: LlmUsageTracker | undefined;
   try {
+    const usageAttributionId =
+      ctx.nextStreamId?.() ?? `${ctx.traceId}:direct-answer:${startedAt}`;
+    usageTracker = createLlmUsageTracker({
+      attribution: {
+        id: usageAttributionId,
+        kind: "llm_call",
+        ...(ctx.currentPhaseStepId !== undefined
+          ? { parentId: ctx.currentPhaseStepId }
+          : {}),
+        label: "direct-answer",
+        meta: {
+          phase: "execution",
+          subflow: "direct-answer",
+          provider: adapter.id,
+          model: route.model,
+        },
+      },
+      estimatedInputTokens: await estimateMessagesTokens(adapter, messages, route.model),
+      emit: ctx.emitUsageTelemetry,
+    });
+    usageTracker.start();
+
     // 文生图强制非流式：ChatStream 的 `finish` 事件不承载 `images`，走 chat() 才能
     // 从 ChatResponse.images 拿到结构化列表并透传给 onGeneratedImages。
     const useStream =
@@ -330,11 +377,20 @@ export const executeDirectAnswer = async (
               streamAbort.markFirstOutput();
             }
             content += part.delta;
+            usageTracker?.addOutputDelta(part.delta);
             ctx.onAssistantDelta?.(part.delta);
+          } else if (part.type === "reasoning-delta") {
+            // reasoning 不进 `content`，不参与下一轮上下文回灌；仅透传给 SSE 通道。
+            if (part.delta.length > 0) {
+              usageTracker?.addOutputDelta(part.delta);
+              ctx.onAssistantReasoningDelta?.(part.delta);
+            }
           } else if (part.type === "finish") {
             if (part.usage !== undefined) {
               usage = part.usage;
             }
+          } else if (part.type === "media") {
+            ctx.onGeneratedMedia?.([part.media]);
           } else if (
             part.type === "tool-call-delta" ||
             part.type === "tool-call-complete"
@@ -344,6 +400,9 @@ export const executeDirectAnswer = async (
         }
       } finally {
         streamAbort.dispose();
+      }
+      if (usage.totalTokens > 0) {
+        usageTracker?.final(usage);
       }
       ctx.onProviderUsage?.(usage);
       const trimmed = content.trim();
@@ -378,11 +437,24 @@ export const executeDirectAnswer = async (
       ctx.adapterContext,
       signal,
     );
+    usageTracker.final(response.usage);
     // D1-LOW-04：真实 usage 回流。
     ctx.onProviderUsage?.(response.usage);
     // P1-1：文生图 / 图像编辑产物结构化透传到主干。
     if (response.images && response.images.length > 0) {
       ctx.onGeneratedImages?.(response.images);
+    }
+    if (response.media && response.media.length > 0) {
+      ctx.onGeneratedMedia?.(response.media);
+    }
+    // 非流式路径下，模型 reasoning_content（若有）一次性透传给 SSE 通道；
+    // 与流式路径在 `onAssistantReasoningDelta` 回调上对齐。
+    if (
+      typeof response.reasoningContent === "string" &&
+      response.reasoningContent.length > 0
+    ) {
+      usageTracker.addOutputDelta(response.reasoningContent);
+      ctx.onAssistantReasoningDelta?.(response.reasoningContent);
     }
     const content = typeof response.content === "string" ? response.content.trim() : "";
     ctx.observability.emit({
@@ -408,8 +480,10 @@ export const executeDirectAnswer = async (
       ? isBudgetTimeoutAbort(activeBudgetSignal)
       : null;
     if (budgetTimeout) {
+      usageTracker?.terminal("failed");
       throw budgetTimeout;
     }
+    usageTracker?.terminal(ctx.signal.aborted ? "cancelled" : "failed");
     ctx.observability.emit({
       timestamp: Date.now(),
       traceId: ctx.traceId,

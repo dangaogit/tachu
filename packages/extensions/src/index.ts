@@ -1,8 +1,11 @@
 export {
   OpenAIProviderAdapter,
   AnthropicProviderAdapter,
+  GeminiProviderAdapter,
   MockProviderAdapter,
   QwenProviderAdapter,
+  type GeminiChatRequest,
+  type GeminiProviderOptions,
   type QwenChatRequest,
   type QwenImageParameters,
 } from "./providers";

@@ -90,6 +90,23 @@ export interface GeneratedImage {
 }
 
 /**
+ * 通用多模态输出产物。
+ *
+ * `GeneratedImage` 保持兼容既有文生图链路；新 Provider 可同时填充 `media`，
+ * 用于图片之外的音频、视频、文件，或 Gemini 这类 text/image interleaved 输出。
+ */
+export interface GeneratedMedia {
+  type: "image" | "audio" | "video" | "file";
+  index: number;
+  mimeType: string;
+  url?: string | undefined;
+  data?: string | undefined;
+  name?: string | undefined;
+  sizeBytes?: number | undefined;
+  providerMetadata?: Record<string, unknown> | undefined;
+}
+
+/**
  * 输出元信息。
  */
 export interface OutputMetadata {
@@ -120,6 +137,7 @@ export interface OutputMetadata {
    * 的 `--save-image`）。
    */
   generatedImages?: GeneratedImage[] | undefined;
+  generatedMedia?: GeneratedMedia[] | undefined;
 }
 
 /**
@@ -160,6 +178,25 @@ export interface ToolLoopStepChunk {
   type: "tool-loop-step";
   step: number;
   maxSteps: number;
+  stepId?: string | undefined;
+  parentStepId?: string | undefined;
+}
+
+export interface ToolLoopDeltaChunk {
+  type: "tool-loop-delta";
+  step: number;
+  content: string;
+  stepId?: string | undefined;
+}
+
+export interface ToolLoopStepEndChunk {
+  type: "tool-loop-step-end";
+  step: number;
+  success: boolean;
+  stepId?: string | undefined;
+  parentStepId?: string | undefined;
+  reason?: string | undefined;
+  errorCode?: string | undefined;
 }
 
 export interface ToolCallStartChunk {
@@ -167,6 +204,7 @@ export interface ToolCallStartChunk {
   callId: string;
   tool: string;
   argumentsPreview: string;
+  parentStepId?: string | undefined;
 }
 
 export interface ToolCallEndChunk {
@@ -175,6 +213,8 @@ export interface ToolCallEndChunk {
   tool: string;
   success: boolean;
   durationMs: number;
+  parentStepId?: string | undefined;
+  output?: unknown;
   errorMessage?: string;
   /**
    * 失败原因的稳定标识码（ADR-0002 Stage 4）。例如：
@@ -192,17 +232,156 @@ export interface ToolLoopFinalChunk {
   type: "tool-loop-final";
   steps: number;
   success: boolean;
+  stepId?: string | undefined;
+}
+
+export interface ToolUseResultToolCall {
+  callId: string;
+  tool: string;
+  arguments: Record<string, unknown>;
+  ok: boolean;
+  durationMs: number;
+  output?: unknown;
+  outputPreview?: string | undefined;
+  error?: {
+    code: string;
+    message: string;
+    retryable: boolean;
+  } | undefined;
+}
+
+export interface ToolUseResultStep {
+  step: number;
+  modelNotes: string;
+  toolCalls: ToolUseResultToolCall[];
+}
+
+export interface ToolUseObservation {
+  source: "tool";
+  tool: string;
+  callId: string;
+  text: string;
+  rawRef?: string | undefined;
+}
+
+export interface ToolUseResult {
+  kind: "tool-use-result";
+  status: "ready_for_output" | "partial" | "failed" | "exhausted";
+  steps: ToolUseResultStep[];
+  observations: ToolUseObservation[];
+  terminalDraft?: string | undefined;
+  error?: {
+    code: string;
+    message: string;
+    retryable: boolean;
+  } | undefined;
 }
 
 /**
  * 本轮执行中 orchestrator 的累计用量快照（用于 CLI 底部栏等实时展示）。
  * 在 streaming 模式下随 Provider usage 回流或阶段推进多次发出。
  */
+export interface TokenUsageTriplet {
+  input: number;
+  output: number;
+  total: number;
+}
+
+export type UsageAccuracy = "estimated" | "final";
+
+export type UsageTerminalState = "cancelled" | "failed" | "disconnected";
+
+export interface UsageAttribution {
+  id: string;
+  kind: string;
+  parentId?: string | undefined;
+  label?: string | undefined;
+  meta?: Record<string, unknown> | undefined;
+}
+
 export interface UsageChunk {
   type: "usage";
+  /** Legacy aggregate fields kept for existing CLI consumers. */
   tokens: number;
   toolCalls: number;
   wallTimeMs: number;
+  usage?: TokenUsageTriplet | undefined;
+  cumulative?: TokenUsageTriplet | undefined;
+  attribution?: UsageAttribution | undefined;
+  accuracy?: UsageAccuracy | undefined;
+  terminal?: UsageTerminalState | undefined;
+}
+
+/**
+ * 引擎 9 阶段（session / safety / intent / precheck / planning / graph-check /
+ * execution / validation / output）枚举。
+ *
+ * 用于 `phase-enter` / `phase-exit` 顶层 StreamChunk 的结构化标签，替代
+ * `progress` chunk 上靠 `message` 后缀（`"${phase} started"`）判 START/END
+ * 的脆弱约定，便于下游消费方做穷举式 switch。
+ */
+export type EnginePhase =
+  | "session"
+  | "safety"
+  | "intent"
+  | "precheck"
+  | "planning"
+  | "graph-check"
+  | "execution"
+  | "validation"
+  | "output";
+
+/**
+ * 阶段进入事件：tachu engine 在每个 9 阶段开始时 yield 一次。
+ *
+ * 与现有 `progress` chunk 的关系：
+ *   - `progress` 保留：现有 CLI / 旧消费方按 message 文案展示
+ *   - `phase-enter`：新结构化通道，供 SSE mapper / SDK 等通过 `chunk.type`
+ *     做穷举式 switch，避免依赖文案后缀
+ */
+export interface PhaseEnterChunk {
+  type: "phase-enter";
+  phase: EnginePhase;
+  stepId?: string | undefined;
+}
+
+/**
+ * 阶段退出事件：tachu engine 在每个 9 阶段结束时 yield 一次。
+ *
+ * `ok=false` 仅在阶段函数抛错时由 `runStream` 的 catch 分支补发；正常完成时
+ * `ok=true`。
+ */
+export interface PhaseExitChunk {
+  type: "phase-exit";
+  phase: EnginePhase;
+  stepId?: string | undefined;
+  ok: boolean;
+  error?: {
+    code?: string;
+    message?: string;
+  };
+}
+
+/**
+ * 模型 reasoning_content 流式增量事件（DeepSeek-R1 / OpenAI o-series /
+ * 豆包 thinking variant / Anthropic extended thinking 等支持原生推理流的模型）。
+ *
+ * 与 `delta` chunk 的关系：
+ *   - `delta`：面向用户的最终答复文本，会被持久化、回灌为下一轮上下文
+ *   - `reasoning-delta`：模型自身的推理过程片段，**禁止**回灌为后续上下文
+ *     （会导致 token 爆炸 + 模型分布漂移；DeepSeek 官方明确禁止）
+ *
+ * Provider Adapter 负责把上游 `delta.reasoning_content`（OpenAI 兼容）/
+ * `thinking_delta`（Anthropic）映射到 `ChatStreamChunk.reasoning-delta`，
+ * 由 sub-flow 透传成本顶层 StreamChunk。非流式 `chat()` 路径下，
+ * `ChatResponse.reasoningContent` 的整体内容由 sub-flow 一次性 yield 一条本
+ * chunk。
+ */
+export interface ReasoningDeltaChunk {
+  type: "reasoning-delta";
+  content: string;
+  stepId?: string | undefined;
+  parentStepId?: string | undefined;
 }
 
 /**
@@ -218,10 +397,14 @@ export type StreamChunk =
   | { type: "artifact"; artifact: Artifact }
   | { type: "error"; error: EngineError }
   | { type: "plan-preview"; phase: "planning"; plan: RankedPlan }
+  | PhaseEnterChunk
+  | PhaseExitChunk
+  | ReasoningDeltaChunk
   | ToolLoopStepChunk
+  | ToolLoopDeltaChunk
+  | ToolLoopStepEndChunk
   | ToolCallStartChunk
   | ToolCallEndChunk
   | ToolLoopFinalChunk
   | UsageChunk
   | { type: "done"; output: EngineOutput };
-

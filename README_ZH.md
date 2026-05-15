@@ -8,7 +8,7 @@
 [![bun](https://img.shields.io/badge/runtime-bun-orange)](https://bun.sh)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-blue)](https://www.typescriptlang.org)
 
-> **⚠️ 项目状态 —— Alpha。** 9 阶段主干、Registry、Prompt 组装、CLI、OpenAI / Anthropic / Qwen Adapter、MCP Adapter、向量存储与可观测性 Emitter 已完成搭建并均有单测覆盖。**Phase 3（意图分析）已是真实 LLM 调用**，`tachu chat` / `tachu run` 会产出真实对话回复。**Phase 5（任务规划）与 Phase 8（结果验证）仍是占位实现**——被判为 *complex* 的请求暂未获得 LLM 生成的多步规划与语义校验。详见[项目状态](#项目状态project-status)与[路线图](#路线图roadmap)。**请勿用于生产**。请使用 `@alpha` dist-tag 安装。
+> **⚠️ 项目状态 —— Alpha。** 9 阶段主干、Registry、Prompt 组装、CLI、OpenAI / Anthropic / Qwen / Gemini Adapter、MCP Adapter、向量存储与可观测性 Emitter 已完成搭建并均有单测覆盖。**Phase 3（意图分析）已是真实 LLM 调用**，`tachu chat` / `tachu run` 会产出真实对话回复。**Phase 5（任务规划）与 Phase 8（结果验证）仍是占位实现**——被判为 *complex* 的请求暂未获得 LLM 生成的多步规划与语义校验。详见[项目状态](#项目状态project-status)与[路线图](#路线图roadmap)。**请勿用于生产**。请使用 `@alpha` dist-tag 安装。
 
 ---
 
@@ -26,7 +26,7 @@ Tachu 以 Bun 原生 TypeScript Monorepo 形式发布，包含三个包：零依
 
 ## 项目状态（Project Status）
 
-**当前发布版本：** `1.0.0-alpha.5`（`alpha` dist-tag）
+**当前发布版本：** `1.0.0-alpha.6`（`alpha` dist-tag）
 
 这是一次**架构骨架**发布——基础设施基本就绪，但几个依赖 LLM 的阶段仍是占位实现。下表是唯一的事实来源；README 其他位置的任何声称都必须能在这张表里找到对应。
 
@@ -37,7 +37,7 @@ Tachu 以 Bun 原生 TypeScript Monorepo 形式发布，包含三个包：零依
 | Prompt 组装器（tiktoken、KV Cache 友好顺序） | ✅ 已实现 | `packages/core/src/prompt` |
 | 任务调度器、DAG 校验、重试/降级簿记 | ✅ 已实现 | `packages/core/src/engine/scheduler.ts` |
 | Session / Memory / Runtime-state / Safety / Model-router / Provider / Observability / Hooks 八大模块 | ✅ 已实现 | `packages/core/src/modules` |
-| OpenAI / Anthropic / Mock Provider Adapter | ✅ 已实现 | 流式、函数调用、工具 Schema |
+| OpenAI / Anthropic / Qwen / Mock / Gemini Provider Adapter | ✅ 已实现 | 流式、函数调用、工具 Schema |
 | `apiKey` / `baseURL` / `organization` / `timeoutMs` 配置（env var / `tachu.config.ts` / CLI flags） | ✅ 已实现 | 支持 Azure OpenAI / LiteLLM / OpenRouter / 自建网关 |
 | 7 个内置 Tools + Terminal / File / Web Backend | ✅ 已实现 | `packages/extensions/src/{tools,backends}` |
 | MCP stdio + SSE Adapter | ✅ 已实现 | `packages/extensions/src/mcp` |
@@ -227,7 +227,7 @@ bun add -g @tachu/cli@alpha
 安装完成后验证：
 
 ```bash
-tachu --version   # 预期输出 1.0.0-alpha.5 或更新
+tachu --version   # 预期输出 1.0.0-alpha.6 或更新
 ```
 
 ---
@@ -929,7 +929,17 @@ Tachu 保证 **用户看到的每一次响应都是可读的自然语言答复**
 
 Tachu 按 `1.0.0-alpha.n` → `1.0.0-beta.n` → `1.0.0` 三条通道演进。下面每个里程碑都对应真实、可发布、有测试的交付物，不是愿望清单。
 
-### 1.0.0-alpha.5 —— Descriptor 治理 + 超时预算加固（当前）
+### 1.0.0-alpha.6 —— 流式阶段、Gemini 与 Provider 协议加固（当前）
+
+- [x] 引擎流式扩展：`phase-enter` / `phase-exit` 与 `reasoning-delta`，便于 CLI / SSE 消费更细粒度事件
+- [x] `SessionScope` + `modelOverride` 贯通 ModelRouter，支持按会话 / 租户维度做路由决策
+- [x] LLM 用量遥测与 `stepId` 归因，强化分阶段可观测性
+- [x] `tool-use`：结构化工具结果与终答流式分流、并行审批预算、活跃 tool-loop 计时、`providerMetadata` 回灌 assistant 历史，以及流式健壮性修复
+- [x] 多模态协议：`GeneratedMedia`、`metadata.generatedMedia`、消息 `file` 部件、可选 `embed` / `rerank`、结构化输出元数据，以及不透明 `providerMetadata` 以支持适配器原生回放（如 Gemini thought signature）
+- [x] `GeminiProviderAdapter`（`@google/genai`）+ 单测 + 包入口导出
+- [x] `.gitignore` 忽略 `docs/superpowers/` 本地草稿目录
+
+### 1.0.0-alpha.5 —— Descriptor 治理 + 超时预算加固
 
 - [x] `BaseDescriptor` 治理元数据：`version`、`displayName`、`deprecated`、`deprecatedMessage`
 - [x] `DescriptorRegistry` 版本化解析：同名多版本共存，支持 `get(kind,name,version)`、`getLatest`、`listVersions`，默认 latest 采用“稳定版优先”
@@ -990,7 +1000,7 @@ Tachu 按 `1.0.0-alpha.n` → `1.0.0-beta.n` → `1.0.0` 三条通道演进。�
 - [ ] 至少有 1 位第三方用户对真实 LLM 完整跑通并反馈
 - [ ] 公开覆盖率与基准性能基线
 - [ ] 公开自 `1.0.0-alpha.1` 以来所有 Breaking Change 的升级指南
-- [ ] 在稳定协议背后引入更多 Provider Adapter（Gemini、Mistral）
+- [ ] 在稳定协议背后引入更多 Provider Adapter（如 Mistral）
 
 ### 1.0.0 —— 稳定
 

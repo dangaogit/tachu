@@ -102,6 +102,12 @@ const mapMessageContent = (
     if (part.type === "text") {
       return { type: "text", text: part.text };
     }
+    if (part.type === "file") {
+      return {
+        type: "text",
+        text: `[file:${part.file.mimeType}:${part.file.name ?? part.file.uri ?? "inline"}]`,
+      };
+    }
     return {
       type: "image_url",
       image_url: part.image_url,

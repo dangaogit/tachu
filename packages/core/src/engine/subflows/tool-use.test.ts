@@ -11,7 +11,7 @@ import type {
 } from "../../modules/provider";
 import { DescriptorRegistry } from "../../registry";
 import { createTiktokenTokenizer } from "../../prompt";
-import type { EngineConfig, Message } from "../../types";
+import type { EngineConfig, Message, StreamChunk, ToolUseResult } from "../../types";
 import type { AdapterCallContext } from "../../types/context";
 import { DEFAULT_ADAPTER_CALL_CONTEXT } from "../../types/context";
 import { createDefaultEngineConfig } from "../../utils";
@@ -60,10 +60,85 @@ const createScriptedProvider = (responses: ChatResponse[]): {
       return response;
     },
     async *chatStream(
-      _req: ChatRequest,
+      req: ChatRequest,
       _ctx: AdapterCallContext,
     ): AsyncIterable<ChatStreamChunk> {
-      yield { type: "finish", finishReason: "stop" };
+      calls.push({
+        messages: req.messages.map((m) => ({ ...m })),
+        toolsCount: req.tools?.length ?? 0,
+        toolNames: req.tools?.map((tool) => tool.name) ?? [],
+        model: req.model,
+      });
+      const response = responses[cursor];
+      if (!response) {
+        throw new Error(`scripted provider 没有更多响应 (已用 ${cursor})`);
+      }
+      cursor += 1;
+      if (response.reasoningContent) {
+        yield { type: "reasoning-delta", delta: response.reasoningContent };
+      }
+      if (response.content.length > 0) {
+        yield { type: "text-delta", delta: response.content };
+      }
+      for (const call of response.toolCalls ?? []) {
+        yield { type: "tool-call-complete", call };
+      }
+      yield {
+        type: "finish",
+        finishReason: response.finishReason ?? (response.toolCalls?.length ? "tool_calls" : "stop"),
+        usage: response.usage,
+      };
+    },
+    async countTokens(): Promise<number> {
+      return 0;
+    },
+  };
+  return { adapter, calls };
+};
+
+const createStreamingScriptedProvider = (streams: ChatStreamChunk[][]): {
+  adapter: ProviderAdapter;
+  calls: Array<{ messages: Message[]; toolsCount: number; toolNames: string[]; model: string }>;
+} => {
+  const calls: Array<{ messages: Message[]; toolsCount: number; toolNames: string[]; model: string }> = [];
+  let cursor = 0;
+  const adapter: ProviderAdapter = {
+    id: "scripted",
+    name: "scripted",
+    async listAvailableModels() {
+      return [
+        {
+          modelName: "scripted-chat",
+          capabilities: {
+            supportedModalities: ["text"],
+            maxContextTokens: 128_000,
+            supportsStreaming: true,
+            supportsFunctionCalling: true,
+          },
+        },
+      ];
+    },
+    async chat(): Promise<ChatResponse> {
+      throw new Error("streaming test should not call adapter.chat");
+    },
+    async *chatStream(
+      req: ChatRequest,
+      _ctx: AdapterCallContext,
+    ): AsyncIterable<ChatStreamChunk> {
+      calls.push({
+        messages: req.messages.map((m) => ({ ...m })),
+        toolsCount: req.tools?.length ?? 0,
+        toolNames: req.tools?.map((tool) => tool.name) ?? [],
+        model: req.model,
+      });
+      const stream = streams[cursor];
+      if (!stream) {
+        throw new Error(`scripted provider 没有更多流式响应 (已用 ${cursor})`);
+      }
+      cursor += 1;
+      for (const chunk of stream) {
+        yield chunk;
+      }
     },
     async countTokens(): Promise<number> {
       return 0;
@@ -94,6 +169,13 @@ const baseConfig = (overrides?: Partial<EngineConfig["runtime"]["toolLoop"]>): E
 
 const noopUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 
+const expectTerminalDraft = (result: ToolUseResult, expected: string): void => {
+  expect(result.kind).toBe("tool-use-result");
+  expect(result.terminalDraft).toBe(expected);
+};
+
+const resultText = (result: ToolUseResult): string => result.terminalDraft ?? "";
+
 /**
  * 构造完整的 `ToolUseContext`；`taskExecutorOverride` 允许测试注入自定义执行器。
  */
@@ -111,6 +193,7 @@ const buildCtx = (args: {
   abortSignal?: AbortSignal;
   onToolLoopEvent?: ToolUseContext["onToolLoopEvent"];
   onToolCall?: ToolUseContext["onToolCall"];
+  onAssistantDelta?: (text: string) => void;
 }): ToolUseContext => {
   const { config, provider, taskExecutor } = args;
   const providers = new Map([[provider.id, provider]]);
@@ -182,6 +265,7 @@ const buildCtx = (args: {
     onProviderUsage: () => {},
     ...(args.onToolLoopEvent ? { onToolLoopEvent: args.onToolLoopEvent } : {}),
     ...(args.onToolCall ? { onToolCall: args.onToolCall } : {}),
+    ...(args.onAssistantDelta ? { onAssistantDelta: args.onAssistantDelta } : {}),
   };
 };
 
@@ -203,7 +287,7 @@ describe("executeToolUse (ADR-0002 Agentic Loop)", () => {
       },
     });
     const result = await executeToolUse({ prompt: "...prompt..." }, ctx);
-    expect(result).toBe("这是第一轮就给出的最终回复");
+    expectTerminalDraft(result, "这是第一轮就给出的最终回复");
     expect(calls.length).toBe(1);
     expect(calls[0]?.toolsCount).toBe(1);
   });
@@ -228,7 +312,7 @@ describe("executeToolUse (ADR-0002 Agentic Loop)", () => {
       { prompt: "look up the current time", toolNames: ["run-shell"] },
       ctx,
     );
-    expect(result).toBe("当前时间已查询。");
+    expectTerminalDraft(result, "当前时间已查询。");
     expect(calls[0]?.toolNames).toEqual(["run-shell"]);
     expect(calls[0]?.messages.map((m) => m.content)).not.toContain(
       "[assembler] global system instruction",
@@ -386,7 +470,7 @@ describe("executeToolUse (ADR-0002 Agentic Loop)", () => {
       return { type: "approve" };
     };
     const result = await executeToolUse({ prompt: "now" }, ctx);
-    expect(result).toBe("当前时间已查询。");
+    expectTerminalDraft(result, "当前时间已查询。");
     expect(executed).toBe(true);
     expect(approvalCalls).toBe(0);
   });
@@ -502,7 +586,7 @@ describe("executeToolUse (ADR-0002 Agentic Loop)", () => {
     };
 
     const result = await executeToolUse({ prompt: "列目录" }, ctx);
-    expect(result).toBe("我已经列出目录，核心文件是 package.json。");
+    expectTerminalDraft(result, "我已经列出目录，核心文件是 package.json。");
     expect(calls.length).toBe(2);
     expect(executed.length).toBe(1);
     expect(executed[0]?.ref).toBe("list-dir");
@@ -520,6 +604,78 @@ describe("executeToolUse (ADR-0002 Agentic Loop)", () => {
     expect(events).toContain("tool-call-end");
     expect(events).toContain("tool-loop-final");
     expect(toolCalls).toEqual([{ name: "list-dir", success: true }]);
+  });
+
+  test("streaming: 终止回复按 tool-loop-delta 增量透传，并返回结构化结果", async () => {
+    const { adapter, calls } = createStreamingScriptedProvider([
+      [
+        { type: "text-delta", delta: "今" },
+        { type: "text-delta", delta: "日新闻" },
+        { type: "finish", finishReason: "stop", usage: noopUsage },
+      ],
+    ]);
+    const deltas: string[] = [];
+    const config = baseConfig();
+    config.runtime.streamingOutput = true;
+    const ctx = buildCtx({
+      config,
+      provider: adapter,
+      toolSet: [{ name: "list-dir" }],
+      taskExecutor: async () => {
+        throw new Error("taskExecutor 不应被调用");
+      },
+      onToolLoopEvent: (chunk) => {
+        if (chunk.type === "tool-loop-delta") deltas.push(chunk.content);
+      },
+    });
+
+    const result = await executeToolUse({ prompt: "今日新闻" }, ctx);
+
+    expectTerminalDraft(result, "今日新闻");
+    expect(deltas).toEqual(["今", "日新闻"]);
+    expect(calls.length).toBe(1);
+  });
+
+  test("streaming: 工具调用轮的中间文本挂到 tool-loop-delta，仍执行 streamed tool-call-complete", async () => {
+    const { adapter, calls } = createStreamingScriptedProvider([
+      [
+        { type: "text-delta", delta: "我先查一下。" },
+        {
+          type: "tool-call-complete",
+          call: { id: "call-stream-1", name: "list-dir", arguments: { path: "." } },
+        },
+        { type: "finish", finishReason: "tool_calls", usage: noopUsage },
+      ],
+      [
+        { type: "text-delta", delta: "查完了。" },
+        { type: "finish", finishReason: "stop", usage: noopUsage },
+      ],
+    ]);
+    const deltas: string[] = [];
+    const executed: Array<{ ref: string; input: unknown }> = [];
+    const config = baseConfig();
+    config.runtime.streamingOutput = true;
+    const ctx = buildCtx({
+      config,
+      provider: adapter,
+      toolSet: [{ name: "list-dir" }],
+      taskExecutor: async (task) => {
+        executed.push({ ref: task.ref, input: task.input });
+        return { entries: ["package.json"] };
+      },
+      onToolLoopEvent: (chunk) => {
+        if (chunk.type === "tool-loop-delta") deltas.push(chunk.content);
+      },
+    });
+
+    const result = await executeToolUse({ prompt: "列目录" }, ctx);
+
+    expectTerminalDraft(result, "查完了。");
+    expect(deltas).toEqual(["我先查一下。", "查完了。"]);
+    expect(executed).toEqual([{ ref: "list-dir", input: { path: "." } }]);
+    expect(calls.length).toBe(2);
+    const secondCallToolMessages = calls[1]?.messages.filter((m) => m.role === "tool") ?? [];
+    expect(secondCallToolMessages.map((m) => m.toolCallId)).toEqual(["call-stream-1"]);
   });
 
   test("LLM 请求未注册的工具 → 不中断，把错误作为 tool message 回传", async () => {
@@ -555,7 +711,7 @@ describe("executeToolUse (ADR-0002 Agentic Loop)", () => {
     };
 
     const result = await executeToolUse({ prompt: "x" }, ctx);
-    expect(result).toContain("该工具不可用");
+    expect(resultText(result)).toContain("该工具不可用");
     expect(calls.length).toBe(2);
     // 第二轮 tool message content 里带错误提示
     const toolMessage = calls[1]?.messages.find((m) => m.role === "tool");
@@ -592,7 +748,7 @@ describe("executeToolUse (ADR-0002 Agentic Loop)", () => {
     });
 
     const result = await executeToolUse({ prompt: "x" }, ctx);
-    expect(result).toBe("工具失败；已降级回答。");
+    expectTerminalDraft(result, "工具失败；已降级回答。");
     expect(calls.length).toBe(2);
     const toolMessage = calls[1]?.messages.find((m) => m.role === "tool");
     expect(typeof toolMessage?.content === "string" && toolMessage.content).toContain(
@@ -600,7 +756,7 @@ describe("executeToolUse (ADR-0002 Agentic Loop)", () => {
     );
   });
 
-  test("超过 maxSteps → 抛 TOOL_LOOP_STEPS_EXHAUSTED", async () => {
+  test("超过 maxSteps 且已有观察结果 → 返回 exhausted 结构化结果", async () => {
     // 每一轮都返回 tool_calls，never stop。
     const { adapter } = createScriptedProvider(
       Array.from({ length: 5 }, (_, i) => ({
@@ -617,9 +773,10 @@ describe("executeToolUse (ADR-0002 Agentic Loop)", () => {
       taskExecutor: async () => ({ ok: true }),
     });
 
-    await expect(executeToolUse({ prompt: "x" }, ctx)).rejects.toMatchObject({
-      code: "TOOL_LOOP_STEPS_EXHAUSTED",
-    });
+    const result = await executeToolUse({ prompt: "x" }, ctx);
+    expect(result.status).toBe("exhausted");
+    expect(result.error?.code).toBe("TOOL_LOOP_STEPS_EXHAUSTED");
+    expect(result.observations.length).toBe(2);
   });
 
   test("首轮空 content 且无 toolCalls → TOOL_LOOP_PROVIDER_NO_RESPONSE", async () => {
@@ -638,7 +795,7 @@ describe("executeToolUse (ADR-0002 Agentic Loop)", () => {
     });
   });
 
-  test("非首轮空 content → TOOL_LOOP_EMPTY_TERMINAL_RESPONSE", async () => {
+  test("非首轮空 content 且已有观察结果 → 返回 partial 结构化结果", async () => {
     const { adapter } = createScriptedProvider([
       {
         content: "",
@@ -655,9 +812,10 @@ describe("executeToolUse (ADR-0002 Agentic Loop)", () => {
       taskExecutor: async () => "ok",
     });
 
-    await expect(executeToolUse({ prompt: "x" }, ctx)).rejects.toMatchObject({
-      code: "TOOL_LOOP_EMPTY_TERMINAL_RESPONSE",
-    });
+    const result = await executeToolUse({ prompt: "x" }, ctx);
+    expect(result.status).toBe("partial");
+    expect(result.error?.code).toBe("TOOL_LOOP_EMPTY_TERMINAL_RESPONSE");
+    expect(result.observations.length).toBe(1);
   });
 
   test("provider.chat 抛错 → emit tool-use warning + tool-loop-final(success=false) 后重抛", async () => {
@@ -687,7 +845,7 @@ describe("executeToolUse (ADR-0002 Agentic Loop)", () => {
         _req: ChatRequest,
         _ctx: AdapterCallContext,
       ): AsyncIterable<ChatStreamChunk> {
-        yield { type: "finish", finishReason: "stop" };
+        throw new Error("402 status code (no body)");
       },
       async countTokens(): Promise<number> {
         return 0;
@@ -769,13 +927,59 @@ describe("executeToolUse (ADR-0002 Agentic Loop)", () => {
     });
 
     const result = await executeToolUse({ prompt: "x" }, ctx);
-    expect(result).toBe("三个工具全部完成。");
+    expectTerminalDraft(result, "三个工具全部完成。");
     expect(calls.length).toBe(2);
     expect(maxConcurrent).toBe(2);
     // 第二轮里必须有 3 条 tool message，且顺序与 toolCalls 对应
     const toolMsgs = calls[1]!.messages.filter((m) => m.role === "tool");
     expect(toolMsgs.length).toBe(3);
     expect(toolMsgs.map((m) => m.toolCallId)).toEqual(["c1", "c2", "c3"]);
+  });
+
+  test("宿主 onToolLoopEvent 在第二次 tool-call-start 抛错 → 仍能收到 ABANDONED 闭合 end", async () => {
+    const { adapter } = createScriptedProvider([
+      {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [
+          { id: "c1", name: "list-dir", arguments: { a: 1 } },
+          { id: "c2", name: "list-dir", arguments: { a: 2 } },
+        ],
+        usage: noopUsage,
+      },
+      { content: "done", finishReason: "stop", usage: noopUsage },
+    ]);
+    let startCount = 0;
+    const loopChunks: StreamChunk[] = [];
+    const ctx = buildCtx({
+      config: baseConfig({ parallelism: 2 }),
+      provider: adapter,
+      toolSet: [{ name: "list-dir" }],
+      taskExecutor: async () => ({ ok: true }),
+      onToolLoopEvent: (ch): void => {
+        loopChunks.push(ch);
+        if (ch.type === "tool-call-start") {
+          startCount += 1;
+          if (startCount === 2) {
+            throw new Error("injected-host-error");
+          }
+        }
+      },
+    });
+
+    await expect(executeToolUse({ prompt: "x" }, ctx)).rejects.toThrow("injected-host-error");
+
+    const starts = loopChunks.filter((c) => c.type === "tool-call-start");
+    const ends = loopChunks.filter((c) => c.type === "tool-call-end");
+    expect(starts).toHaveLength(2);
+    expect(ends.length).toBeGreaterThanOrEqual(2);
+    const abandon = ends.find(
+      (e) => e.type === "tool-call-end" && e.errorCode === "TOOL_LOOP_ABANDONED",
+    );
+    expect(abandon).toBeDefined();
+    if (abandon && abandon.type === "tool-call-end") {
+      expect(abandon.callId).toBe("c2");
+    }
   });
 
   test("input.prompt 缺失 → 抛显式错误（非 ToolLoopError）", async () => {
@@ -810,7 +1014,7 @@ describe("executeToolUse (ADR-0002 Agentic Loop)", () => {
     };
 
     const result = await executeToolUse({ prompt: "fallback-test" }, ctx);
-    expect(result).toBe("OK");
+    expectTerminalDraft(result, "OK");
     expect(calls.length).toBe(1);
     // fallback 组装会塞入 system + user；确认 user 消息是本轮 prompt
     const userMsg = calls[0]?.messages.find((m) => m.role === "user");
@@ -869,7 +1073,7 @@ describe("executeToolUse (ADR-0002 Agentic Loop)", () => {
     };
 
     const result = await executeToolUse({ prompt: "写文件" }, ctx);
-    expect(result).toBe("写入完成。");
+    expectTerminalDraft(result, "写入完成。");
     expect(approvalSeen).toEqual(["descriptor"]);
     expect(executed).toBe(true);
     expect(calls.length).toBe(2);
@@ -921,7 +1125,7 @@ describe("executeToolUse (ADR-0002 Agentic Loop)", () => {
     });
 
     const result = await executeToolUse({ prompt: "do danger" }, ctx);
-    expect(result).toBe("好的，我改用只读方式描述结果。");
+    expectTerminalDraft(result, "好的，我改用只读方式描述结果。");
     expect(calls.length).toBe(2);
 
     const secondCall = calls[1];
@@ -963,7 +1167,7 @@ describe("executeToolUse (ADR-0002 Agentic Loop)", () => {
       return { type: "approve" };
     };
     const result = await executeToolUse({ prompt: "x" }, ctx);
-    expect(result).toBe("列好了。");
+    expectTerminalDraft(result, "列好了。");
     expect(seen).toEqual([{ trigger: "global", requiresApproval: false }]);
   });
 
@@ -988,7 +1192,7 @@ describe("executeToolUse (ADR-0002 Agentic Loop)", () => {
       },
     });
     const result = await executeToolUse({ prompt: "x" }, ctx);
-    expect(result).toBe("默认批准走通。");
+    expectTerminalDraft(result, "默认批准走通。");
     expect(executed).toBe(true);
   });
 
@@ -1014,7 +1218,7 @@ describe("executeToolUse (ADR-0002 Agentic Loop)", () => {
       throw new Error("prompt IO 崩了");
     };
     const result = await executeToolUse({ prompt: "x" }, ctx);
-    expect(result).toBe("已放弃。");
+    expectTerminalDraft(result, "已放弃。");
   });
 
   test("approval 通过后 → 把 approvalGranted=true 写入 TaskNode.metadata", async () => {
@@ -1095,7 +1299,7 @@ describe("executeToolUse (ADR-0002 Agentic Loop)", () => {
     });
 
     const result = await executeToolUse({ prompt: "summarise" }, ctx);
-    expect(result).toBe("基于抓到的内容给出摘要。");
+    expectTerminalDraft(result, "基于抓到的内容给出摘要。");
 
     // 第二轮 chat 里，tool role message 的 content 必须被截断到 MAX_TOOL_OUTPUT_CHARS + 提示长度
     const secondCall = calls[1];
@@ -1136,7 +1340,7 @@ describe("executeToolUse (ADR-0002 Agentic Loop)", () => {
     });
 
     const result = await executeToolUse({ prompt: "list" }, ctx);
-    expect(result).toBe("这是摘要。");
+    expectTerminalDraft(result, "这是摘要。");
 
     const secondCall = calls[1];
     expect(secondCall).toBeDefined();

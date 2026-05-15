@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { InMemoryRuntimeState } from "../../modules/runtime-state";
+import type { ProviderAdapter } from "../../modules/provider";
 import type {
   EngineConfig,
   ExecutionContext,
@@ -11,6 +12,7 @@ import type {
   ValidationResult,
 } from "../../types";
 import { DEFAULT_ADAPTER_CALL_CONTEXT } from "../../types/context";
+import { createDefaultEngineConfig } from "../../utils";
 
 import { runOutputPhase } from "./output";
 import type { ValidationPhaseOutput } from "./validation";
@@ -235,5 +237,68 @@ describe("runOutputPhase (Phase 9 — Output Assembly, direct-answer contract)",
     const parsed = JSON.parse(out.content as string);
     expect(parsed.intent).toBe("hi");
     expect(parsed.taskResults).toEqual({ "task-direct-answer": "" });
+  });
+
+  test("tool-use 结构化结果由 output 阶段重新生成 final-answer，并流式输出正文", async () => {
+    const streamed: string[] = [];
+    const adapter: ProviderAdapter = {
+      id: "scripted",
+      name: "scripted",
+      async listAvailableModels() {
+        return [];
+      },
+      async chat() {
+        throw new Error("streaming final-answer path should use chatStream");
+      },
+      async *chatStream() {
+        yield { type: "text-delta", delta: "最终" };
+        yield { type: "text-delta", delta: "答案" };
+        yield {
+          type: "finish",
+          finishReason: "stop",
+          usage: { promptTokens: 2, completionTokens: 2, totalTokens: 4 },
+        };
+      },
+    };
+    const env = buildEnv();
+    env.config = createDefaultEngineConfig();
+    env.config.runtime.streamingOutput = true;
+    env.providers = new Map([["scripted", adapter]]);
+    env.modelRouter = {
+      resolve: () => ({ provider: "scripted", model: "scripted-final" }),
+    } as never;
+    env.onFinalAnswerDelta = (text) => streamed.push(text);
+
+    const out = await runOutputPhase(
+      buildState({
+        intent: {
+          complexity: "complex",
+          intent: "summarise searched result",
+          contextRelevance: "unrelated",
+        },
+        validation: { passed: true },
+        taskResults: {
+          "task-tool-use": {
+            kind: "tool-use-result",
+            status: "ready_for_output",
+            steps: [{ step: 1, modelNotes: "我查一下", toolCalls: [] }],
+            observations: [
+              {
+                source: "tool",
+                tool: "mcp.web-search.web_search",
+                callId: "call-1",
+                text: "raw search output",
+              },
+            ],
+            terminalDraft: "过程草稿，不应直接当最终答案",
+          },
+        },
+      }),
+      env,
+      metadata,
+    );
+
+    expect(out.content).toBe("最终答案");
+    expect(streamed).toEqual(["最终", "答案"]);
   });
 });

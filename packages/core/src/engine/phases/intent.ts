@@ -14,6 +14,10 @@ import {
   isBudgetTimeoutAbort,
   resolveLlmTimeouts,
 } from "../llm-timeouts";
+import {
+  createLlmUsageTracker,
+  estimateMessagesTokens,
+} from "../llm-usage-telemetry";
 
 /**
  * Intent LLM 调用的默认超时时间（毫秒）。
@@ -485,9 +489,29 @@ const callIntentLLM = async (
     type: "llm_call_start",
     payload: { provider: adapter.id, model, messageCount: messages.length },
   });
+  const usageTracker = createLlmUsageTracker({
+    attribution: {
+      id: env.nextStreamId?.() ?? `${traceId}:intent:${startedAt}`,
+      kind: "llm_call",
+      ...(env.currentPhaseStepId !== undefined
+        ? { parentId: env.currentPhaseStepId }
+        : {}),
+      label: "intent",
+      meta: {
+        phase: "intent",
+        provider: adapter.id,
+        model,
+      },
+    },
+    estimatedInputTokens: await estimateMessagesTokens(adapter, messages, model),
+    emit: env.emitUsageTelemetry,
+  });
+  usageTracker.start();
 
   try {
     const response = await adapter.chat({ model, messages }, env.adapterContext, signal);
+    usageTracker.addOutputDelta(response.content);
+    usageTracker.final(response.usage);
     // D1-LOW-04：把真实 usage 回流到 orchestrator，以覆盖此前仅用 Prompt 估算 token 的逻辑。
     env.onProviderUsage?.(response.usage);
     const parsed = parseIntentJson(response.content);
@@ -539,8 +563,10 @@ const callIntentLLM = async (
   } catch (error) {
     const budgetTimeout = isBudgetTimeoutAbort(signal);
     if (budgetTimeout) {
+      usageTracker.terminal("failed");
       throw budgetTimeout;
     }
+    usageTracker.terminal(env.activeAbortSignal.aborted ? "cancelled" : "failed");
     env.observability.emit({
       timestamp: Date.now(),
       traceId,

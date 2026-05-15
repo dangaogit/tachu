@@ -21,9 +21,34 @@ export interface MessageImagePart {
 }
 
 /**
+ * 通用文件 / 媒体内容部件。
+ *
+ * `uri` 用于 Provider 文件 API 返回的稳定引用，`data` 用于小文件内联 base64。
+ * Adapter 按自身协议映射：Gemini 可转成 `fileData` / `inlineData`，不支持文件输入的
+ * Provider 应显式降级或抛出 `PROVIDER_INVALID_INPUT`。
+ */
+export interface MessageFilePart {
+  type: "file";
+  file: {
+    mimeType: string;
+    uri?: string | undefined;
+    data?: string | undefined;
+    name?: string | undefined;
+  };
+}
+
+/**
  * 多模态消息部件联合类型。
  */
-export type MessageContentPart = MessageTextPart | MessageImagePart;
+export type MessageContentPart = MessageTextPart | MessageImagePart | MessageFilePart;
+
+/**
+ * Provider 原生协议里的不透明元数据。
+ *
+ * 典型例子：Gemini `thoughtSignature`。Core 不解释这些字段，只负责在 history
+ * 回灌时原样保留，让对应 Provider Adapter 能重建合法的原生 conversation。
+ */
+export type ProviderMetadata = Record<string, unknown>;
 
 /**
  * 多 Provider 共通消息结构。
@@ -49,6 +74,7 @@ export interface Message {
   content: string | MessageContentPart[];
   name?: string | undefined;
   toolCallId?: string | undefined;
+  providerMetadata?: ProviderMetadata | undefined;
   /**
    * assistant 角色消息中附带的工具调用请求（ADR-0002）。
    *
@@ -88,5 +114,5 @@ export interface ToolCallRequest {
   id: string;
   name: string;
   arguments: Record<string, unknown>;
+  providerMetadata?: ProviderMetadata | undefined;
 }
-

@@ -156,6 +156,12 @@ const toAnthropicContentBlocks = (
     if (part.type === "text") {
       return { type: "text", text: part.text };
     }
+    if (part.type === "file") {
+      return {
+        type: "text",
+        text: `[file:${part.file.mimeType}:${part.file.name ?? part.file.uri ?? "inline"}]`,
+      };
+    }
     // MessageImagePart → Anthropic image block
     // 支持 data URL 与远端 URL 两种输入；Anthropic SDK 会根据 source.type 分派。
     const url = part.image_url.url;

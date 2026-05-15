@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha.6] - 2026-05-15
+
+### Added
+
+#### `@tachu/core`
+
+- **Streaming protocol** — `phase-enter` / `phase-exit` chunks plus `reasoning-delta` streaming aligned with the engine orchestrator.
+- **Session scope + model overrides** — `SessionScope` wiring and `modelOverride` resolution through the model router for session/tenant-aware model selection.
+- **LLM usage telemetry** — lightweight usage capture with `stepId` attribution for phase-level observability.
+- **Multimodal outputs** — `GeneratedMedia`, `EngineOutput.metadata.generatedMedia`, `ChatStreamChunk` `media` parts, and `direct-answer` / engine sinks for non-image artifacts (audio/video/file) alongside legacy `GeneratedImage`.
+- **Provider protocol expansion** — optional `embed` / `rerank`, structured-output request metadata, response modalities, `Message` `file` content parts, and opaque `providerMetadata` on messages, tool calls, stream tool deltas, and finish chunks for adapter-specific round-trips (e.g. Gemini thought signatures).
+
+#### `@tachu/extensions`
+
+- **`GeminiProviderAdapter`** — first-party Gemini integration on `@google/genai`, exported from the package entrypoint, with dedicated unit tests.
+
+### Changed
+
+#### `@tachu/core`
+
+- **Tool-use loop** — structured tool results vs final assistant streaming split, parallel tool-approval budgeting with active tool-loop timers, streamed `providerMetadata` merged into persisted assistant tool calls, and streaming correctness fixes.
+- **Prompt assembler** — memory history preserves `MessageContentPart[]` when present; `file` parts render as stable placeholders instead of being stringified blindly.
+
+### Housekeeping
+
+- **`.gitignore`** — ignore `docs/superpowers/` for local draft material.
+
+#### Docs
+
+- **README / README_ZH / CHANGELOG** — milestone bumped to `1.0.0-alpha.6` with an English-first release note for this cut.
+
 ## [1.0.0-alpha.5] - 2026-05-11
 
 ### Added
@@ -227,5 +258,6 @@ vector stores and an optional browser-rendering sidecar.
   the web fetch server split and the text-to-image routing.
 - Apache License 2.0.
 
+[1.0.0-alpha.6]: https://github.com/dangaogit/tachu/releases/tag/v1.0.0-alpha.6
 [1.0.0-alpha.2]: https://github.com/dangaogit/tachu/releases/tag/v1.0.0-alpha.2
 [1.0.0-alpha.1]: https://github.com/dangaogit/tachu/releases/tag/v1.0.0-alpha.1

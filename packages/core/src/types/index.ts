@@ -7,4 +7,5 @@ export * from "./hooks";
 export * from "./io";
 export * from "./message";
 export * from "./result";
+export * from "./scope";
 

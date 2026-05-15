@@ -1,6 +1,14 @@
 import { ProviderError } from "../errors";
 import type { AdapterCallContext } from "../types/context";
-import type { GeneratedImage, Message, ToolCallRequest, ToolDefinition } from "../types";
+import type {
+  GeneratedImage,
+  GeneratedMedia,
+  Message,
+  MessageContentPart,
+  ProviderMetadata,
+  ToolCallRequest,
+  ToolDefinition,
+} from "../types";
 
 /**
  * 模型能力标签。
@@ -17,9 +25,13 @@ export type ModelCapabilityTags =
  */
 export interface ModelCapabilities {
   supportedModalities: string[];
+  supportedOutputModalities?: string[] | undefined;
   maxContextTokens: number;
   supportsStreaming: boolean;
   supportsFunctionCalling: boolean;
+  supportsStructuredOutput?: boolean | undefined;
+  supportsEmbeddings?: boolean | undefined;
+  supportsRerank?: boolean | undefined;
 }
 
 /**
@@ -39,6 +51,19 @@ export interface ChatRequest {
   tools?: ToolDefinition[];
   temperature?: number;
   maxTokens?: number;
+  structuredOutput?: StructuredOutputConfig | undefined;
+  responseModalities?: ResponseModality[] | undefined;
+  providerOptions?: Record<string, unknown> | undefined;
+}
+
+export type ResponseModality = "TEXT" | "IMAGE" | "AUDIO" | "VIDEO";
+
+export interface StructuredOutputConfig {
+  schema: Record<string, unknown>;
+  name?: string | undefined;
+  description?: string | undefined;
+  mimeType?: "application/json" | "text/x.enum" | string | undefined;
+  strict?: boolean | undefined;
 }
 
 /**
@@ -90,6 +115,20 @@ export type ChatFinishReason =
  */
 export interface ChatResponse {
   content: string;
+  structured?: unknown | undefined;
+  providerMetadata?: ProviderMetadata | undefined;
+  /**
+   * 模型自身的推理过程整体（非流式 `chat()` 路径专用）。
+   *
+   * 触发条件：仅对支持原生 reasoning 输出的模型（DeepSeek-R1 /
+   * OpenAI o-series / 豆包 thinking variant / Anthropic extended thinking
+   * 等）由 Provider Adapter 填充；普通模型保持 `undefined`。
+   *
+   * 与 `content` 的关系：本字段承载"模型在生成 `content` 之前的思考过程"，
+   * 上游 sub-flow 可一次性以 `ReasoningDeltaChunk` 形式 yield 给 SSE 通道；
+   * **禁止**被回灌为下一轮 LLM 上下文（会导致 token 爆炸 + 分布漂移）。
+   */
+  reasoningContent?: string | undefined;
   /**
    * LLM 请求的工具调用列表；为空数组或 undefined 表示本轮未请求调工具。
    *
@@ -115,6 +154,7 @@ export interface ChatResponse {
    * 完成下载落盘、卡片渲染、审计等操作。
    */
   images?: GeneratedImage[] | undefined;
+  media?: GeneratedMedia[] | undefined;
 }
 
 /**
@@ -134,19 +174,79 @@ export interface ChatResponse {
  */
 export type ChatStreamChunk =
   | { type: "text-delta"; delta: string }
+  /**
+   * 模型 reasoning_content 流式增量（OpenAI 兼容 `delta.reasoning_content` /
+   * Anthropic `thinking_delta` 等）。仅支持原生推理流的模型会下发。
+   * Provider Adapter 仅负责把上游字段映射到本 chunk 类型，
+   * 由 sub-flow 决定是否透传成顶层 `StreamChunk.reasoning-delta`。
+   */
+  | { type: "reasoning-delta"; delta: string }
   | {
       type: "tool-call-delta";
       index: number;
       id?: string | undefined;
       name?: string | undefined;
       argumentsDelta?: string | undefined;
+      providerMetadata?: ProviderMetadata | undefined;
     }
   | { type: "tool-call-complete"; call: ToolCallRequest }
+  | { type: "structured-delta"; delta: string }
+  | { type: "media"; media: GeneratedMedia }
   | {
       type: "finish";
       finishReason: ChatFinishReason;
       usage?: ChatUsage | undefined;
+      providerMetadata?: ProviderMetadata | undefined;
     };
+
+export type EmbeddingContent = string | MessageContentPart[];
+
+export interface EmbeddingRequest {
+  model: string;
+  inputs: EmbeddingContent[];
+  taskType?:
+    | "RETRIEVAL_QUERY"
+    | "RETRIEVAL_DOCUMENT"
+    | "SEMANTIC_SIMILARITY"
+    | "CLASSIFICATION"
+    | "CLUSTERING"
+    | string
+    | undefined;
+  outputDimensionality?: number | undefined;
+  providerOptions?: Record<string, unknown> | undefined;
+}
+
+export interface EmbeddingResponse {
+  embeddings: number[][];
+  usage?: ChatUsage | undefined;
+  providerMetadata?: ProviderMetadata | undefined;
+}
+
+export interface RerankDocument {
+  id?: string | undefined;
+  text: string;
+  metadata?: Record<string, unknown> | undefined;
+}
+
+export interface RerankRequest {
+  model: string;
+  query: string;
+  documents: RerankDocument[];
+  topK?: number | undefined;
+  providerOptions?: Record<string, unknown> | undefined;
+}
+
+export interface RerankResult {
+  index: number;
+  score: number;
+  document: RerankDocument;
+}
+
+export interface RerankResponse {
+  results: RerankResult[];
+  usage?: ChatUsage | undefined;
+  providerMetadata?: ProviderMetadata | undefined;
+}
 
 /**
  * Provider 适配器协议。
@@ -189,6 +289,16 @@ export interface ProviderAdapter {
    * @param model 目标模型
    */
   countTokens?(messages: Message[], model: string): Promise<number>;
+  embed?(
+    request: EmbeddingRequest,
+    ctx: AdapterCallContext,
+    signal?: AbortSignal,
+  ): Promise<EmbeddingResponse>;
+  rerank?(
+    request: RerankRequest,
+    ctx: AdapterCallContext,
+    signal?: AbortSignal,
+  ): Promise<RerankResponse>;
   /**
    * 可选资源释放回调。
    */
@@ -289,4 +399,3 @@ export class NoopProvider implements ProviderAdapter {
     }, 0);
   }
 }
-

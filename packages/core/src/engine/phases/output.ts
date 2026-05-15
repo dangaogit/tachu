@@ -1,7 +1,17 @@
-import type { EngineOutput, Message, OutputMetadata } from "../../types";
+import type {
+  EngineOutput,
+  Message,
+  OutputMetadata,
+  ToolUseObservation,
+  ToolUseResult,
+} from "../../types";
 import type { ValidationPhaseOutput } from "./validation";
 import type { PhaseEnvironment } from "./index";
 import { buildLlmCallAbortSignal, resolveLlmTimeouts } from "../llm-timeouts";
+import {
+  createLlmUsageTracker,
+  estimateMessagesTokens,
+} from "../llm-usage-telemetry";
 
 /**
  * `task-direct-answer` 是 Phase 5 为兜底路径分配的固定任务 ID。
@@ -18,10 +28,7 @@ const TOOL_USE_TASK_ID = "task-tool-use";
  * 背景：`direct-answer` 与 `tool-use` 两个内置 Sub-flow 都是**完整的自然语言回复**，
  * 已经按系统提示词的约束产出了 Markdown 内容；主干不再重复包装。
  */
-const NATURAL_LANGUAGE_TASK_IDS: readonly string[] = [
-  DIRECT_ANSWER_TASK_ID,
-  TOOL_USE_TASK_ID,
-];
+const NATURAL_LANGUAGE_TASK_IDS: readonly string[] = [DIRECT_ANSWER_TASK_ID];
 
 /**
  * 兜底答复 LLM 调用的超时（毫秒）。
@@ -123,6 +130,303 @@ const extractInputText = (content: unknown): string => {
     return JSON.stringify(content);
   } catch {
     return String(content);
+  }
+};
+
+const isToolUseResult = (value: unknown): value is ToolUseResult => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  return (value as { kind?: unknown }).kind === "tool-use-result";
+};
+
+const clipForPrompt = (text: string, maxChars: number): string =>
+  text.length <= maxChars
+    ? text
+    : `${text.slice(0, maxChars)}\n\n...[truncated ${text.length - maxChars} chars]`;
+
+const observationToPromptText = (observation: ToolUseObservation, index: number): string =>
+  [
+    `Observation ${index + 1}`,
+    `Tool: ${observation.tool}`,
+    `CallId: ${observation.callId}`,
+    "Output:",
+    clipForPrompt(observation.text, 4_000),
+  ].join("\n");
+
+const TOOL_USE_FINAL_ANSWER_SYSTEM_PROMPT = `You are the final answer writer for a tool-assisted task.
+
+Write the user-facing final answer using only the user's request, tool observations, and any terminal draft provided by the tool loop.
+
+Rules:
+- Do not mention internal engine phases, tool-loop implementation details, task ids, or provider errors.
+- If tool observations are partial, say what could be confirmed and what remains uncertain.
+- Do not invent facts not supported by the observations.
+- Produce natural language Markdown in the same language as the user's latest request.`;
+
+const buildToolUseFinalAnswerMessages = (
+  state: ValidationPhaseOutput,
+  toolUseResult: ToolUseResult,
+): Message[] => {
+  const userInput = clipForPrompt(extractInputText(state.input.content), 2_000);
+  const observations =
+    toolUseResult.observations.length > 0
+      ? toolUseResult.observations
+          .slice(0, 12)
+          .map(observationToPromptText)
+          .join("\n\n---\n\n")
+      : "No tool observations were produced.";
+  const terminalDraft =
+    typeof toolUseResult.terminalDraft === "string" &&
+    toolUseResult.terminalDraft.trim().length > 0
+      ? clipForPrompt(toolUseResult.terminalDraft.trim(), 2_000)
+      : "No terminal draft was produced.";
+  const error =
+    toolUseResult.error !== undefined
+      ? `Partial/error status: ${toolUseResult.status}\nError: ${toolUseResult.error.message}`
+      : `Status: ${toolUseResult.status}`;
+
+  const userPrompt = `User request:
+${userInput}
+
+${error}
+
+Tool observations:
+${observations}
+
+Terminal draft from tool loop:
+${terminalDraft}
+
+Now write the final answer.`;
+
+  return [
+    { role: "system", content: TOOL_USE_FINAL_ANSWER_SYSTEM_PROMPT },
+    { role: "user", content: userPrompt },
+  ];
+};
+
+const resolveOutputRoute = (
+  env: PhaseEnvironment,
+): { provider: string; model: string } => {
+  try {
+    return env.modelRouter.resolve("high-reasoning");
+  } catch {
+    try {
+      return env.modelRouter.resolve("intent");
+    } catch {
+      return env.modelRouter.resolve("fast-cheap");
+    }
+  }
+};
+
+const buildToolUseLocalFallbackText = (
+  state: ValidationPhaseOutput,
+  toolUseResult: ToolUseResult,
+): string => {
+  const intent =
+    typeof state.intent.intent === "string" && state.intent.intent.trim().length > 0
+      ? state.intent.intent.trim()
+      : "当前请求";
+  const previews = toolUseResult.observations
+    .slice(0, 3)
+    .map((item) => {
+      const text = clipForPrompt(item.text.trim(), 600);
+      return `- ${item.tool}: ${text || "工具返回为空"}`;
+    });
+  const lines = [
+    `本次${intent}没有完成完整的最终整理，但工具步骤已经返回了部分结果。`,
+    "",
+    ...(previews.length > 0 ? previews : ["- 没有可展示的工具结果。"]),
+  ];
+  if (toolUseResult.error) {
+    lines.push("", `后续生成答案时遇到问题：${toolUseResult.error.message}`);
+  }
+  return sanitizeInternalTerms(lines.join("\n"));
+};
+
+const generateToolUseFinalAnswer = async (
+  state: ValidationPhaseOutput,
+  env: PhaseEnvironment,
+  toolUseResult: ToolUseResult,
+): Promise<string | null> => {
+  const route = resolveOutputRoute(env);
+  const adapter = env.providers.get(route.provider);
+  if (!adapter) {
+    safeEmit(env, {
+      timestamp: Date.now(),
+      traceId: state.context.traceId,
+      sessionId: state.context.sessionId,
+      phase: "output",
+      type: "warning",
+      payload: {
+        purpose: "final-answer",
+        provider: route.provider,
+        reason: "provider not registered",
+      },
+    });
+    return null;
+  }
+
+  const messages = buildToolUseFinalAnswerMessages(state, toolUseResult);
+  const startedAt = Date.now();
+  safeEmit(env, {
+    timestamp: startedAt,
+    traceId: state.context.traceId,
+    sessionId: state.context.sessionId,
+    phase: "output",
+    type: "llm_call_start",
+    payload: {
+      provider: adapter.id,
+      model: route.model,
+      purpose: "final-answer",
+      messageCount: messages.length,
+    },
+  });
+
+  const llmTimeouts = resolveLlmTimeouts(env.config, "output");
+  const useStream =
+    env.config.runtime.streamingOutput === true &&
+    env.onFinalAnswerDelta !== undefined;
+  const usageTracker = createLlmUsageTracker({
+    attribution: {
+      id:
+        env.nextStreamId?.() ??
+        `${state.context.traceId}:output-final-answer:${startedAt}`,
+      kind: "llm_call",
+      ...(env.currentPhaseStepId !== undefined
+        ? { parentId: env.currentPhaseStepId }
+        : {}),
+      label: "final-answer",
+      meta: {
+        phase: "output",
+        purpose: "final-answer",
+        provider: adapter.id,
+        model: route.model,
+      },
+    },
+    estimatedInputTokens: await estimateMessagesTokens(adapter, messages, route.model),
+    emit: env.emitUsageTelemetry,
+  });
+  usageTracker.start();
+
+  if (useStream) {
+    const signal = buildLlmCallAbortSignal(
+      env.activeAbortSignal,
+      llmTimeouts.llmStreamingMs,
+      "streaming",
+    );
+    let content = "";
+    let deltaCount = 0;
+    try {
+      for await (const part of adapter.chatStream(
+        { model: route.model, messages },
+        env.adapterContext,
+        signal,
+      )) {
+        if (part.type === "text-delta") {
+          if (part.delta.length === 0) continue;
+          content += part.delta;
+          deltaCount += 1;
+          usageTracker.addOutputDelta(part.delta);
+          env.onFinalAnswerDelta?.(part.delta);
+        } else if (part.type === "finish" && part.usage !== undefined) {
+          if (part.usage.totalTokens > 0) {
+            usageTracker.final(part.usage);
+          }
+          env.onProviderUsage?.(part.usage);
+        }
+      }
+      const text = sanitizeInternalTerms(content.trim());
+      safeEmit(env, {
+        timestamp: Date.now(),
+        traceId: state.context.traceId,
+        sessionId: state.context.sessionId,
+        phase: "output",
+        type: "llm_call_end",
+        payload: {
+          provider: adapter.id,
+          model: route.model,
+          purpose: "final-answer",
+          durationMs: Date.now() - startedAt,
+          empty: text.length === 0,
+          streamed: true,
+        },
+      });
+      return text.length > 0 ? text : null;
+    } catch (error) {
+      safeEmit(env, {
+        timestamp: Date.now(),
+        traceId: state.context.traceId,
+        sessionId: state.context.sessionId,
+        phase: "output",
+        type: "warning",
+        payload: {
+          provider: adapter.id,
+          model: route.model,
+          purpose: "final-answer",
+          durationMs: Date.now() - startedAt,
+          deltaCount,
+          message: error instanceof Error ? error.message : String(error),
+          reason: "final answer stream failed",
+        },
+      });
+      if (deltaCount > 0) {
+        usageTracker.terminal(env.activeAbortSignal.aborted ? "cancelled" : "failed");
+        throw error;
+      }
+      usageTracker.terminal(env.activeAbortSignal.aborted ? "cancelled" : "failed");
+      return null;
+    }
+  }
+
+  const signal = buildLlmCallAbortSignal(
+    env.activeAbortSignal,
+    llmTimeouts.llmStreamingMs,
+    "streaming",
+  );
+  try {
+    const response = await adapter.chat(
+      { model: route.model, messages },
+      env.adapterContext,
+      signal,
+    );
+    usageTracker.addOutputDelta(response.content);
+    usageTracker.final(response.usage);
+    env.onProviderUsage?.(response.usage);
+    const text = sanitizeInternalTerms(response.content.trim());
+    safeEmit(env, {
+      timestamp: Date.now(),
+      traceId: state.context.traceId,
+      sessionId: state.context.sessionId,
+      phase: "output",
+      type: "llm_call_end",
+      payload: {
+        provider: adapter.id,
+        model: route.model,
+        purpose: "final-answer",
+        durationMs: Date.now() - startedAt,
+        usage: response.usage,
+        empty: text.length === 0,
+        streamed: false,
+      },
+    });
+    return text.length > 0 ? text : null;
+  } catch (error) {
+    usageTracker.terminal(env.activeAbortSignal.aborted ? "cancelled" : "failed");
+    safeEmit(env, {
+      timestamp: Date.now(),
+      traceId: state.context.traceId,
+      sessionId: state.context.sessionId,
+      phase: "output",
+      type: "warning",
+      payload: {
+        provider: adapter.id,
+        model: route.model,
+        purpose: "final-answer",
+        durationMs: Date.now() - startedAt,
+        message: error instanceof Error ? error.message : String(error),
+        reason: "final answer LLM call failed",
+      },
+    });
+    return null;
   }
 };
 
@@ -233,8 +537,31 @@ Generate the fallback reply per the system prompt's hard rules.`;
     Math.min(FALLBACK_LLM_TIMEOUT_MS, llmTimeouts.llmStreamingMs),
     "streaming",
   );
+  const usageTracker = createLlmUsageTracker({
+    attribution: {
+      id:
+        env.nextStreamId?.() ??
+        `${state.context.traceId}:output-fallback-summary:${startedAt}`,
+      kind: "llm_call",
+      ...(env.currentPhaseStepId !== undefined
+        ? { parentId: env.currentPhaseStepId }
+        : {}),
+      label: "fallback-summary",
+      meta: {
+        phase: "output",
+        purpose: "fallback-summary",
+        provider: adapter.id,
+        model,
+      },
+    },
+    estimatedInputTokens: await estimateMessagesTokens(adapter, messages, model),
+    emit: env.emitUsageTelemetry,
+  });
+  usageTracker.start();
   try {
     const response = await adapter.chat({ model, messages }, env.adapterContext, signal);
+    usageTracker.addOutputDelta(response.content);
+    usageTracker.final(response.usage);
     env.onProviderUsage?.(response.usage);
     const raw = typeof response.content === "string" ? response.content.trim() : "";
     safeEmit(env, {
@@ -255,6 +582,7 @@ Generate the fallback reply per the system prompt's hard rules.`;
     if (raw.length < FALLBACK_MIN_LENGTH) return null;
     return sanitizeInternalTerms(raw);
   } catch (error) {
+    usageTracker.terminal(env.activeAbortSignal.aborted ? "cancelled" : "failed");
     safeEmit(env, {
       timestamp: Date.now(),
       traceId: state.context.traceId,
@@ -341,6 +669,10 @@ export const runOutputPhase = async (
   env: PhaseEnvironment,
   metadata: OutputMetadata,
 ): Promise<EngineOutput> => {
+  const toolUseResultRaw = state.taskResults[TOOL_USE_TASK_ID];
+  const toolUseResult = isToolUseResult(toolUseResultRaw)
+    ? toolUseResultRaw
+    : null;
   const naturalAnswer = ((): string => {
     for (const taskId of NATURAL_LANGUAGE_TASK_IDS) {
       const raw = state.taskResults[taskId];
@@ -354,6 +686,10 @@ export const runOutputPhase = async (
   let content: string;
   if (naturalAnswer.length > 0) {
     content = naturalAnswer;
+  } else if (toolUseResult !== null) {
+    content =
+      (await generateToolUseFinalAnswer(state, env, toolUseResult)) ??
+      buildToolUseLocalFallbackText(state, toolUseResult);
   } else if (state.validation.passed) {
     content = JSON.stringify(
       {

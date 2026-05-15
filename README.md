@@ -8,7 +8,7 @@
 [![bun](https://img.shields.io/badge/runtime-bun-orange)](https://bun.sh)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-blue)](https://www.typescriptlang.org)
 
-> **⚠️ Project Status — Alpha.** The 9-phase pipeline, registry, prompt assembler, CLI, OpenAI / Anthropic / Qwen adapters, MCP adapters, vector stores and observability emitters are wired up and individually tested. **Phase 3 (Intent Analysis) is a real LLM call**, so `tachu chat` / `tachu run` produce real conversational replies. **Phase 5 (Planning) and Phase 8 (Result Validation) are still stubbed** — requests classified as *complex* will not yet receive an LLM-generated multi-step plan or semantic validation. See [Project Status](#project-status) and [Roadmap](#roadmap) for the per-feature breakdown. Do **not** use this in production yet. Install via the `@alpha` dist-tag.
+> **⚠️ Project Status — Alpha.** The 9-phase pipeline, registry, prompt assembler, CLI, OpenAI / Anthropic / Qwen / Gemini adapters, MCP adapters, vector stores and observability emitters are wired up and individually tested. **Phase 3 (Intent Analysis) is a real LLM call**, so `tachu chat` / `tachu run` produce real conversational replies. **Phase 5 (Planning) and Phase 8 (Result Validation) are still stubbed** — requests classified as *complex* will not yet receive an LLM-generated multi-step plan or semantic validation. See [Project Status](#project-status) and [Roadmap](#roadmap) for the per-feature breakdown. Do **not** use this in production yet. Install via the `@alpha` dist-tag.
 
 ---
 
@@ -24,7 +24,7 @@ Tachu ships as a Bun-native TypeScript monorepo with three packages: the zero-de
 
 ## Project Status
 
-**Current release:** `1.0.0-alpha.5` on the `alpha` dist-tag.
+**Current release:** `1.0.0-alpha.6` on the `alpha` dist-tag.
 
 This is the **first public alpha** — most infrastructure is in place, but several LLM-backed stages are still stubbed. The table below is the single source of truth; every claim made elsewhere in this README must be cross-checked against it.
 
@@ -35,7 +35,7 @@ This is the **first public alpha** — most infrastructure is in place, but seve
 | Prompt assembler (tiktoken, KV-cache-friendly ordering) | ✅ Implemented | `packages/core/src/prompt` |
 | Task scheduler, DAG validator, retry/fallback bookkeeping | ✅ Implemented | `packages/core/src/engine/scheduler.ts` |
 | Session / Memory / Runtime-state / Safety / Model-router / Provider / Observability / Hooks modules | ✅ Implemented | `packages/core/src/modules` |
-| OpenAI / Anthropic / Mock Provider adapters | ✅ Implemented | streaming, function calling, tool schemas |
+| OpenAI / Anthropic / Qwen / Mock / Gemini Provider adapters | ✅ Implemented | streaming, function calling, tool schemas |
 | `apiKey` / `baseURL` / `organization` / `timeoutMs` configuration (env var / `tachu.config.ts` / CLI flags) | ✅ Implemented | Azure OpenAI / LiteLLM / OpenRouter / self-hosted gateways supported |
 | 7 built-in tools + Terminal / File / Web backends | ✅ Implemented | `packages/extensions/src/{tools,backends}` |
 | MCP stdio + SSE adapters | ✅ Implemented | `packages/extensions/src/mcp` |
@@ -228,7 +228,7 @@ bun add -g @tachu/cli@alpha
 After global installation, verify with:
 
 ```bash
-tachu --version   # expect 1.0.0-alpha.5 or newer
+tachu --version   # expect 1.0.0-alpha.6 or newer
 ```
 
 ---
@@ -937,7 +937,17 @@ The contract is enforced by `packages/core/src/engine/phases/fallback-contract.t
 Tachu follows a `1.0.0-alpha.n` → `1.0.0-beta.n` → `1.0.0` release lane. Each
 cut-line below is a real, shippable deliverable with tests, not a wish list.
 
-### 1.0.0-alpha.5 — Descriptor governance + timeout budgeting hardening (current)
+### 1.0.0-alpha.6 — Streaming phases, Gemini, and provider-protocol hardening (current)
+
+- [x] Engine streaming extensions: `phase-enter` / `phase-exit` plus `reasoning-delta` chunks for richer CLI/SSE consumers
+- [x] `SessionScope` + `modelOverride` plumbing through the model router for scoped routing decisions
+- [x] LLM usage telemetry with `stepId` attribution for phase-level observability
+- [x] Tool-use loop: structured tool results vs final-answer streaming split, parallel approval budgeting, active tool-loop timers, streamed `providerMetadata` merged into assistant history, and streaming robustness fixes
+- [x] Multimodal protocol: `GeneratedMedia`, `metadata.generatedMedia`, `Message` `file` parts, optional `embed` / `rerank` hooks, structured-output metadata, and opaque `providerMetadata` for adapter-specific replay
+- [x] `GeminiProviderAdapter` (`@google/genai`) with unit tests and package exports
+- [x] `.gitignore` — ignore `docs/superpowers/` for local draft notes
+
+### 1.0.0-alpha.5 — Descriptor governance + timeout budgeting hardening
 
 - [x] `BaseDescriptor` governance metadata: `version`, `displayName`, `deprecated`, `deprecatedMessage`
 - [x] `DescriptorRegistry` version-aware resolution: same-name multi-version coexistence, `get(kind,name,version)`, `getLatest`, `listVersions`, and stable-first latest selection
@@ -1013,7 +1023,7 @@ cut-line below is a real, shippable deliverable with tests, not a wish list.
 - [ ] ≥1 third-party user has run Tachu end-to-end against a real LLM and reported back
 - [ ] Published coverage + benchmark baselines
 - [ ] Public upgrade guide covering every breaking change since `1.0.0-alpha.1`
-- [ ] Additional provider adapters (Gemini, Mistral) land behind the stable protocol
+- [ ] Additional provider adapters (e.g. Mistral) land behind the stable protocol
 
 ### 1.0.0 — Stable
 

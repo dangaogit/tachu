@@ -79,7 +79,14 @@ class ScriptedMockProvider implements ProviderAdapter {
   ): AsyncIterable<ChatStreamChunk> {
     const response = await this.chat(request, ctx, signal);
     for (const ch of response.content) yield { type: "text-delta", delta: ch };
-    yield { type: "finish", finishReason: response.finishReason ?? "stop", usage: response.usage };
+    for (const call of response.toolCalls ?? []) {
+      yield { type: "tool-call-complete", call };
+    }
+    yield {
+      type: "finish",
+      finishReason: response.finishReason ?? "stop",
+      usage: response.usage,
+    };
   }
 
   async countTokens(messages: Message[]): Promise<number> {
@@ -217,6 +224,34 @@ const echoToolDescriptor: ToolDescriptor = {
   execute: "echo",
 };
 
+/**
+ * 校验 StreamChunk 序列中 tool-call-start / tool-call-end 按 callId 严格配对，
+ * 且在 `phase-exit`（execution）与首个 `done` 之前不得残留未闭合的 callId；
+ * 所有 `tool-call-end` 必须出现在 `done` 之前。
+ */
+const assertToolCallStreamChunksWellFormed = (chunks: StreamChunk[]): void => {
+  const open = new Map<string, string>();
+  const doneIndex = chunks.findIndex((c) => c.type === "done");
+  expect(doneIndex).toBeGreaterThanOrEqual(0);
+
+  for (let i = 0; i < chunks.length; i++) {
+    const c = chunks[i]!;
+    if (c.type === "phase-exit" && c.phase === "execution") {
+      expect(open.size).toBe(0);
+    }
+    if (c.type === "tool-call-start") {
+      expect(open.has(c.callId)).toBe(false);
+      open.set(c.callId, c.tool);
+    }
+    if (c.type === "tool-call-end") {
+      expect(open.has(c.callId)).toBe(true);
+      open.delete(c.callId);
+      expect(i < doneIndex).toBe(true);
+    }
+  }
+  expect(open.size).toBe(0);
+};
+
 describe("engine integration: tool-use agentic loop", () => {
   test("complex intent + 已注册工具 → tool-use 子流程跑完多轮后返回终止文本", async () => {
     const provider = new ScriptedMockProvider([
@@ -336,6 +371,109 @@ describe("engine integration: tool-use agentic loop", () => {
     expect(events.some((e) => e.type === "phase_exit")).toBe(true);
     expect(events.some((e) => e.type === "tool_call_start")).toBe(true);
     expect(events.some((e) => e.type === "tool_call_end")).toBe(true);
+
+    await engine.dispose();
+  });
+
+  test("同一轮 LLM 内两次工具调用（同名不同 callId）→ 每个 callId 在 execution phase-exit 与 done 前均有对偶 end", async () => {
+    const provider = new ScriptedMockProvider([
+      {
+        content:
+          '{"intent":"连续两次 echo","complexity":"complex","contextRelevance":"related"}',
+        finishReason: "stop",
+      },
+      {
+        content: "",
+        toolCalls: [
+          {
+            id: "call-echo-a",
+            name: "echo-tool",
+            arguments: { text: "first" },
+          },
+          {
+            id: "call-echo-b",
+            name: "echo-tool",
+            arguments: { text: "second" },
+          },
+        ],
+        finishReason: "tool_calls",
+      },
+      {
+        content: "两次 echo 均已完成。",
+        finishReason: "stop",
+      },
+    ]);
+
+    const vectorStore = new InMemoryVectorStore();
+    const registry = new DescriptorRegistry({ vectorStore });
+    await registry.register(echoToolDescriptor);
+
+    const observability = new DefaultObservabilityEmitter();
+    const sessions = new InMemorySessionManager();
+
+    const fallbackExecutor = async (task: {
+      type: string;
+      ref: string;
+      input: unknown;
+    }): Promise<unknown> => {
+      if (task.type === "tool" && task.ref === "echo-tool") {
+        const args = (task.input ?? {}) as { text?: string };
+        return { text: `echoed:${args.text ?? ""}` };
+      }
+      throw new Error(`unexpected task: ${task.type}:${task.ref}`);
+    };
+
+    const engine = new Engine(createConfig(), {
+      registry,
+      vectorStore,
+      providers: [provider],
+      observability,
+      sessionManager: sessions,
+      taskExecutor: fallbackExecutor,
+    });
+
+    const chunks: StreamChunk[] = [];
+    for await (const chunk of engine.runStream(
+      {
+        content: "请连续两次用 echo-tool 回显 first 与 second",
+        metadata: { modality: "text", size: 64 },
+      },
+      {
+        requestId: "req-dual-echo",
+        sessionId: "session-dual-echo",
+        traceId: "trace-dual-echo",
+        principal: { role: "tester" },
+        budget: { maxTokens: 5_000, maxDurationMs: 10_000 },
+        scopes: ["*"],
+      },
+    )) {
+      chunks.push(chunk);
+      if (chunk.type === "error") {
+        throw chunk.error;
+      }
+    }
+
+    assertToolCallStreamChunksWellFormed(chunks);
+
+    const done = chunks.find((c) => c.type === "done");
+    expect(done).toBeDefined();
+    if (!done || done.type !== "done") throw new Error("expected done");
+
+    const doneIndex = chunks.findIndex((c) => c.type === "done");
+    const endAIndex = chunks.findIndex(
+      (c) => c.type === "tool-call-end" && c.callId === "call-echo-a",
+    );
+    const endBIndex = chunks.findIndex(
+      (c) => c.type === "tool-call-end" && c.callId === "call-echo-b",
+    );
+    const execExitIndex = chunks.findIndex(
+      (c) => c.type === "phase-exit" && c.phase === "execution",
+    );
+    expect(endAIndex).toBeGreaterThanOrEqual(0);
+    expect(endBIndex).toBeGreaterThanOrEqual(0);
+    expect(endBIndex).toBeLessThan(doneIndex);
+    const lastToolEndIndex = Math.max(endAIndex, endBIndex);
+    expect(execExitIndex).toBeGreaterThan(lastToolEndIndex);
 
     await engine.dispose();
   });

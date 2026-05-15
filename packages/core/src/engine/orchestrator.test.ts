@@ -120,6 +120,25 @@ describe("ExecutionOrchestrator", () => {
     orchestrator.endToolLoopActiveTimer();
   });
 
+  test("overlapping user blocking (parallel tool approvals) still excludes full wait", async () => {
+    const orchestrator = new ExecutionOrchestrator(
+      createConfig({ maxToolCalls: 99, maxTokens: 99, maxToolLoopActiveMs: 18 }),
+      { traceId: "tb2", sessionId: "sb2" },
+      new DefaultObservabilityEmitter(),
+    );
+
+    orchestrator.beginToolLoopActiveTimer();
+    orchestrator.beginUserBlocking();
+    orchestrator.beginUserBlocking();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    orchestrator.endUserBlocking();
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    orchestrator.endUserBlocking();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(() => orchestrator.recordToolCall()).not.toThrow();
+    orchestrator.endToolLoopActiveTimer();
+  });
+
   test("tool-loop active budget throws when active time exceeds limit", async () => {
     const orchestrator = new ExecutionOrchestrator(
       createConfig({ maxToolCalls: 99, maxTokens: 99, maxToolLoopActiveMs: 10 }),

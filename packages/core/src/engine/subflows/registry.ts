@@ -2,6 +2,7 @@ import type {
   EngineConfig,
   ExecutionContext,
   GeneratedImage,
+  GeneratedMedia,
   StreamChunk,
   ToolCallRecord,
 } from "../../types";
@@ -12,6 +13,7 @@ import type { ProviderAdapter, ChatUsage } from "../../modules/provider";
 import type { ObservabilityEmitter } from "../../modules/observability";
 import type { AssembledPrompt } from "../../prompt/assembler";
 import type { Registry } from "../../registry";
+import type { EmitLlmUsageTelemetry } from "../llm-usage-telemetry";
 import type { TaskExecutor } from "../scheduler";
 import {
   executeDirectAnswer,
@@ -72,6 +74,9 @@ export interface InternalSubflowContext {
    * `ExecutionOrchestrator` 能接收真实 token 消耗。
    */
   onProviderUsage?: (usage: ChatUsage) => void;
+  emitUsageTelemetry?: EmitLlmUsageTelemetry | undefined;
+  currentPhaseStepId?: string | undefined;
+  nextStreamId?: (() => string) | undefined;
   /**
    * 描述符注册中心（ADR-0002）：仅 `tool-use` 消费。
    */
@@ -102,6 +107,10 @@ export interface InternalSubflowContext {
    */
   onAssistantDelta?: (text: string) => void;
   /**
+   * 模型 reasoning_content 流式分片。
+   */
+  onAssistantReasoningDelta?: (text: string) => void;
+  /**
    * 文生图 / 图像编辑产物回流（P1-1）。
    *
    * 由 Engine 注入：主干维护 traceId 级 sink，内置 `direct-answer` 子流程在从
@@ -109,6 +118,10 @@ export interface InternalSubflowContext {
    * 最终由 `output` 阶段写入 `EngineOutput.metadata.generatedImages`。
    */
   onGeneratedImages?: (images: GeneratedImage[]) => void;
+  /**
+   * 通用多模态产物回流。
+   */
+  onGeneratedMedia?: (media: GeneratedMedia[]) => void;
   /**
    * 工具执行前审批回调（ADR-0002 Stage 4）：仅 `tool-use` 消费。
    *
@@ -127,7 +140,7 @@ export interface InternalSubflowContext {
 export type InternalSubflowHandler = (
   input: Record<string, unknown>,
   ctx: InternalSubflowContext,
-) => Promise<string>;
+) => Promise<unknown>;
 
 /**
  * 内置 Sub-flow 注册表。
@@ -163,11 +176,24 @@ export class InternalSubflowRegistry {
           ...(ctx.onProviderUsage !== undefined
             ? { onProviderUsage: ctx.onProviderUsage }
             : {}),
+          ...(ctx.emitUsageTelemetry !== undefined
+            ? { emitUsageTelemetry: ctx.emitUsageTelemetry }
+            : {}),
+          ...(ctx.currentPhaseStepId !== undefined
+            ? { currentPhaseStepId: ctx.currentPhaseStepId }
+            : {}),
+          ...(ctx.nextStreamId !== undefined ? { nextStreamId: ctx.nextStreamId } : {}),
           ...(ctx.onAssistantDelta !== undefined
             ? { onAssistantDelta: ctx.onAssistantDelta }
             : {}),
+          ...(ctx.onAssistantReasoningDelta !== undefined
+            ? { onAssistantReasoningDelta: ctx.onAssistantReasoningDelta }
+            : {}),
           ...(ctx.onGeneratedImages !== undefined
             ? { onGeneratedImages: ctx.onGeneratedImages }
+            : {}),
+          ...(ctx.onGeneratedMedia !== undefined
+            ? { onGeneratedMedia: ctx.onGeneratedMedia }
             : {}),
         });
       },
@@ -204,10 +230,20 @@ export class InternalSubflowRegistry {
         ...(ctx.onProviderUsage !== undefined
           ? { onProviderUsage: ctx.onProviderUsage }
           : {}),
+        ...(ctx.emitUsageTelemetry !== undefined
+          ? { emitUsageTelemetry: ctx.emitUsageTelemetry }
+          : {}),
+        ...(ctx.currentPhaseStepId !== undefined
+          ? { currentPhaseStepId: ctx.currentPhaseStepId }
+          : {}),
+        ...(ctx.nextStreamId !== undefined ? { nextStreamId: ctx.nextStreamId } : {}),
         ...(ctx.onToolLoopEvent !== undefined
           ? { onToolLoopEvent: ctx.onToolLoopEvent }
           : {}),
         ...(ctx.onToolCall !== undefined ? { onToolCall: ctx.onToolCall } : {}),
+        ...(ctx.onAssistantReasoningDelta !== undefined
+          ? { onAssistantReasoningDelta: ctx.onAssistantReasoningDelta }
+          : {}),
         ...(ctx.onToolLoopActiveStart !== undefined
           ? { onToolLoopActiveStart: ctx.onToolLoopActiveStart }
           : {}),
@@ -255,7 +291,7 @@ export class InternalSubflowRegistry {
     ref: string,
     input: Record<string, unknown>,
     ctx: InternalSubflowContext,
-  ): Promise<string> {
+  ): Promise<unknown> {
     const handler = this.handlers.get(ref);
     if (!handler) {
       throw new Error(`internal sub-flow 未注册: ${ref}`);

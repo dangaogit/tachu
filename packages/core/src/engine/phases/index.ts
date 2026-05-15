@@ -1,4 +1,10 @@
-import type { EngineConfig } from "../../types";
+import type {
+  EngineConfig,
+  TokenUsageTriplet,
+  UsageAccuracy,
+  UsageAttribution,
+  UsageTerminalState,
+} from "../../types";
 import type { AdapterCallContext } from "../../types/context";
 import type {
   HookRegistry,
@@ -45,6 +51,25 @@ export interface PhaseEnvironment {
      */
     cachedPromptTokens?: number;
   }) => void;
+  /**
+   * Structured usage telemetry emitted at the LLM-call boundary. Consumers
+   * replace snapshots for the same attribution id instead of accumulating
+   * deltas, which allows final provider usage to correct estimates.
+   */
+  emitUsageTelemetry?: (event: {
+    attribution: UsageAttribution;
+    usage: TokenUsageTriplet;
+    accuracy: UsageAccuracy;
+    terminal?: UsageTerminalState | undefined;
+  }) => void;
+  /** Stable public id of the currently active top-level phase step. */
+  currentPhaseStepId?: string | undefined;
+  /** Host/run-scoped stable id factory. */
+  nextStreamId?: (() => string) | undefined;
+  /**
+   * Phase 9 final-answer 正文分片。仅输出阶段调用；tool-use 过程文本不得写入该通道。
+   */
+  onFinalAnswerDelta?: (text: string) => void;
 }
 
 export * from "./execution";
@@ -56,4 +81,3 @@ export * from "./precheck";
 export * from "./safety";
 export * from "./session";
 export * from "./validation";
-

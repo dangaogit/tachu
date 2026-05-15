@@ -71,6 +71,17 @@ const stringify = (value: unknown): string => {
   return JSON.stringify(value, null, 2);
 };
 
+const isMessageContentParts = (value: unknown): value is MessageContentPart[] =>
+  Array.isArray(value) &&
+  value.every(
+    (p) =>
+      p &&
+      typeof p === "object" &&
+      ((p as MessageContentPart).type === "text" ||
+        (p as MessageContentPart).type === "image_url" ||
+        (p as MessageContentPart).type === "file"),
+  );
+
 const filterRulesByPhase = (
   rules: RuleDescriptor[],
   phase: RuleDescriptor["scope"][number],
@@ -167,7 +178,9 @@ export class DefaultPromptAssembler implements PromptAssembler {
       for (const entry of historyEntries) {
         messages.push({
           role: entry.role,
-          content: stringify(entry.content),
+          content: isMessageContentParts(entry.content)
+            ? entry.content
+            : stringify(entry.content),
         });
       }
       for (const record of params.toolCallHistory ?? []) {
@@ -177,14 +190,7 @@ export class DefaultPromptAssembler implements PromptAssembler {
       const userContent: Message["content"] =
         typeof currentRaw === "string"
           ? currentRaw
-          : Array.isArray(currentRaw) &&
-              currentRaw.every(
-                (p) =>
-                  p &&
-                  typeof p === "object" &&
-                  ((p as MessageContentPart).type === "text" ||
-                    (p as MessageContentPart).type === "image_url"),
-              )
+          : isMessageContentParts(currentRaw)
             ? (currentRaw as MessageContentPart[])
             : stringify(currentRaw);
       messages.push({
@@ -198,7 +204,13 @@ export class DefaultPromptAssembler implements PromptAssembler {
             typeof message.content === "string"
               ? message.content
               : message.content
-                  .map((part) => (part.type === "text" ? part.text : "[image]"))
+                  .map((part) =>
+                    part.type === "text"
+                      ? part.text
+                      : part.type === "image_url"
+                        ? "[image]"
+                        : `[file:${part.file.mimeType}]`,
+                  )
                   .join("\n"),
           )
           .join("\n"),
@@ -279,4 +291,3 @@ export class DefaultPromptAssembler implements PromptAssembler {
     throw ValidationError.promptTooLarge(built.tokenCount, limit);
   }
 }
-

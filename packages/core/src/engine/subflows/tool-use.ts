@@ -1,6 +1,7 @@
-import { ToolLoopError } from "../../errors";
+import { EngineError, ToolLoopError } from "../../errors";
 import type {
   ChatFinishReason,
+  ChatStreamChunk,
   ChatUsage,
   ProviderAdapter,
 } from "../../modules/provider";
@@ -18,14 +19,25 @@ import type {
   ToolCallRecord,
   ToolCallRequest,
   ToolDefinition,
+  ToolUseObservation,
+  ToolUseResult,
+  ToolUseResultStep,
+  ToolUseResultToolCall,
 } from "../../types";
 import type { AdapterCallContext } from "../../types/context";
 import type { TaskExecutor } from "../scheduler";
 import {
   buildLlmCallAbortSignal,
+  createLlmStreamAbortController,
   isBudgetTimeoutAbort,
   resolveLlmTimeouts,
 } from "../llm-timeouts";
+import {
+  createLlmUsageTracker,
+  estimateMessagesTokens,
+  type EmitLlmUsageTelemetry,
+  type LlmUsageTracker,
+} from "../llm-usage-telemetry";
 
 /**
  * `tool-use` 内置 Sub-flow 运行时上下文（ADR-0002）。
@@ -54,6 +66,19 @@ export interface ToolUseContext {
   adapterContext: AdapterCallContext;
   prebuiltPrompt: AssembledPrompt;
   onProviderUsage?: (usage: ChatUsage) => void;
+  emitUsageTelemetry?: EmitLlmUsageTelemetry | undefined;
+  currentPhaseStepId?: string | undefined;
+  nextStreamId?: (() => string) | undefined;
+  /**
+   * 模型 reasoning_content 透传回调。
+   *
+   * 非流式 `adapter.chat()` 会在每个 loop step 拿到 `response.reasoningContent`
+   * 时一次性调用；流式 `adapter.chatStream()` 会随 `reasoning-delta` 增量调用。
+   *
+   * 与 `onAssistantDelta` 严格分离：reasoning 不进 `content`、不参与下一轮
+   * 上下文回灌。
+   */
+  onAssistantReasoningDelta?: (text: string) => void;
   onToolLoopEvent?: (chunk: StreamChunk) => void;
   onToolCall?: (record: ToolCallRecord) => void;
   onToolLoopActiveStart?: () => void;
@@ -141,6 +166,7 @@ const TOOL_USE_SYSTEM_PROMPT_BASE = `You are the agentic tool-loop sub-flow of t
 ### Tool-call principles
 - Prefer the tool that most closely fits the task; arguments must be concrete.
 - A single turn may request multiple tools, but avoid pointless repeats (e.g. listing the same directory twice).
+- When several tools run in parallel, completion order can differ from start order or from log line order; that is normal. Prefer fewer parallel calls when one result is enough.
 - On tool error: fix the arguments and retry once, switch to a different tool, or honestly state the failure based on what you already know. Do not retry indefinitely.
 
 ### Termination
@@ -418,10 +444,68 @@ const serializeToolOutput = (output: unknown, toolName?: string): string => {
 interface ExecutedToolRecord {
   call: ToolCallRequest;
   content: string;
+  output?: unknown;
   success: boolean;
   durationMs: number;
   errorMessage?: string;
+  errorCode?: string;
 }
+
+const previewToolOutput = (content: string): string | undefined => {
+  const text = content.trim();
+  if (text.length === 0) return undefined;
+  return text.length <= 500 ? text : `${text.slice(0, 497)}...`;
+};
+
+const errorToToolUseResultError = (
+  error: unknown,
+  fallbackCode: string,
+): NonNullable<ToolUseResult["error"]> => {
+  if (error instanceof EngineError) {
+    return {
+      code: error.code,
+      message: error.message,
+      retryable: error.retryable,
+    };
+  }
+  const record =
+    error && typeof error === "object" && !Array.isArray(error)
+      ? error as Record<string, unknown>
+      : undefined;
+  return {
+    code: typeof record?.code === "string" ? record.code : fallbackCode,
+    message: error instanceof Error ? error.message : String(error),
+    retryable: typeof record?.retryable === "boolean" ? record.retryable : false,
+  };
+};
+
+const toResultToolCall = (item: ExecutedToolRecord): ToolUseResultToolCall => ({
+  callId: item.call.id,
+  tool: item.call.name,
+  arguments: item.call.arguments,
+  ok: item.success,
+  durationMs: item.durationMs,
+  ...(item.output !== undefined ? { output: item.output } : {}),
+  ...(previewToolOutput(item.content) !== undefined
+    ? { outputPreview: previewToolOutput(item.content) }
+    : {}),
+  ...(item.success === false
+    ? {
+        error: {
+          code: item.errorCode ?? "TOOL_LOOP_TOOL_EXECUTION_FAILED",
+          message: item.errorMessage ?? item.content,
+          retryable: false,
+        },
+      }
+    : {}),
+});
+
+const toObservation = (item: ExecutedToolRecord): ToolUseObservation => ({
+  source: "tool",
+  tool: item.call.name,
+  callId: item.call.id,
+  text: item.content,
+});
 
 /**
  * 执行单个工具调用。
@@ -432,153 +516,78 @@ interface ExecutedToolRecord {
  *   3. 记录耗时与成功/失败；无论成功失败都会 emit tool-call-end 事件与 ToolCallRecord
  *
  * 不在本函数内做重试：重试策略由 LLM 自身掌握（它可以基于 error content 重新发起请求）。
+ *
+ * 协议：一旦成功发出 `tool-call-start`，本函数保证在返回前至多发出一次对偶的
+ * `tool-call-end`（含宿主回调抛错、或 await 链异常中断等路径）。
  */
 const executeSingleToolCall = async (
   call: ToolCallRequest,
   ctx: ToolUseContext,
+  parentStepId: string,
 ): Promise<ExecutedToolRecord> => {
-  const descriptor = ctx.registry.get("tool", call.name);
-  ctx.onToolLoopEvent?.({
-    type: "tool-call-start",
-    callId: call.id,
-    tool: call.name,
-    argumentsPreview: previewArguments(call.arguments),
-  });
-
-  const startedAt = Date.now();
-  if (!descriptor) {
-    const message = `工具 "${call.name}" 未在 registry 中注册，无法执行。请换一个已注册的工具或直接回答。`;
-    const durationMs = Date.now() - startedAt;
+  let toolCallStartDelivered = false;
+  let toolCallEndDelivered = false;
+  const emitToolCallEnd = (payload: {
+    success: boolean;
+    durationMs: number;
+    output?: unknown;
+    errorMessage?: string;
+    errorCode?: string;
+  }): void => {
+    if (toolCallEndDelivered) {
+      return;
+    }
     ctx.onToolLoopEvent?.({
       type: "tool-call-end",
       callId: call.id,
       tool: call.name,
-      success: false,
-      durationMs,
-      errorMessage: message,
-      errorCode: "TOOL_LOOP_UNKNOWN_TOOL",
+      parentStepId,
+      success: payload.success,
+      durationMs: payload.durationMs,
+      ...(payload.output !== undefined ? { output: payload.output } : {}),
+      ...(payload.errorMessage !== undefined ? { errorMessage: payload.errorMessage } : {}),
+      ...(payload.errorCode !== undefined ? { errorCode: payload.errorCode } : {}),
     });
-    ctx.onToolCall?.({
-      name: call.name,
-      durationMs,
-      success: false,
-      errorCode: "TOOL_LOOP_UNKNOWN_TOOL",
-    });
-    ctx.observability.emit({
-      timestamp: Date.now(),
-      traceId: ctx.traceId,
-      sessionId: ctx.sessionId,
-      phase: "tool-use",
-      type: "warning",
-      payload: {
-        reason: "unknown-tool",
-        tool: call.name,
-        callId: call.id,
-      },
-    });
-    return {
-      call,
-      content: message,
-      success: false,
-      durationMs,
-      errorMessage: message,
-    };
-  }
-
-  const toolTask: TaskNode = {
-    id: `tool-use:${call.id}`,
-    type: "tool",
-    ref: call.name,
-    input: call.arguments,
+    toolCallEndDelivered = true;
   };
 
-  const toolSignal = buildToolExecutionSignal(ctx.signal, TOOL_USE_TOOL_TIMEOUT_MS);
-  const toolCtx: ExecutionContext = {
-    ...ctx.executionContext,
-    abortSignal: toolSignal,
-  };
-
-  const globalApproval = ctx.config.runtime.toolLoop?.requireApprovalGlobal === true;
-  const descriptorApproval = descriptor.requiresApproval === true;
-  const autoApproved = isShellAutoApproved(call, ctx.config);
-  if (autoApproved) {
-    ctx.observability.emit({
-      timestamp: Date.now(),
-      traceId: ctx.traceId,
-      sessionId: ctx.sessionId,
-      phase: "tool-use",
-      type: "progress",
-      payload: {
-        stage: "approval-auto",
-        tool: call.name,
-        callId: call.id,
-        reason: "shell-auto-approve-pattern",
-      },
-    });
-  }
-  // 全局策略 (`requireApprovalGlobal`) 与描述符 `requiresApproval` 任一命中即需要审批；
-  // 但若本次调用已被 shell 自动审批白名单覆盖，则跳过 approval 回调（用户在
-  // `safety.shellAutoApprovePatterns` 里显式声明的命令视为预批准）。
-  const approvalNeeded = (descriptorApproval || globalApproval) && !autoApproved;
-  if (approvalNeeded && ctx.onBeforeToolCall) {
-    const triggeredBy: ToolApprovalRequest["triggeredBy"] = descriptorApproval
-      ? "descriptor"
-      : "global";
-    const approvalRequest: ToolApprovalRequest = {
-      tool: call.name,
-      callId: call.id,
-      arguments: call.arguments,
-      argumentsPreview: previewArguments(call.arguments),
-      sideEffect: descriptor.sideEffect,
-      requiresApproval: descriptorApproval,
-      triggeredBy,
-      traceId: ctx.traceId,
-      sessionId: ctx.sessionId,
-    };
-    ctx.observability.emit({
-      timestamp: Date.now(),
-      traceId: ctx.traceId,
-      sessionId: ctx.sessionId,
-      phase: "tool-use",
-      type: "progress",
-      payload: {
-        stage: "approval-pending",
-        tool: call.name,
-        callId: call.id,
-        triggeredBy,
-        sideEffect: descriptor.sideEffect,
-      },
-    });
-    let decision: ToolApprovalDecision;
+  const mark = Date.now();
+  try {
+    const descriptor = ctx.registry.get("tool", call.name);
     try {
-      ctx.onUserBlockingStart?.();
-      decision = await ctx.onBeforeToolCall(approvalRequest);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      decision = { type: "deny", reason: `审批回调抛出异常：${message}` };
-    } finally {
-      ctx.onUserBlockingEnd?.();
-    }
-    if (decision.type === "deny") {
-      const reason = decision.reason?.trim().length
-        ? decision.reason.trim()
-        : "用户拒绝执行该工具。";
-      const durationMs = Date.now() - startedAt;
-      const content = `工具调用已被用户拒绝："${reason}"。请改用其它工具或直接回答用户，不要重复请求同一工具。`;
       ctx.onToolLoopEvent?.({
-        type: "tool-call-end",
+        type: "tool-call-start",
         callId: call.id,
         tool: call.name,
+        parentStepId,
+        argumentsPreview: previewArguments(call.arguments),
+      });
+    } catch (err) {
+      emitToolCallEnd({
+        success: false,
+        durationMs: Math.max(0, Date.now() - mark),
+        errorMessage: "工具调用在 tool-call-start 事件投递时因宿主回调异常中断。",
+        errorCode: "TOOL_LOOP_ABANDONED",
+      });
+      throw err;
+    }
+    toolCallStartDelivered = true;
+
+    const startedAt = Date.now();
+    if (!descriptor) {
+      const message = `工具 "${call.name}" 未在 registry 中注册，无法执行。请换一个已注册的工具或直接回答。`;
+      const durationMs = Date.now() - startedAt;
+      emitToolCallEnd({
         success: false,
         durationMs,
-        errorMessage: reason,
-        errorCode: "TOOL_LOOP_APPROVAL_DENIED",
+        errorMessage: message,
+        errorCode: "TOOL_LOOP_UNKNOWN_TOOL",
       });
       ctx.onToolCall?.({
         name: call.name,
         durationMs,
         success: false,
-        errorCode: "TOOL_LOOP_APPROVAL_DENIED",
+        errorCode: "TOOL_LOOP_UNKNOWN_TOOL",
       });
       ctx.observability.emit({
         timestamp: Date.now(),
@@ -587,111 +596,244 @@ const executeSingleToolCall = async (
         phase: "tool-use",
         type: "warning",
         payload: {
-          reason: "approval-denied",
+          reason: "unknown-tool",
+          tool: call.name,
+          callId: call.id,
+        },
+      });
+      return {
+        call,
+        content: message,
+        success: false,
+        durationMs,
+        errorMessage: message,
+        errorCode: "TOOL_LOOP_UNKNOWN_TOOL",
+      };
+    }
+
+    const toolTask: TaskNode = {
+      id: `tool-use:${call.id}`,
+      type: "tool",
+      ref: call.name,
+      input: call.arguments,
+    };
+
+    const toolSignal = buildToolExecutionSignal(ctx.signal, TOOL_USE_TOOL_TIMEOUT_MS);
+    const toolCtx: ExecutionContext = {
+      ...ctx.executionContext,
+      abortSignal: toolSignal,
+    };
+
+    const globalApproval = ctx.config.runtime.toolLoop?.requireApprovalGlobal === true;
+    const descriptorApproval = descriptor.requiresApproval === true;
+    const autoApproved = isShellAutoApproved(call, ctx.config);
+    if (autoApproved) {
+      ctx.observability.emit({
+        timestamp: Date.now(),
+        traceId: ctx.traceId,
+        sessionId: ctx.sessionId,
+        phase: "tool-use",
+        type: "progress",
+        payload: {
+          stage: "approval-auto",
+          tool: call.name,
+          callId: call.id,
+          reason: "shell-auto-approve-pattern",
+        },
+      });
+    }
+    // 全局策略 (`requireApprovalGlobal`) 与描述符 `requiresApproval` 任一命中即需要审批；
+    // 但若本次调用已被 shell 自动审批白名单覆盖，则跳过 approval 回调（用户在
+    // `safety.shellAutoApprovePatterns` 里显式声明的命令视为预批准）。
+    const approvalNeeded = (descriptorApproval || globalApproval) && !autoApproved;
+    if (approvalNeeded && ctx.onBeforeToolCall) {
+      const triggeredBy: ToolApprovalRequest["triggeredBy"] = descriptorApproval
+        ? "descriptor"
+        : "global";
+      const approvalRequest: ToolApprovalRequest = {
+        tool: call.name,
+        callId: call.id,
+        arguments: call.arguments,
+        argumentsPreview: previewArguments(call.arguments),
+        sideEffect: descriptor.sideEffect,
+        requiresApproval: descriptorApproval,
+        triggeredBy,
+        traceId: ctx.traceId,
+        sessionId: ctx.sessionId,
+      };
+      ctx.observability.emit({
+        timestamp: Date.now(),
+        traceId: ctx.traceId,
+        sessionId: ctx.sessionId,
+        phase: "tool-use",
+        type: "progress",
+        payload: {
+          stage: "approval-pending",
+          tool: call.name,
+          callId: call.id,
+          triggeredBy,
+          sideEffect: descriptor.sideEffect,
+        },
+      });
+      let decision: ToolApprovalDecision;
+      try {
+        ctx.onUserBlockingStart?.();
+        decision = await ctx.onBeforeToolCall(approvalRequest);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        decision = { type: "deny", reason: `审批回调抛出异常：${message}` };
+      } finally {
+        ctx.onUserBlockingEnd?.();
+      }
+      if (decision.type === "deny") {
+        const reason = decision.reason?.trim().length
+          ? decision.reason.trim()
+          : "用户拒绝执行该工具。";
+        const durationMs = Date.now() - startedAt;
+        const content = `工具调用已被用户拒绝："${reason}"。请改用其它工具或直接回答用户，不要重复请求同一工具。`;
+        emitToolCallEnd({
+          success: false,
+          durationMs,
+          errorMessage: reason,
+          errorCode: "TOOL_LOOP_APPROVAL_DENIED",
+        });
+        ctx.onToolCall?.({
+          name: call.name,
+          durationMs,
+          success: false,
+          errorCode: "TOOL_LOOP_APPROVAL_DENIED",
+        });
+        ctx.observability.emit({
+          timestamp: Date.now(),
+          traceId: ctx.traceId,
+          sessionId: ctx.sessionId,
+          phase: "tool-use",
+          type: "warning",
+          payload: {
+            reason: "approval-denied",
+            tool: call.name,
+            callId: call.id,
+            triggeredBy,
+          },
+        });
+        return {
+          call,
+          content,
+          success: false,
+          durationMs,
+          errorMessage: reason,
+          errorCode: "TOOL_LOOP_APPROVAL_DENIED",
+        };
+      }
+      ctx.observability.emit({
+        timestamp: Date.now(),
+        traceId: ctx.traceId,
+        sessionId: ctx.sessionId,
+        phase: "tool-use",
+        type: "progress",
+        payload: {
+          stage: "approval-granted",
           tool: call.name,
           callId: call.id,
           triggeredBy,
         },
       });
-      return { call, content, success: false, durationMs, errorMessage: reason };
+      // 把"用户已明确授权本次调用"这个事实沿 TaskNode 往下带，宿主的
+      // TaskExecutor 可据此豁免工作区沙箱等静态策略（用户已通过 argumentsPreview
+      // 审阅过参数，包括任何路径字段）。
+      toolTask.metadata = { ...(toolTask.metadata ?? {}), approvalGranted: true };
     }
-    ctx.observability.emit({
-      timestamp: Date.now(),
-      traceId: ctx.traceId,
-      sessionId: ctx.sessionId,
-      phase: "tool-use",
-      type: "progress",
-      payload: {
-        stage: "approval-granted",
-        tool: call.name,
-        callId: call.id,
-        triggeredBy,
-      },
-    });
-    // 把"用户已明确授权本次调用"这个事实沿 TaskNode 往下带，宿主的
-    // TaskExecutor 可据此豁免工作区沙箱等静态策略（用户已通过 argumentsPreview
-    // 审阅过参数，包括任何路径字段）。
-    toolTask.metadata = { ...(toolTask.metadata ?? {}), approvalGranted: true };
-  }
 
-  ctx.observability.emit({
-    timestamp: startedAt,
-    traceId: ctx.traceId,
-    sessionId: ctx.sessionId,
-    phase: "tool-use",
-    type: "tool_call_start",
-    payload: {
-      tool: call.name,
-      callId: call.id,
-      argumentsPreview: previewArguments(call.arguments),
-    },
-  });
+    ctx.observability.emit({
+      timestamp: startedAt,
+      traceId: ctx.traceId,
+      sessionId: ctx.sessionId,
+      phase: "tool-use",
+      type: "tool_call_start",
+      payload: {
+        tool: call.name,
+        callId: call.id,
+        argumentsPreview: previewArguments(call.arguments),
+      },
+    });
 
-  try {
-    const output = await ctx.taskExecutor(toolTask, toolCtx, toolSignal);
-    const durationMs = Date.now() - startedAt;
-    const content = serializeToolOutput(output, call.name);
-    ctx.onToolLoopEvent?.({
-      type: "tool-call-end",
-      callId: call.id,
-      tool: call.name,
-      success: true,
-      durationMs,
-    });
-    ctx.onToolCall?.({
-      name: call.name,
-      durationMs,
-      success: true,
-    });
-    ctx.observability.emit({
-      timestamp: Date.now(),
-      traceId: ctx.traceId,
-      sessionId: ctx.sessionId,
-      phase: "tool-use",
-      type: "tool_call_end",
-      payload: {
-        tool: call.name,
-        callId: call.id,
+    try {
+      const output = await ctx.taskExecutor(toolTask, toolCtx, toolSignal);
+      const durationMs = Date.now() - startedAt;
+      const content = serializeToolOutput(output, call.name);
+      emitToolCallEnd({
+        success: true,
         durationMs,
-        outputLength: content.length,
-      },
-    });
-    return { call, content, success: true, durationMs };
-  } catch (error) {
-    const durationMs = Date.now() - startedAt;
-    const errorMessage =
-      error instanceof Error ? error.message : String(error);
-    const content = `工具执行失败："${errorMessage}"。你可以调整参数后重试一次，或放弃该工具直接给出回答。`;
-    ctx.onToolLoopEvent?.({
-      type: "tool-call-end",
-      callId: call.id,
-      tool: call.name,
-      success: false,
-      durationMs,
-      errorMessage,
-      errorCode: "TOOL_LOOP_TOOL_EXECUTION_FAILED",
-    });
-    ctx.onToolCall?.({
-      name: call.name,
-      durationMs,
-      success: false,
-      errorCode: "TOOL_LOOP_TOOL_EXECUTION_FAILED",
-    });
-    ctx.observability.emit({
-      timestamp: Date.now(),
-      traceId: ctx.traceId,
-      sessionId: ctx.sessionId,
-      phase: "tool-use",
-      type: "warning",
-      payload: {
-        reason: "tool-execution-failed",
-        tool: call.name,
-        callId: call.id,
+        output,
+      });
+      ctx.onToolCall?.({
+        name: call.name,
         durationMs,
-        message: errorMessage,
-      },
-    });
-    return { call, content, success: false, durationMs, errorMessage };
+        success: true,
+      });
+      ctx.observability.emit({
+        timestamp: Date.now(),
+        traceId: ctx.traceId,
+        sessionId: ctx.sessionId,
+        phase: "tool-use",
+        type: "tool_call_end",
+        payload: {
+          tool: call.name,
+          callId: call.id,
+          durationMs,
+          outputLength: content.length,
+        },
+      });
+      return { call, content, output, success: true, durationMs };
+    } catch (error) {
+      const durationMs = Date.now() - startedAt;
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+      const content = `工具执行失败："${errorMessage}"。你可以调整参数后重试一次，或放弃该工具直接给出回答。`;
+      emitToolCallEnd({
+        success: false,
+        durationMs,
+        errorMessage,
+        errorCode: "TOOL_LOOP_TOOL_EXECUTION_FAILED",
+      });
+      ctx.onToolCall?.({
+        name: call.name,
+        durationMs,
+        success: false,
+        errorCode: "TOOL_LOOP_TOOL_EXECUTION_FAILED",
+      });
+      ctx.observability.emit({
+        timestamp: Date.now(),
+        traceId: ctx.traceId,
+        sessionId: ctx.sessionId,
+        phase: "tool-use",
+        type: "warning",
+        payload: {
+          reason: "tool-execution-failed",
+          tool: call.name,
+          callId: call.id,
+          durationMs,
+          message: errorMessage,
+        },
+      });
+      return {
+        call,
+        content,
+        success: false,
+        durationMs,
+        errorMessage,
+        errorCode: "TOOL_LOOP_TOOL_EXECUTION_FAILED",
+      };
+    }
+  } finally {
+    if (toolCallStartDelivered && !toolCallEndDelivered) {
+      emitToolCallEnd({
+        success: false,
+        durationMs: Math.max(0, Date.now() - mark),
+        errorMessage: "工具调用在产出正常 tool-call-end 之前被异常中断。",
+        errorCode: "TOOL_LOOP_ABANDONED",
+      });
+    }
   }
 };
 
@@ -699,11 +841,16 @@ const executeSingleToolCall = async (
  * 按并发度 `parallelism` 执行一批工具调用。
  *
  * 保序：返回的 `ExecutedToolRecord[]` 与输入 `calls` 一一对应（即便内部分批并发）。
+ *
+ * 实现说明：工作线程在 `await executeSingleToolCall` 之前同步完成 `cursor` 抢占，
+ * 因此在 JS 单线程事件模型下索引不会重复；不要在抢占与 await 之间插入 await，
+ * 否则会破坏该不变量。
  */
 const executeToolCallsBatch = async (
   calls: ToolCallRequest[],
   ctx: ToolUseContext,
   parallelism: number,
+  parentStepId: string,
 ): Promise<ExecutedToolRecord[]> => {
   const results: ExecutedToolRecord[] = new Array(calls.length);
   let cursor = 0;
@@ -717,7 +864,7 @@ const executeToolCallsBatch = async (
           cursor += 1;
           const call = calls[myIndex];
           if (!call) continue;
-          results[myIndex] = await executeSingleToolCall(call, ctx);
+          results[myIndex] = await executeSingleToolCall(call, ctx, parentStepId);
         }
       })(),
     );
@@ -749,6 +896,178 @@ const normalizeFinishReason = (
 ): ChatFinishReason => {
   if (finishReason !== undefined) return finishReason;
   return hasToolCalls ? "tool_calls" : "stop";
+};
+
+interface ToolUseStepResponse {
+  content: string;
+  toolCalls?: ToolCallRequest[] | undefined;
+  finishReason?: ChatFinishReason | undefined;
+  usage: ChatUsage;
+  reasoningContent?: string | undefined;
+  providerMetadata?: Record<string, unknown> | undefined;
+}
+
+interface PartialStreamToolCall {
+  id?: string;
+  name?: string;
+  argumentsText: string;
+  providerMetadata?: Record<string, unknown> | undefined;
+}
+
+const EMPTY_USAGE: ChatUsage = {
+  promptTokens: 0,
+  completionTokens: 0,
+  totalTokens: 0,
+};
+
+const appendToolCallDelta = (
+  calls: Map<number, PartialStreamToolCall>,
+  part: Extract<ChatStreamChunk, { type: "tool-call-delta" }>,
+): void => {
+  const current = calls.get(part.index) ?? { argumentsText: "" };
+  if (part.id !== undefined) {
+    current.id = part.id;
+  }
+  if (part.name !== undefined) {
+    current.name = part.name;
+  }
+  if (part.argumentsDelta !== undefined) {
+    current.argumentsText += part.argumentsDelta;
+  }
+  if ("providerMetadata" in part && part.providerMetadata !== undefined) {
+    current.providerMetadata = part.providerMetadata;
+  }
+  calls.set(part.index, current);
+};
+
+const parseToolCallArguments = (
+  raw: string,
+  toolName: string,
+): Record<string, unknown> => {
+  const text = raw.trim();
+  if (text.length === 0) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // fall through to the explicit protocol error below
+  }
+  throw new Error(`Provider streamed invalid tool arguments for ${toolName}`);
+};
+
+const materializeDeltaToolCalls = (
+  partials: Map<number, PartialStreamToolCall>,
+  completedIds: Set<string>,
+): ToolCallRequest[] => {
+  const calls: ToolCallRequest[] = [];
+  const ordered = [...partials.entries()].sort(([a], [b]) => a - b);
+  for (const [, partial] of ordered) {
+    if (!partial.id || !partial.name || completedIds.has(partial.id)) {
+      continue;
+    }
+    calls.push({
+      id: partial.id,
+      name: partial.name,
+      arguments: parseToolCallArguments(partial.argumentsText, partial.name),
+      ...(partial.providerMetadata !== undefined
+        ? { providerMetadata: partial.providerMetadata }
+        : {}),
+    });
+  }
+  return calls;
+};
+
+const collectStreamedToolUseStep = async (args: {
+  adapter: ProviderAdapter;
+  model: string;
+  messages: Message[];
+  tools: ToolDefinition[];
+  ctx: ToolUseContext;
+  step: number;
+  stepId: string;
+  signal: AbortSignal;
+  markFirstOutput: () => void;
+  usageTracker?: LlmUsageTracker | undefined;
+}): Promise<ToolUseStepResponse> => {
+  const {
+    adapter,
+    model,
+    messages,
+    tools,
+    ctx,
+    step,
+    stepId,
+    signal,
+    markFirstOutput,
+    usageTracker,
+  } = args;
+  const toolCalls: ToolCallRequest[] = [];
+  const completedToolCallIds = new Set<string>();
+  const partialToolCalls = new Map<number, PartialStreamToolCall>();
+  let content = "";
+  let finishReason: ChatFinishReason | undefined;
+  let usage: ChatUsage = EMPTY_USAGE;
+  let providerMetadata: Record<string, unknown> | undefined;
+
+  for await (const part of adapter.chatStream(
+    {
+      model,
+      messages,
+      ...(tools.length > 0 ? { tools } : {}),
+    },
+    ctx.adapterContext,
+    signal,
+  )) {
+    if (part.type === "text-delta") {
+      if (part.delta.length > 0) {
+        markFirstOutput();
+      }
+      content += part.delta;
+      usageTracker?.addOutputDelta(part.delta);
+      ctx.onToolLoopEvent?.({
+        type: "tool-loop-delta",
+        step,
+        stepId,
+        content: part.delta,
+      });
+    } else if (part.type === "reasoning-delta") {
+      if (part.delta.length > 0) {
+        markFirstOutput();
+        usageTracker?.addOutputDelta(part.delta);
+        ctx.onAssistantReasoningDelta?.(part.delta);
+      }
+    } else if (part.type === "tool-call-delta") {
+      markFirstOutput();
+      if (part.argumentsDelta !== undefined && part.argumentsDelta.length > 0) {
+        usageTracker?.addOutputDelta(part.argumentsDelta);
+      }
+      appendToolCallDelta(partialToolCalls, part);
+    } else if (part.type === "tool-call-complete") {
+      markFirstOutput();
+      toolCalls.push(part.call);
+      completedToolCallIds.add(part.call.id);
+    } else if (part.type === "finish") {
+      finishReason = part.finishReason;
+      if (part.usage !== undefined) {
+        usage = part.usage;
+      }
+      providerMetadata = part.providerMetadata;
+    }
+  }
+
+  toolCalls.push(...materializeDeltaToolCalls(partialToolCalls, completedToolCallIds));
+
+  return {
+    content,
+    ...(toolCalls.length > 0 ? { toolCalls } : {}),
+    ...(finishReason !== undefined ? { finishReason } : {}),
+    usage,
+    ...(providerMetadata !== undefined ? { providerMetadata } : {}),
+  };
 };
 
 /**
@@ -802,7 +1121,7 @@ const resolveToolDefinitions = (input: ToolUseInput, ctx: ToolUseContext): ToolD
 export const executeToolUse = async (
   input: ToolUseInput,
   ctx: ToolUseContext,
-): Promise<string> => {
+): Promise<ToolUseResult> => {
   if (!input || typeof input.prompt !== "string" || input.prompt.length === 0) {
     throw new Error("tool-use 缺少必填字段 input.prompt");
   }
@@ -835,147 +1154,332 @@ export const executeToolUse = async (
     },
   });
 
-  let finalContent: string | null = null;
+  const steps: ToolUseResultStep[] = [];
+  const observations: ToolUseObservation[] = [];
 
   ctx.onToolLoopActiveStart?.();
   try {
     for (let step = 1; step <= maxSteps; step += 1) {
-    if (ctx.signal.aborted) {
-      throw new Error("tool-use 循环被外部取消");
-    }
-    ctx.onToolLoopEvent?.({ type: "tool-loop-step", step, maxSteps });
-    ctx.observability.emit({
-      timestamp: Date.now(),
-      traceId: ctx.traceId,
-      sessionId: ctx.sessionId,
-      phase: "tool-use",
-      type: "progress",
-      payload: { step, maxSteps },
-    });
-
-    const llmTimeouts = resolveLlmTimeouts(ctx.config, "tool-use");
-    const llmSignal = buildLlmCallAbortSignal(
-      ctx.signal,
-      llmTimeouts.llmStreamingMs,
-      "streaming",
-    );
-    const llmStartedAt = Date.now();
-    let response: Awaited<ReturnType<typeof adapter.chat>>;
-    try {
-      response = await adapter.chat(
-        {
-          model: route.model,
-          messages: conversation,
-          ...(tools.length > 0 ? { tools } : {}),
-        },
-        ctx.adapterContext,
-        llmSignal,
-      );
-    } catch (error) {
-      const timeoutAbort = isBudgetTimeoutAbort(llmSignal);
-      if (timeoutAbort) {
-        throw timeoutAbort;
+      if (ctx.signal.aborted) {
+        throw new Error("tool-use 循环被外部取消");
       }
-      // Provider 抛错（典型：402 付费问题、401 key 失效、429 限流、超时等）
-      // 必须先把原因 emit 到 observability，再把错误向上抛。否则 tool-use phase
-      // 的 exit 事件不会落地，用户只能看到 output 阶段的通用 fallback 文案，
-      // 很难从 `.tachu/events.jsonl` 或终端里定位到真正的根因。
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      const errorName = error instanceof Error ? error.name : "UnknownError";
+      const stepId = ctx.nextStreamId?.() ?? `${ctx.traceId}:tool-use-step:${step}`;
+      ctx.onToolLoopEvent?.({
+        type: "tool-loop-step",
+        step,
+        maxSteps,
+        stepId,
+        ...(ctx.currentPhaseStepId !== undefined
+          ? { parentStepId: ctx.currentPhaseStepId }
+          : {}),
+      });
       ctx.observability.emit({
         timestamp: Date.now(),
         traceId: ctx.traceId,
         sessionId: ctx.sessionId,
         phase: "tool-use",
-        type: "warning",
-        payload: {
-          provider: adapter.id,
-          model: route.model,
-          step,
-          durationMs: Date.now() - llmStartedAt,
-          errorName,
-          message: errorMessage,
-          reason: "tool-use LLM call failed; aborting loop",
+        type: "progress",
+        payload: { step, maxSteps },
+      });
+
+      const llmTimeouts = resolveLlmTimeouts(ctx.config, "tool-use");
+      const llmStartedAt = Date.now();
+      const useStream =
+        ctx.config.runtime.streamingOutput === true &&
+        ctx.onToolLoopEvent !== undefined;
+      let response: ToolUseStepResponse;
+      let llmSignal: AbortSignal | undefined;
+      const usageTracker = createLlmUsageTracker({
+        attribution: {
+          id: ctx.nextStreamId?.() ?? `${ctx.traceId}:tool-use-llm:${step}`,
+          kind: "llm_call",
+          parentId: stepId,
+          label: `tool-use step ${step}`,
+          meta: {
+            phase: "execution",
+            subflow: "tool-use",
+            step,
+            provider: adapter.id,
+            model: route.model,
+          },
         },
+        estimatedInputTokens: await estimateMessagesTokens(
+          adapter,
+          conversation,
+          route.model,
+        ),
+        emit: ctx.emitUsageTelemetry,
       });
-      ctx.onToolLoopEvent?.({
-        type: "tool-loop-final",
-        steps: step,
-        success: false,
-      });
-      throw error;
-    }
-    ctx.onProviderUsage?.(response.usage);
-
-    const toolCalls = response.toolCalls ?? [];
-    const finishReason = normalizeFinishReason(
-      response.finishReason,
-      toolCalls.length > 0,
-    );
-    const content = typeof response.content === "string" ? response.content.trim() : "";
-
-    // 把 assistant 回复追加进对话（包括可能的 toolCalls，供后续 tool role 消息绑定）。
-    conversation.push({
-      role: "assistant",
-      content: content.length > 0 ? content : "",
-      ...(toolCalls.length > 0 ? { toolCalls } : {}),
-    });
-
-    if (finishReason !== "tool_calls" || toolCalls.length === 0) {
-      // 没有工具调用 → 视为最终回复。
-      if (content.length > 0) {
-        finalContent = content;
+      usageTracker.start();
+      try {
+        if (useStream) {
+          const streamAbort = createLlmStreamAbortController(ctx.signal, llmTimeouts);
+          llmSignal = streamAbort.signal;
+          try {
+            response = await collectStreamedToolUseStep({
+              adapter,
+              model: route.model,
+              messages: conversation,
+              tools,
+              ctx,
+              step,
+              stepId,
+              signal: streamAbort.signal,
+              markFirstOutput: streamAbort.markFirstOutput,
+              usageTracker,
+            });
+          } finally {
+            streamAbort.dispose();
+          }
+        } else {
+          llmSignal = buildLlmCallAbortSignal(
+            ctx.signal,
+            llmTimeouts.llmStreamingMs,
+            "streaming",
+          );
+          response = await adapter.chat(
+            {
+              model: route.model,
+              messages: conversation,
+              ...(tools.length > 0 ? { tools } : {}),
+            },
+            ctx.adapterContext,
+            llmSignal,
+          );
+          if (typeof response.content === "string" && response.content.length > 0) {
+            usageTracker.addOutputDelta(response.content);
+            ctx.onToolLoopEvent?.({
+              type: "tool-loop-delta",
+              step,
+              stepId,
+              content: response.content,
+            });
+          }
+          if (
+            typeof response.reasoningContent === "string" &&
+            response.reasoningContent.length > 0
+          ) {
+            usageTracker.addOutputDelta(response.reasoningContent);
+          }
+        }
+      } catch (error) {
+        usageTracker.terminal(ctx.signal.aborted ? "cancelled" : "failed");
+        const timeoutAbort = llmSignal ? isBudgetTimeoutAbort(llmSignal) : null;
+        const effectiveError = timeoutAbort ?? error;
+        const resultError = errorToToolUseResultError(
+          effectiveError,
+          "TOOL_LOOP_PROVIDER_CALL_FAILED",
+        );
+        const errorMessage =
+          effectiveError instanceof Error ? effectiveError.message : String(effectiveError);
+        const errorName =
+          effectiveError instanceof Error ? effectiveError.name : "UnknownError";
         ctx.observability.emit({
           timestamp: Date.now(),
           traceId: ctx.traceId,
           sessionId: ctx.sessionId,
           phase: "tool-use",
-          type: "llm_call_end",
+          type: "warning",
           payload: {
+            provider: adapter.id,
+            model: route.model,
             step,
-            terminal: true,
-            finishReason,
-            usage: response.usage,
+            durationMs: Date.now() - llmStartedAt,
+            errorName,
+            message: errorMessage,
+            reason: "tool-use LLM call failed; aborting loop",
           },
+        });
+        ctx.onToolLoopEvent?.({
+          type: "tool-loop-step-end",
+          step,
+          stepId,
+          ...(ctx.currentPhaseStepId !== undefined
+            ? { parentStepId: ctx.currentPhaseStepId }
+            : {}),
+          success: false,
+          reason: "provider-error",
+          errorCode: resultError.code,
         });
         ctx.onToolLoopEvent?.({
           type: "tool-loop-final",
           steps: step,
-          success: true,
+          stepId,
+          success: false,
         });
-        break;
+        if (observations.length > 0) {
+          return {
+            kind: "tool-use-result",
+            status: "partial",
+            steps,
+            observations,
+            error: resultError,
+          };
+        }
+        throw effectiveError;
       }
-      // content 为空：
-      //   - 第一轮就空 → providerNoResponse（通常是接入问题）
-      //   - 非首轮空 → emptyTerminalResponse（可重试）
-      ctx.onToolLoopEvent?.({ type: "tool-loop-final", steps: step, success: false });
-      if (step === 1) {
-        throw ToolLoopError.providerNoResponse();
+      if (response.usage.totalTokens > 0) {
+        usageTracker.final(response.usage);
       }
-      throw ToolLoopError.emptyTerminalResponse();
-    }
+      ctx.onProviderUsage?.(response.usage);
 
-    // 执行本轮 toolCalls，然后把 tool message 拼回对话继续下一轮。
-    const batch = await executeToolCallsBatch(toolCalls, ctx, parallelism);
-    for (const item of batch) {
+      // 非流式模型 reasoning_content（若有）一次性透传到顶层 SSE 通道；流式路径
+      // 已在 collectStreamedToolUseStep 中按 reasoning-delta 增量透传。
+      if (
+        typeof response.reasoningContent === "string" &&
+        response.reasoningContent.length > 0
+      ) {
+        ctx.onAssistantReasoningDelta?.(response.reasoningContent);
+      }
+
+      const toolCalls = response.toolCalls ?? [];
+      const finishReason = normalizeFinishReason(
+        response.finishReason,
+        toolCalls.length > 0,
+      );
+      const content = typeof response.content === "string" ? response.content.trim() : "";
+
+      // 把 assistant 回复追加进对话（包括可能的 toolCalls，供后续 tool role 消息绑定）。
       conversation.push({
-        role: "tool",
-        content: item.content,
-        toolCallId: item.call.id,
-        name: item.call.name,
+        role: "assistant",
+        content: content.length > 0 ? content : "",
+        ...(toolCalls.length > 0 ? { toolCalls } : {}),
+        ...(response.providerMetadata !== undefined
+          ? { providerMetadata: response.providerMetadata }
+          : {}),
       });
-    }
-  }
 
-    if (finalContent === null) {
-      ctx.onToolLoopEvent?.({
-        type: "tool-loop-final",
-        steps: maxSteps,
-        success: false,
+      if (finishReason !== "tool_calls" || toolCalls.length === 0) {
+        const terminalStep: ToolUseResultStep = {
+          step,
+          modelNotes: content,
+          toolCalls: [],
+        };
+        steps.push(terminalStep);
+        if (content.length > 0) {
+          ctx.observability.emit({
+            timestamp: Date.now(),
+            traceId: ctx.traceId,
+            sessionId: ctx.sessionId,
+            phase: "tool-use",
+            type: "llm_call_end",
+            payload: {
+              step,
+              terminal: true,
+              finishReason,
+              usage: response.usage,
+            },
+          });
+          ctx.onToolLoopEvent?.({
+            type: "tool-loop-step-end",
+            step,
+            stepId,
+            ...(ctx.currentPhaseStepId !== undefined
+              ? { parentStepId: ctx.currentPhaseStepId }
+              : {}),
+            success: true,
+            reason: "terminal",
+          });
+          ctx.onToolLoopEvent?.({
+            type: "tool-loop-final",
+            steps: step,
+            stepId,
+            success: true,
+          });
+          return {
+            kind: "tool-use-result",
+            status: "ready_for_output",
+            steps,
+            observations,
+            terminalDraft: content,
+          };
+        }
+        const error =
+          step === 1
+            ? ToolLoopError.providerNoResponse()
+            : ToolLoopError.emptyTerminalResponse();
+        const resultError = errorToToolUseResultError(
+          error,
+          "TOOL_LOOP_EMPTY_TERMINAL_RESPONSE",
+        );
+        ctx.onToolLoopEvent?.({
+          type: "tool-loop-step-end",
+          step,
+          stepId,
+          ...(ctx.currentPhaseStepId !== undefined
+            ? { parentStepId: ctx.currentPhaseStepId }
+            : {}),
+          success: false,
+          reason: "empty-terminal",
+          errorCode: resultError.code,
+        });
+        ctx.onToolLoopEvent?.({
+          type: "tool-loop-final",
+          steps: step,
+          stepId,
+          success: false,
+        });
+        if (observations.length > 0) {
+          return {
+            kind: "tool-use-result",
+            status: "partial",
+            steps,
+            observations,
+            error: resultError,
+          };
+        }
+        throw error;
+      }
+
+      // 执行本轮 toolCalls，然后把 tool message 拼回对话继续下一轮。
+      const batch = await executeToolCallsBatch(toolCalls, ctx, parallelism, stepId);
+      const stepToolCalls = batch.map(toResultToolCall);
+      steps.push({
+        step,
+        modelNotes: content,
+        toolCalls: stepToolCalls,
       });
-      throw ToolLoopError.stepsExhausted(maxSteps);
+      for (const item of batch) {
+        observations.push(toObservation(item));
+        conversation.push({
+          role: "tool",
+          content: item.content,
+          toolCallId: item.call.id,
+          name: item.call.name,
+        });
+      }
+      ctx.onToolLoopEvent?.({
+        type: "tool-loop-step-end",
+        step,
+        stepId,
+        ...(ctx.currentPhaseStepId !== undefined
+          ? { parentStepId: ctx.currentPhaseStepId }
+          : {}),
+        success: true,
+        reason: "tool-calls-completed",
+      });
     }
-    return finalContent;
+
+    const exhausted = ToolLoopError.stepsExhausted(maxSteps);
+    const resultError = errorToToolUseResultError(
+      exhausted,
+      "TOOL_LOOP_STEPS_EXHAUSTED",
+    );
+    ctx.onToolLoopEvent?.({
+      type: "tool-loop-final",
+      steps: maxSteps,
+      success: false,
+    });
+    if (observations.length > 0) {
+      return {
+        kind: "tool-use-result",
+        status: "exhausted",
+        steps,
+        observations,
+        error: resultError,
+      };
+    }
+    throw exhausted;
   } finally {
     ctx.onToolLoopActiveEnd?.();
     ctx.onUserBlockingEnd?.();

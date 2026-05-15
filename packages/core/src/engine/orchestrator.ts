@@ -28,6 +28,13 @@ export class ExecutionOrchestrator {
   private toolLoopActiveStartedAt: number | null = null;
   private toolLoopBlockedStartedAt: number | null = null;
   private toolLoopBlockedAccumulatedMs = 0;
+  /**
+   * 并发工具审批（`toolLoop.parallelism`>1 且多条 tool 同时命中审批）时，
+   * `beginUserBlocking` / `endUserBlocking` 会交错调用。单时间戳无法表达「仍有一条
+   * 审批在飞行」，会导致第二个 begin 被忽略、用户等待时间误计入 active tool-loop，
+   * 进而误触发 `maxToolLoopActiveMs`。用深度计数表示重叠的用户阻塞区间。
+   */
+  private userBlockingDepth = 0;
 
   constructor(
     private readonly config: EngineConfig,
@@ -167,6 +174,7 @@ export class ExecutionOrchestrator {
     this.toolLoopActiveStartedAt = Date.now();
     this.toolLoopBlockedAccumulatedMs = 0;
     this.toolLoopBlockedStartedAt = null;
+    this.userBlockingDepth = 0;
   }
 
   endToolLoopActiveTimer(): void {
@@ -182,22 +190,29 @@ export class ExecutionOrchestrator {
       now - this.toolLoopActiveStartedAt - this.toolLoopBlockedAccumulatedMs;
     this.toolLoopActiveStartedAt = null;
     this.toolLoopBlockedAccumulatedMs = 0;
+    this.userBlockingDepth = 0;
     this.assertBudget();
   }
 
   beginUserBlocking(): void {
-    if (this.toolLoopActiveStartedAt === null || this.toolLoopBlockedStartedAt !== null) {
+    if (this.toolLoopActiveStartedAt === null) {
       return;
     }
-    this.toolLoopBlockedStartedAt = Date.now();
+    this.userBlockingDepth += 1;
+    if (this.userBlockingDepth === 1) {
+      this.toolLoopBlockedStartedAt = Date.now();
+    }
   }
 
   endUserBlocking(): void {
-    if (this.toolLoopBlockedStartedAt === null) {
+    if (this.userBlockingDepth <= 0) {
       return;
     }
-    this.toolLoopBlockedAccumulatedMs += Date.now() - this.toolLoopBlockedStartedAt;
-    this.toolLoopBlockedStartedAt = null;
+    this.userBlockingDepth -= 1;
+    if (this.userBlockingDepth === 0 && this.toolLoopBlockedStartedAt !== null) {
+      this.toolLoopBlockedAccumulatedMs += Date.now() - this.toolLoopBlockedStartedAt;
+      this.toolLoopBlockedStartedAt = null;
+    }
   }
 
   private assertBudget(): void {

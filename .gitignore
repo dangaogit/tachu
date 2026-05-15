@@ -49,6 +49,7 @@ npm-debug.log*
 
 # ───────── Draft / local docs ─────────
 docs-draft-*
+docs/superpowers/
 
 # Tachu
 .tachu/sessions/

@@ -30,11 +30,14 @@ import { DescriptorRegistry } from "../registry";
 import type { Registry } from "../registry";
 import type {
   EngineConfig,
+  EnginePhase,
   EngineOutput,
   ExecutionContext,
   GeneratedImage,
+  GeneratedMedia,
   InputEnvelope,
   OutputMetadata,
+  SessionScope,
   StreamChunk,
   ToolCallRecord,
 } from "../types";
@@ -71,6 +74,11 @@ import {
   DELTA_STREAM_END,
   DeltaStreamQueue,
 } from "./delta-stream-queue";
+import type {
+  EmitLlmUsageTelemetry,
+  LlmUsageTelemetryEvent,
+} from "./llm-usage-telemetry";
+import { applyModelOverride } from "./model-router-override";
 
 function enqueueUsageChunk(
   deltaQueue: DeltaStreamQueue | undefined,
@@ -86,6 +94,45 @@ function enqueueUsageChunk(
     toolCalls: u.toolCalls,
     wallTimeMs: u.wallTimeMs,
   });
+}
+
+/**
+ * 扫描 `tool-use` 写入的 outbox，为仅有 `tool-call-start`、缺少对偶 `tool-call-end`
+ * 的 callId 追加一条失败闭合块。
+ *
+ * 典型触发：宿主 `onToolLoopEvent` 抛错、或执行在子流程中途失败导致主干
+ * `catch` 提前结束而未走正常 flush。不得在未闭合时离开 execution 或 done。
+ */
+function sealOpenToolCallStreamChunks(outbox: StreamChunk[]): void {
+  const pending = new Map<string, string>();
+  for (const chunk of outbox) {
+    if (chunk.type === "tool-call-start") {
+      pending.set(chunk.callId, chunk.tool);
+    } else if (chunk.type === "tool-call-end") {
+      pending.delete(chunk.callId);
+    }
+  }
+  for (const [callId, tool] of pending) {
+    outbox.push({
+      type: "tool-call-end",
+      callId,
+      tool,
+      success: false,
+      durationMs: 0,
+      errorMessage:
+        "引擎在离开 execution 阶段前检测到该 callId 缺少对偶的 tool-call-end，已补发闭合事件。",
+      errorCode: "TOOL_LOOP_UNCLOSED_STREAM_CHUNK",
+    });
+  }
+}
+
+function collectToolLoopChunksForTerminalFlush(
+  outbox: StreamChunk[],
+  alreadyStreamedLive: boolean,
+): StreamChunk[] {
+  const lengthBeforeSeal = outbox.length;
+  sealOpenToolCallStreamChunks(outbox);
+  return alreadyStreamedLive ? outbox.slice(lengthBeforeSeal) : outbox;
 }
 
 class InternalEngineError extends EngineError {}
@@ -198,6 +245,13 @@ export class Engine {
     }) => void
   >();
 
+  private readonly activeRunUsageTelemetrySinks = new Map<
+    string,
+    EmitLlmUsageTelemetry
+  >();
+  private readonly activeRunIdFactories = new Map<string, () => string>();
+  private readonly activeRunCurrentPhaseStepIds = new Map<string, string>();
+
   /**
    * 活跃 runStream 的 ExecutionContext（ADR-0002）。
    *
@@ -210,13 +264,11 @@ export class Engine {
    * 活跃 runStream 的 Agentic Loop 事件 outbox（ADR-0002）。
    *
    * `tool-use` 在执行过程中通过 `onToolLoopEvent` 把 loop-step / tool-call-*
-   * 事件 push 进本 outbox；`runStream` 的 execution phase 结束后一次性 flush，
-   * 按时间顺序 yield 给调用方。
+   * 事件 push 进本 outbox；streaming 模式下同时写入 DeltaStreamQueue 实时
+   * yield 给调用方，非 streaming 模式仍在 execution phase 结束后一次性 flush。
    *
-   * 本实现选择"批量 flush 而不是实时 yield"是因为 execution phase 是
-   * `await runExecutionPhase` 的同步等待，async generator 不能在 await 中
-   * 穿插 yield。批量 flush 足以覆盖现阶段 CLI / SDK 的需求；实时 live stream
-   * 的优化留到后续阶段（将 TaskScheduler 改造为 async generator 后再开放）。
+   * 即使事件已经实时发送，也保留 outbox 用于对账和异常路径补发未闭合的
+   * tool-call-end。
    */
   private readonly activeRunEventOutbox = new Map<string, StreamChunk[]>();
 
@@ -243,6 +295,7 @@ export class Engine {
    * `EngineOutput.metadata.generatedImages`。
    */
   private readonly activeRunGeneratedImages = new Map<string, GeneratedImage[]>();
+  private readonly activeRunGeneratedMedia = new Map<string, GeneratedMedia[]>();
   /**
    * 活跃 runStream 的 tool-loop 计时控制回调（排除用户阻塞时间）。
    */
@@ -255,6 +308,20 @@ export class Engine {
       onUserBlockingEnd: () => void;
     }
   >();
+
+  /**
+   * 活跃 runStream 的 effective ModelRouter（按 `traceId` 索引）。
+   *
+   * 由 `runStream` 在构造 phaseEnv 时写入、`finally` 清理。值是
+   * `applyModelOverride(baseRouter, scope?.modelOverride)` 的结果：
+   *  - 当 scope 未提供 modelOverride 时与 `this.modelRouter` 同实例（零开销）
+   *  - 当提供时是一个新的 ModelRouter 包装层
+   *
+   * 内置 Sub-flow（typical: direct-answer）通过 `buildLayeredTaskExecutor` 间接
+   * 接收 ModelRouter，需要按 traceId 查到本轮 effective router 才能让 modelOverride
+   * 真正影响子流程的 provider 调用。
+   */
+  private readonly activeRunModelRouters = new Map<string, ModelRouter>();
 
   /**
    * `tool-use` 工具审批回调（ADR-0002 Stage 4）。
@@ -524,12 +591,21 @@ export class Engine {
       if (task.type === "sub-flow" && internalSubflows.has(task.ref)) {
         const prebuiltPrompt = this.activeRunPrompts.get(context.traceId);
         const onProviderUsage = this.activeRunUsageSinks.get(context.traceId);
+        const emitUsageTelemetry =
+          this.activeRunUsageTelemetrySinks.get(context.traceId);
+        const currentPhaseStepId =
+          this.activeRunCurrentPhaseStepIds.get(context.traceId);
+        const nextStreamId = this.activeRunIdFactories.get(context.traceId);
         const executionContext = this.activeRunExecutionContexts.get(context.traceId);
         const eventOutbox = this.activeRunEventOutbox.get(context.traceId);
         const toolCallSink = this.activeRunToolCallSinks.get(context.traceId);
+        const deltaQueue = this.activeRunDeltaOutbox.get(context.traceId);
         const onToolLoopEvent = eventOutbox
           ? (chunk: StreamChunk): void => {
               eventOutbox.push(chunk);
+              if (deltaQueue !== undefined && this.config.runtime.streamingOutput) {
+                deltaQueue.enqueue(chunk);
+              }
             }
           : undefined;
         const onToolCall = toolCallSink
@@ -537,14 +613,23 @@ export class Engine {
               toolCallSink.push(record);
             }
           : undefined;
-        const deltaQueue = this.activeRunDeltaOutbox.get(context.traceId);
         const onAssistantDelta =
           deltaQueue !== undefined && this.config.runtime.streamingOutput
             ? (text: string): void => {
                 deltaQueue.enqueue({ type: "delta", content: text });
               }
             : undefined;
+        // reasoning 透传通道：与 onAssistantDelta 共用 DeltaStreamQueue，但
+        // enqueue 的是 `reasoning-delta` 顶层 chunk；与正文 delta 解耦，不进
+        // EngineOutput.content、不参与 MemorySystem.append。
+        const onAssistantReasoningDelta =
+          deltaQueue !== undefined && this.config.runtime.streamingOutput
+            ? (text: string): void => {
+                deltaQueue.enqueue({ type: "reasoning-delta", content: text });
+              }
+            : undefined;
         const generatedImagesSink = this.activeRunGeneratedImages.get(context.traceId);
+        const generatedMediaSink = this.activeRunGeneratedMedia.get(context.traceId);
         const toolLoopTiming = this.activeRunToolLoopTimingControls.get(context.traceId);
         const onGeneratedImages = generatedImagesSink
           ? (images: GeneratedImage[]): void => {
@@ -553,10 +638,19 @@ export class Engine {
               }
             }
           : undefined;
+        const onGeneratedMedia = generatedMediaSink
+          ? (media: GeneratedMedia[]): void => {
+              for (const item of media) {
+                generatedMediaSink.push(item);
+              }
+            }
+          : undefined;
         return internalSubflows.execute(task.ref, task.input, {
           config: this.config,
           providers: this.providers,
-          modelRouter: this.modelRouter,
+          // 优先使用本轮 effective router（含 SessionScope.modelOverride）；map 未命中时回退基础 router。
+          modelRouter:
+            this.activeRunModelRouters.get(context.traceId) ?? this.modelRouter,
           memorySystem: this.memorySystem,
           observability: this.observability,
           signal,
@@ -565,13 +659,20 @@ export class Engine {
           adapterContext: adapterCallContextFromExecution(context),
           ...(prebuiltPrompt !== undefined ? { prebuiltPrompt } : {}),
           ...(onProviderUsage !== undefined ? { onProviderUsage } : {}),
+          ...(emitUsageTelemetry !== undefined ? { emitUsageTelemetry } : {}),
+          ...(currentPhaseStepId !== undefined ? { currentPhaseStepId } : {}),
+          ...(nextStreamId !== undefined ? { nextStreamId } : {}),
           registry: this.registry,
           taskExecutor: fallback,
           ...(executionContext !== undefined ? { executionContext } : {}),
           ...(onToolLoopEvent !== undefined ? { onToolLoopEvent } : {}),
           ...(onToolCall !== undefined ? { onToolCall } : {}),
           ...(onAssistantDelta !== undefined ? { onAssistantDelta } : {}),
+          ...(onAssistantReasoningDelta !== undefined
+            ? { onAssistantReasoningDelta }
+            : {}),
           ...(onGeneratedImages !== undefined ? { onGeneratedImages } : {}),
+          ...(onGeneratedMedia !== undefined ? { onGeneratedMedia } : {}),
           ...(toolLoopTiming !== undefined ? toolLoopTiming : {}),
           ...(this.onBeforeToolCall !== undefined
             ? { onBeforeToolCall: this.onBeforeToolCall }
@@ -590,9 +691,13 @@ export class Engine {
    * @returns 引擎最终输出
    * @throws EngineError 当执行阶段出现规范化错误时抛出
    */
-  async run(input: InputEnvelope, context: ExecutionContext): Promise<EngineOutput> {
+  async run(
+    input: InputEnvelope,
+    context: ExecutionContext,
+    scope?: SessionScope,
+  ): Promise<EngineOutput> {
     let output: EngineOutput | undefined;
-    for await (const chunk of this.runStream(input, context)) {
+    for await (const chunk of this.runStream(input, context, scope)) {
       if (chunk.type === "done") {
         output = chunk.output;
       }
@@ -617,6 +722,7 @@ export class Engine {
   async *runStream(
     input: InputEnvelope,
     context: ExecutionContext,
+    scope?: SessionScope,
   ): AsyncIterable<StreamChunk> {
     this.ensureAvailable();
     const normalizedContext: ExecutionContext = {
@@ -643,6 +749,52 @@ export class Engine {
       { traceId: normalizedContext.traceId, sessionId: normalizedContext.sessionId },
       this.observability,
     );
+    const nextStreamId =
+      scope?.idFactory ??
+      (() => {
+        let sequence = 0;
+        return (): string => `${normalizedContext.traceId}:stream:${++sequence}`;
+      })();
+    const phaseStepIds = new Map<EnginePhase, string>();
+    const usageSnapshots = new Map<string, LlmUsageTelemetryEvent>();
+    const pendingUsageTelemetry: StreamChunk[] = [];
+    const emitUsageTelemetry: EmitLlmUsageTelemetry = (event) => {
+      usageSnapshots.set(event.attribution.id, event);
+      const cumulative = [...usageSnapshots.values()].reduce(
+        (acc, item) => ({
+          input: acc.input + item.usage.input,
+          output: acc.output + item.usage.output,
+          total: acc.total + item.usage.total,
+        }),
+        { input: 0, output: 0, total: 0 },
+      );
+      const usage = orchestrator.getUsage();
+      const chunk: StreamChunk = {
+        type: "usage",
+        tokens: cumulative.total,
+        toolCalls: usage.toolCalls,
+        wallTimeMs: usage.wallTimeMs,
+        usage: event.usage,
+        cumulative,
+        attribution: event.attribution,
+        accuracy: event.accuracy,
+        ...(event.terminal !== undefined ? { terminal: event.terminal } : {}),
+      };
+      const deltaQueue = this.activeRunDeltaOutbox.get(normalizedContext.traceId);
+      if (deltaQueue !== undefined) {
+        deltaQueue.enqueue(chunk);
+      } else {
+        pendingUsageTelemetry.push(chunk);
+      }
+    };
+    const flushPendingUsageTelemetry = function* (): Iterable<StreamChunk> {
+      while (pendingUsageTelemetry.length > 0) {
+        const chunk = pendingUsageTelemetry.shift();
+        if (chunk !== undefined) {
+          yield chunk;
+        }
+      }
+    };
 
     // D1-LOW-04：把各阶段 Provider.chat 返回的真实 usage 汇回 orchestrator，
     // 保证预算熔断、可观测事件均基于真值而非 Prompt 估算值。
@@ -659,12 +811,13 @@ export class Engine {
         usage.completionTokens,
         usage.cachedPromptTokens ?? 0,
       );
-      enqueueUsageChunk(
-        this.activeRunDeltaOutbox.get(normalizedContext.traceId),
-        orchestrator,
-      );
     };
     this.activeRunUsageSinks.set(normalizedContext.traceId, usageSink);
+    this.activeRunUsageTelemetrySinks.set(
+      normalizedContext.traceId,
+      emitUsageTelemetry,
+    );
+    this.activeRunIdFactories.set(normalizedContext.traceId, nextStreamId);
     this.activeRunExecutionContexts.set(normalizedContext.traceId, normalizedContext);
     // ADR-0002：为本轮 `tool-use` 子流程预留事件 / 工具调用 outbox；
     // execution 阶段结束后主干 flush 到 yield 流与 metadata。
@@ -673,7 +826,9 @@ export class Engine {
     this.activeRunEventOutbox.set(normalizedContext.traceId, toolLoopEventOutbox);
     this.activeRunToolCallSinks.set(normalizedContext.traceId, toolLoopToolCalls);
     const generatedImagesBucket: GeneratedImage[] = [];
+    const generatedMediaBucket: GeneratedMedia[] = [];
     this.activeRunGeneratedImages.set(normalizedContext.traceId, generatedImagesBucket);
+    this.activeRunGeneratedMedia.set(normalizedContext.traceId, generatedMediaBucket);
     this.activeRunToolLoopTimingControls.set(normalizedContext.traceId, {
       onToolLoopActiveStart: () => orchestrator.beginToolLoopActiveTimer(),
       onToolLoopActiveEnd: () => orchestrator.endToolLoopActiveTimer(),
@@ -682,13 +837,16 @@ export class Engine {
     });
 
     const adapterContext = adapterCallContextFromExecution(normalizedContext);
+    // SessionScope.modelOverride 在本轮内覆盖 capabilityMapping；未提供时直接返回原 router。
+    const effectiveRouter = applyModelOverride(this.modelRouter, scope?.modelOverride);
+    this.activeRunModelRouters.set(normalizedContext.traceId, effectiveRouter);
     const phaseEnv: PhaseEnvironment = {
       config: this.config,
       registry: this.registry as DescriptorRegistry,
       sessionManager: this.sessionManager,
       memorySystem: this.memorySystem,
       runtimeState: this.runtimeState,
-      modelRouter: this.modelRouter,
+      modelRouter: effectiveRouter,
       providers: this.providers,
       safetyModule: this.safetyModule,
       observability: this.observability,
@@ -697,31 +855,51 @@ export class Engine {
       activeAbortSignal: activeSignal,
       adapterContext,
       onProviderUsage: usageSink,
+      emitUsageTelemetry,
+      nextStreamId,
+    };
+
+    const enterPhase = (phase: EnginePhase): Iterable<StreamChunk> => {
+      const stepId = nextStreamId();
+      phaseStepIds.set(phase, stepId);
+      phaseEnv.currentPhaseStepId = stepId;
+      this.activeRunCurrentPhaseStepIds.set(normalizedContext.traceId, stepId);
+      return this.emitPhaseStart(phase, normalizedContext, stepId);
+    };
+    const exitPhase = (phase: EnginePhase): Iterable<StreamChunk> => {
+      const stepId = phaseStepIds.get(phase);
+      phaseEnv.currentPhaseStepId = undefined;
+      this.activeRunCurrentPhaseStepIds.delete(normalizedContext.traceId);
+      return this.emitPhaseEnd(phase, normalizedContext, stepId);
     };
 
     try {
-      yield* this.emitPhaseStart("session", normalizedContext);
+      yield* enterPhase("session");
       const sessionState = await runSessionPhase(input, normalizedContext, phaseEnv);
-      yield* this.emitPhaseEnd("session", normalizedContext);
+      yield* flushPendingUsageTelemetry();
+      yield* exitPhase("session");
 
-      yield* this.emitPhaseStart("safety", normalizedContext);
+      yield* enterPhase("safety");
       const safetyState = await runSafetyPhase(sessionState.input, sessionState.context, phaseEnv);
-      yield* this.emitPhaseEnd("safety", normalizedContext);
+      yield* flushPendingUsageTelemetry();
+      yield* exitPhase("safety");
 
-      yield* this.emitPhaseStart("intent", normalizedContext);
+      yield* enterPhase("intent");
       const intentState = await runIntentPhase(safetyState, phaseEnv);
-      yield* this.emitPhaseEnd("intent", normalizedContext);
+      yield* flushPendingUsageTelemetry();
+      yield* exitPhase("intent");
 
       /** Intent 阶段可能写入 `textToImage`（LLM 或兜底启发式），装配 Prompt 须与之后各阶段共用同一条 input。 */
       const effectiveInput = intentState.input;
 
       // 所有请求（含 simple）统一穿过前置校验阶段，
       // 以保证 Rules / 安全策略 / Provider 可达性校验对所有路径生效一致。
-      yield* this.emitPhaseStart("precheck", normalizedContext);
+      yield* enterPhase("precheck");
       const precheckState = await runPrecheckPhase(intentState, phaseEnv);
-      yield* this.emitPhaseEnd("precheck", normalizedContext);
+      yield* flushPendingUsageTelemetry();
+      yield* exitPhase("precheck");
 
-      yield* this.emitPhaseStart("planning", normalizedContext);
+      yield* enterPhase("planning");
       const planningState = await runPlanningPhase(precheckState, phaseEnv);
       orchestrator.setPlanningResult(planningState.planning);
       if (this.config.runtime.planMode) {
@@ -743,11 +921,13 @@ export class Engine {
           );
         }
       }
-      yield* this.emitPhaseEnd("planning", normalizedContext);
+      yield* flushPendingUsageTelemetry();
+      yield* exitPhase("planning");
 
-      yield* this.emitPhaseStart("graph-check", normalizedContext);
+      yield* enterPhase("graph-check");
       const graphState = await runGraphCheckPhase(planningState, phaseEnv);
-      yield* this.emitPhaseEnd("graph-check", normalizedContext);
+      yield* flushPendingUsageTelemetry();
+      yield* exitPhase("graph-check");
 
       const distributed = this.contextDistributor.distribute(
         {
@@ -770,10 +950,10 @@ export class Engine {
           appliedCuts: ["text-to-image: skipped full prompt assemble"],
         });
       } else {
-        let route = this.modelRouter.resolve("intent");
+        let route = effectiveRouter.resolve("intent");
         if (envelopeNeedsVision(effectiveInput)) {
           try {
-            route = this.modelRouter.resolve("vision");
+            route = effectiveRouter.resolve("vision");
           } catch {
             /* `vision` 未配置 */
           }
@@ -793,9 +973,20 @@ export class Engine {
             supportsStreaming: true,
           },
           currentInput: effectiveInput,
-          activeRules: this.registry.list("rule"),
-          activeSkills: this.registry.list("skill"),
-          availableTools: this.registry.list("tool"),
+          // SessionScope 的 additional* 与 registry 取**并集**——registry 全局基线
+          // （如 safety rule）与本轮 session 叠加项一起进入 assembler。
+          activeRules: [
+            ...this.registry.list("rule"),
+            ...(scope?.additionalRules ?? []),
+          ],
+          activeSkills: [
+            ...this.registry.list("skill"),
+            ...(scope?.additionalSkills ?? []),
+          ],
+          availableTools: [
+            ...this.registry.list("tool"),
+            ...(scope?.additionalTools ?? []),
+          ],
           contextWindow: await this.memorySystem.load(
             normalizedContext.sessionId,
             adapterContext,
@@ -806,18 +997,19 @@ export class Engine {
                 ? entry.content
                 : JSON.stringify(entry.content),
           })),
+          ...(scope?.systemInstruction !== undefined
+            ? { systemInstruction: scope.systemInstruction }
+            : {}),
         });
         this.activeRunPrompts.set(normalizedContext.traceId, assembled);
       }
 
-      yield* this.emitPhaseStart("execution", normalizedContext);
+      yield* enterPhase("execution");
 
       let executionState: Awaited<ReturnType<typeof runExecutionPhase>>;
       if (this.config.runtime.streamingOutput) {
         const deltaQueue = new DeltaStreamQueue();
         this.activeRunDeltaOutbox.set(normalizedContext.traceId, deltaQueue);
-        // Provider usage 才进入最终 token/cost 统计；预组装 prompt size 仅用于裁剪。
-        enqueueUsageChunk(deltaQueue, orchestrator);
         const execPromise = runExecutionPhase(
           graphState,
           phaseEnv,
@@ -906,10 +1098,12 @@ export class Engine {
           message: `${step.name}: ${step.status}`,
         };
       }
-      // ADR-0002：把 `tool-use` 子流程累积的 loop/tool 事件按时间顺序 yield 出去。
-      // 这些事件来自子流程的 `onToolLoopEvent` 回调（存入 outbox），因为 execution
-      // phase 采用 `await runExecutionPhase` 同步等待，无法在执行中实时 yield。
-      for (const chunk of toolLoopEventOutbox) {
+      // ADR-0002：非 streaming 模式在这里批量发出 loop/tool 事件；streaming
+      // 模式下事件已实时进入 DeltaStreamQueue，这里只补发 seal 阶段新增的闭合块。
+      for (const chunk of collectToolLoopChunksForTerminalFlush(
+        toolLoopEventOutbox,
+        this.config.runtime.streamingOutput === true,
+      )) {
         yield chunk;
       }
       // 同步 tool-use 子流程记录的工具调用元数据到主干 metadata。
@@ -919,12 +1113,13 @@ export class Engine {
           orchestrator.recordToolCall();
         }
       }
-      yield* this.emitPhaseEnd("execution", normalizedContext);
+      yield* flushPendingUsageTelemetry();
+      yield* exitPhase("execution");
 
       // 结果验证对所有请求统一执行。
       // 对 simple 路径（单步 direct-answer）而言，validation 退化为"步骤成功 → 通过"的确定性判断，
       // 但这条判断链路与 complex 路径同构，保证预算熔断 / Hook / 可观测事件覆盖一致。
-      yield* this.emitPhaseStart("validation", normalizedContext);
+      yield* enterPhase("validation");
       const validationState: ValidationPhaseOutput = await runValidationPhase(executionState, phaseEnv);
       if (!validationState.validation.passed) {
         const switched = orchestrator.switchToNextPlan(
@@ -934,11 +1129,12 @@ export class Engine {
           orchestrator.markReplanRequest("validation requested alternative plan");
         }
       }
-      yield* this.emitPhaseEnd("validation", normalizedContext);
+      yield* flushPendingUsageTelemetry();
+      yield* exitPhase("validation");
 
-      yield* this.emitPhaseStart("output", normalizedContext);
+      yield* enterPhase("output");
       const usage = orchestrator.getUsage();
-      const output = await runOutputPhase(validationState, phaseEnv, {
+      const outputMetadata: OutputMetadata = {
         toolCalls,
         durationMs: Date.now() - startTs,
         tokenUsage: {
@@ -952,9 +1148,55 @@ export class Engine {
         ...(generatedImagesBucket.length > 0
           ? { generatedImages: generatedImagesBucket.slice() }
           : {}),
-      });
-      yield* this.emitPhaseEnd("output", normalizedContext);
-      yield { type: "done", output };
+        ...(generatedMediaBucket.length > 0
+          ? { generatedMedia: generatedMediaBucket.slice() }
+          : {}),
+      };
+      let output: EngineOutput;
+      if (this.config.runtime.streamingOutput) {
+        const outputDeltaQueue = new DeltaStreamQueue();
+        this.activeRunDeltaOutbox.set(normalizedContext.traceId, outputDeltaQueue);
+        const outputPromise = runOutputPhase(
+          validationState,
+          {
+            ...phaseEnv,
+            onFinalAnswerDelta: (text: string): void => {
+              outputDeltaQueue.enqueue({ type: "delta", content: text });
+            },
+          },
+          outputMetadata,
+        ).finally(() => {
+          outputDeltaQueue.enqueue(DELTA_STREAM_END);
+        });
+        while (true) {
+          const item = await outputDeltaQueue.dequeue();
+          if (item === DELTA_STREAM_END) {
+            break;
+          }
+          yield item;
+        }
+        output = await outputPromise;
+      } else {
+        output = await runOutputPhase(validationState, phaseEnv, outputMetadata);
+      }
+      const finalUsage = orchestrator.getUsage();
+      output.metadata = {
+        ...output.metadata,
+        durationMs: Date.now() - startTs,
+        tokenUsage: {
+          input: finalUsage.promptTokens,
+          output: finalUsage.completionTokens,
+          total: finalUsage.tokens,
+          ...(finalUsage.cachedPromptTokens > 0
+            ? { cached: finalUsage.cachedPromptTokens }
+            : {}),
+        },
+      };
+      yield* flushPendingUsageTelemetry();
+      yield* exitPhase("output");
+      // 关键顺序：先把本轮 assistant 回复落到 MemorySystem，再 yield done。
+      // 否则消费方一拿到 done 就 break 出 for-await，async generator 不会推进到
+      // append 调用，多轮上下文会断裂。
       await this.memorySystem.append(
         normalizedContext.sessionId,
         {
@@ -965,7 +1207,14 @@ export class Engine {
         },
         adapterContext,
       );
+      yield { type: "done", output };
     } catch (error) {
+      for (const chunk of collectToolLoopChunksForTerminalFlush(
+        toolLoopEventOutbox,
+        this.config.runtime.streamingOutput === true,
+      )) {
+        yield chunk;
+      }
       const wrapped =
         error instanceof EngineError
           ? error
@@ -995,12 +1244,17 @@ export class Engine {
       runHandle.release();
       this.activeRunPrompts.delete(normalizedContext.traceId);
       this.activeRunUsageSinks.delete(normalizedContext.traceId);
+      this.activeRunUsageTelemetrySinks.delete(normalizedContext.traceId);
+      this.activeRunIdFactories.delete(normalizedContext.traceId);
+      this.activeRunCurrentPhaseStepIds.delete(normalizedContext.traceId);
       this.activeRunExecutionContexts.delete(normalizedContext.traceId);
       this.activeRunEventOutbox.delete(normalizedContext.traceId);
       this.activeRunToolCallSinks.delete(normalizedContext.traceId);
       this.activeRunDeltaOutbox.delete(normalizedContext.traceId);
       this.activeRunGeneratedImages.delete(normalizedContext.traceId);
+      this.activeRunGeneratedMedia.delete(normalizedContext.traceId);
       this.activeRunToolLoopTimingControls.delete(normalizedContext.traceId);
+      this.activeRunModelRouters.delete(normalizedContext.traceId);
     }
   }
 
@@ -1042,7 +1296,11 @@ export class Engine {
     }
   }
 
-  private *emitPhaseStart(phase: string, context: ExecutionContext): Iterable<StreamChunk> {
+  private *emitPhaseStart(
+    phase: EnginePhase,
+    context: ExecutionContext,
+    stepId?: string,
+  ): Iterable<StreamChunk> {
     this.observability.emit({
       timestamp: Date.now(),
       traceId: context.traceId,
@@ -1051,6 +1309,14 @@ export class Engine {
       type: "phase_enter",
       payload: {},
     });
+    // 结构化 chunk：下游消费方通过 `chunk.type === 'phase-enter'` 做穷举式
+    // switch，无需依赖 progress.message 后缀字符串。
+    yield {
+      type: "phase-enter",
+      phase,
+      ...(stepId !== undefined ? { stepId } : {}),
+    };
+    // 兼容性 chunk：现有 CLI / 已知下游仍按 `progress` 渲染 phase 文案。
     yield {
       type: "progress",
       phase,
@@ -1058,7 +1324,11 @@ export class Engine {
     };
   }
 
-  private *emitPhaseEnd(phase: string, context: ExecutionContext): Iterable<StreamChunk> {
+  private *emitPhaseEnd(
+    phase: EnginePhase,
+    context: ExecutionContext,
+    stepId?: string,
+  ): Iterable<StreamChunk> {
     this.observability.emit({
       timestamp: Date.now(),
       traceId: context.traceId,
@@ -1068,10 +1338,15 @@ export class Engine {
       payload: {},
     });
     yield {
+      type: "phase-exit",
+      phase,
+      ...(stepId !== undefined ? { stepId } : {}),
+      ok: true,
+    };
+    yield {
       type: "progress",
       phase,
       message: `${phase} finished`,
     };
   }
 }
-

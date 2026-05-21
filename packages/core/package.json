@@ -53,7 +53,7 @@
   },
   "dependencies": {
     "gray-matter": "catalog:",
-    "semver": "^7.8.0",
+    "semver": "^7.8.1",
     "tiktoken": "catalog:"
   },
   "scripts": {

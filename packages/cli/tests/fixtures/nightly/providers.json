@@ -1,0 +1,17 @@
+{
+  "providers": {
+    "openai": {
+      "prompt": "nightly fixture replay for openai"
+    },
+    "anthropic": {
+      "prompt": "nightly fixture replay for anthropic"
+    },
+    "qwen": {
+      "prompt": "nightly fixture replay for qwen"
+    },
+    "gemini": {
+      "prompt": "nightly fixture replay for gemini"
+    }
+  },
+  "memoryBackends": ["fs-only", "qdrant"]
+}

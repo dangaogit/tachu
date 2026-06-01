@@ -1,0 +1,102 @@
+name: Nightly Smoke
+
+# 每日 02:00 UTC 触发，矩阵 = {provider} × {memory backend}。
+# 失败时自动开 issue（gh issue create）。
+# 在 provider API key 未在 secrets 中配置时优雅跳过对应 cell（emit skipped gate）。
+
+on:
+  schedule:
+    # 02:00 UTC = 北京时间 10:00；尽量错开 GitHub Actions 高峰。
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  smoke:
+    name: Provider × Memory Backend Smoke
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        provider: [openai, anthropic, qwen, gemini]
+        memory: [fs-only, qdrant]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Build
+        run: bun run build
+
+      - name: Provider Key Available?
+        id: keycheck
+        run: |
+          case "${{ matrix.provider }}" in
+            openai)    test -n "${{ secrets.OPENAI_API_KEY }}" && echo "have=yes" >> $GITHUB_OUTPUT || echo "have=no" >> $GITHUB_OUTPUT ;;
+            anthropic) test -n "${{ secrets.ANTHROPIC_API_KEY }}" && echo "have=yes" >> $GITHUB_OUTPUT || echo "have=no" >> $GITHUB_OUTPUT ;;
+            qwen)      test -n "${{ secrets.DASHSCOPE_API_KEY }}" && echo "have=yes" >> $GITHUB_OUTPUT || echo "have=no" >> $GITHUB_OUTPUT ;;
+            gemini)    test -n "${{ secrets.GEMINI_API_KEY }}" && echo "have=yes" >> $GITHUB_OUTPUT || echo "have=no" >> $GITHUB_OUTPUT ;;
+          esac
+
+      - name: Smoke (fixture replay)
+        id: smoke
+        if: steps.keycheck.outputs.have == 'yes'
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TACHU_NIGHTLY_PROVIDER: ${{ matrix.provider }}
+          TACHU_NIGHTLY_MEMORY: ${{ matrix.memory }}
+        run: |
+          bun test packages/cli/tests/nightly
+
+      - name: Skip Note
+        if: steps.keycheck.outputs.have != 'yes'
+        run: echo "[nightly] skip ${{ matrix.provider }}/${{ matrix.memory }} — secret not configured"
+
+      - name: Build Gate Report
+        if: always()
+        run: |
+          STATUS="skipped"
+          if [ "${{ steps.smoke.outcome }}" = "success" ]; then STATUS="pass"; fi
+          if [ "${{ steps.smoke.outcome }}" = "failure" ]; then STATUS="fail"; fi
+          bun scripts/build-gate-report.ts \
+            --out=gate-report-${{ matrix.provider }}-${{ matrix.memory }}.json \
+            --gate=nightly-${{ matrix.provider }}-${{ matrix.memory }}:${STATUS}:0:nightly-smoke
+
+      - name: Upload Gate Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-gate-${{ matrix.provider }}-${{ matrix.memory }}-${{ github.run_id }}
+          path: gate-report-*.json
+          retention-days: 30
+
+  open-issue-on-failure:
+    name: Open Issue on Nightly Failure
+    needs: smoke
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create Issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --title "Nightly smoke failed @ $(date -u +%F)" \
+            --label "nightly,priority:high" \
+            --body "Nightly smoke matrix failed. Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

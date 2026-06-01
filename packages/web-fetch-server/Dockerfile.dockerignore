@@ -1,0 +1,42 @@
+# BuildKit 会优先读取与 Dockerfile 同目录的 `<dockerfile>.dockerignore`
+# （优先级高于 context 根的 `.dockerignore`）。
+# 下面的模式相对 build context（仓库根）生效。
+
+# 依赖与产物
+node_modules
+**/node_modules
+dist
+**/dist
+
+# 测试与覆盖率
+__tests__
+**/__tests__
+coverage
+**/coverage
+*.lcov
+
+# 缓存与 Playwright host 缓存
+.cache
+**/.cache
+.ms-playwright
+**/.ms-playwright
+
+# 仓库文档 / ADR / Markdown（运行时不需要）
+*.md
+**/*.md
+
+# VCS / CI
+.git
+.github
+.gitignore
+
+# 本地工具 / 工作流 / 报告
+.cursor
+reports
+**/.DS_Store
+
+# 其它大 volume 目录（避免整仓上传）
+.vscode
+.idea
+tmp
+.tmp

@@ -1,0 +1,59 @@
+{
+  "name": "@tachu/host-defaults",
+  "version": "1.0.0-rc.0",
+  "description": "Default host wiring for Tachu — provider inference, semantic retrieval facade, capability checks. Shared by CLI and non-CLI hosts.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "README_ZH.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "tachu",
+    "host",
+    "agent",
+    "llm",
+    "bun",
+    "typescript"
+  ],
+  "author": "Tachu Contributors",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/dangaogit/tachu#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dangaogit/tachu.git",
+    "directory": "packages/host-defaults"
+  },
+  "bugs": {
+    "url": "https://github.com/dangaogit/tachu/issues"
+  },
+  "engines": {
+    "bun": ">=1.3.14"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "dependencies": {
+    "@tachu/core": "workspace:*",
+    "@tachu/extensions": "workspace:*"
+  },
+  "scripts": {
+    "build": "bun run clean && bunx tsc -p tsconfig.build.json && bun ../../scripts/copy-md-assets.ts",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist",
+    "test": "bun test",
+    "test:coverage": "bun test --coverage"
+  }
+}

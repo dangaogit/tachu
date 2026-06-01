@@ -1,0 +1,40 @@
+# Usage:
+#   1. cp .env.example .env (填入 WEB_FETCH_TOKEN)
+#   2. 在仓库根运行：docker compose -f packages/web-fetch-server/docker-compose.yml up --build
+#      或使用根 package.json 的 `bun run docker:server` 脚本
+# Endpoints:
+#   - http://localhost:8787/healthz
+#   - POST http://localhost:8787/v1/extract
+#
+# 需要在同目录准备 `.env.example`：复制为 `.env` 并填入 `WEB_FETCH_TOKEN`（绑定非 localhost 时必填）。
+#
+# 关键：Dockerfile 需要以仓库根为 build context（要 COPY 根 package.json / bun.lock / packages/）。
+# 这里用相对 compose.yml 位置的路径 `../..` 指向仓库根，保证从任何 cwd 起都能正确构建。
+
+services:
+  web-fetch-server:
+    build:
+      context: ../..
+      dockerfile: packages/web-fetch-server/Dockerfile
+    ports:
+      - "8787:8787"
+    environment:
+      WEB_FETCH_HOST: ${WEB_FETCH_HOST:-0.0.0.0}
+      WEB_FETCH_PORT: ${WEB_FETCH_PORT:-8787}
+      WEB_FETCH_TOKEN: ${WEB_FETCH_TOKEN:-}
+      WEB_FETCH_RATE_LIMIT_BURST: ${WEB_FETCH_RATE_LIMIT_BURST:-10}
+      WEB_FETCH_BROWSER_MAX_CONCURRENCY: ${WEB_FETCH_BROWSER_MAX_CONCURRENCY:-2}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:8787/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+  # otel-collector:
+  #   image: otel/opentelemetry-collector:latest
+  #   ports:
+  #     - "4317:4317"
+  #     - "4318:4318"

@@ -1,0 +1,17 @@
+# Dependabot version updates.
+# Docs: https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+
+version: 2
+updates:
+  # JavaScript/TypeScript 依赖。Dependabot 暂不支持 bun 生态，使用 npm 生态读取
+  # 根 package.json（含 workspaces）的清单进行版本更新；bun.lock 由 `bun install` 同步。
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # GitHub Actions：保持各 workflow 中 pin 的 action 版本为最新。
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

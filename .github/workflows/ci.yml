@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Typecheck, Test, Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        id: typecheck
+        run: bun run typecheck
+
+      - name: Test
+        id: test
+        run: bun test
+
+      - name: Reverse Grep Legacy Tool Mention Helper
+        id: no-explicit-tool-mentions
+        run: bun run check:no-explicit-tool-mentions
+
+      - name: Doc hygiene (no internal codenames, README facade size)
+        id: rc-docs
+        run: bun run check:rc-docs
+
+      - name: Build
+        id: build
+        run: bun run build
+
+      - name: Validate Release Artifacts
+        id: release-check
+        # CI 默认走 --allow-doc-drift（来自 release:check）；
+        # 仓库 main 推送 + release tag 时由 main-gate.yml / release.yml 跑 release:check:strict。
+        run: bun run release:check
+
+      - name: Audit Dependencies
+        id: audit
+        # 非阻塞：bun audit 在尚无 lockfile-driven 漏洞数据库时可能返回 0；保留以便后续启用。
+        run: bun pm pkg get name && bun pm ls --all > /tmp/bun-tree.txt && echo "tree captured"
+
+      - name: Build Gate Report
+        if: always()
+        run: |
+          bun scripts/build-gate-report.ts \
+            --out=gate-report.json \
+            --gate=typecheck:${{ steps.typecheck.outcome == 'success' && 'pass' || 'fail' }}:0:bun-typecheck \
+            --gate=test:${{ steps.test.outcome == 'success' && 'pass' || 'fail' }}:0:bun-test \
+            --gate=no-explicit-tool-mentions:${{ steps.no-explicit-tool-mentions.outcome == 'success' && 'pass' || 'fail' }}:0:reverse-grep \
+            --gate=build:${{ steps.build.outcome == 'success' && 'pass' || 'fail' }}:0:bun-build \
+            --gate=release-check:${{ steps.release-check.outcome == 'success' && 'pass' || 'fail' }}:0:validate-release-artifacts
+
+      - name: Upload Gate Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-report-${{ github.run_id }}
+          path: gate-report.json
+          retention-days: 30

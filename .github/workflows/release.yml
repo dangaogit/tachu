@@ -49,6 +49,11 @@ jobs:
       - name: Install
         run: bun install --frozen-lockfile
 
+      # 内部包通过各自的 dist 导出互相解析（@tachu/core 等），故 typecheck/test 前必须先构建。
+      - name: Build
+        id: build
+        run: bun run build
+
       - name: Typecheck
         id: typecheck
         run: bun run typecheck
@@ -56,10 +61,6 @@ jobs:
       - name: Test
         id: test
         run: bun test
-
-      - name: Build
-        id: build
-        run: bun run build
 
       - name: Mirror docs into packages
         id: mirror

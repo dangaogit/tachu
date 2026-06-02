@@ -25,6 +25,11 @@ jobs:
       - name: Install
         run: bun install --frozen-lockfile
 
+      # 内部包通过各自的 dist 导出互相解析（@tachu/core 等），故 typecheck/test 前必须先构建。
+      - name: Build
+        id: build
+        run: bun run build
+
       - name: Typecheck
         id: typecheck
         run: bun run typecheck
@@ -40,10 +45,6 @@ jobs:
       - name: Doc hygiene (no internal codenames, README facade size)
         id: rc-docs
         run: bun run check:rc-docs
-
-      - name: Build
-        id: build
-        run: bun run build
 
       - name: Validate Release Artifacts
         id: release-check

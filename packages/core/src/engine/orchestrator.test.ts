@@ -112,40 +112,43 @@ describe("ExecutionOrchestrator", () => {
   });
 
  test("tool-loop active budget excludes user blocking time", async () => {
-    const orchestrator = new ExecutionOrchestrator(
-      createConfig({ maxToolCalls: 99, maxTokens: 99, maxToolLoopActiveMs: 25 }),
-      runIds("tb", "sb"),
-      new DefaultObservabilityEmitter(),
-    );
+   // 用较小的活跃等待与宽松上限,使活跃侧留有足够余量,避免 CI 上
+   // setTimeout 抖动让活跃时间逼近上限;阻塞等待远大于上限,确保
+   // 「排除用户阻塞时间」的断言依然有效。
+   const orchestrator = new ExecutionOrchestrator(
+     createConfig({ maxToolCalls: 99, maxTokens: 99, maxToolLoopActiveMs: 500 }),
+     runIds("tb", "sb"),
+     new DefaultObservabilityEmitter(),
+   );
 
-    orchestrator.beginToolLoopActiveTimer();
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    orchestrator.beginUserBlocking();
-    await new Promise((resolve) => setTimeout(resolve, 40));
-    orchestrator.endUserBlocking();
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(() => orchestrator.recordToolCall()).not.toThrow();
-    orchestrator.endToolLoopActiveTimer();
-  });
+   orchestrator.beginToolLoopActiveTimer();
+   await new Promise((resolve) => setTimeout(resolve, 5));
+   orchestrator.beginUserBlocking();
+   await new Promise((resolve) => setTimeout(resolve, 1_000));
+   orchestrator.endUserBlocking();
+   await new Promise((resolve) => setTimeout(resolve, 5));
+   expect(() => orchestrator.recordToolCall()).not.toThrow();
+   orchestrator.endToolLoopActiveTimer();
+ });
 
  test("overlapping user blocking (parallel tool approvals) still excludes full wait", async () => {
-    const orchestrator = new ExecutionOrchestrator(
-      createConfig({ maxToolCalls: 99, maxTokens: 99, maxToolLoopActiveMs: 18 }),
-      runIds("tb2", "sb2"),
-      new DefaultObservabilityEmitter(),
-    );
+   const orchestrator = new ExecutionOrchestrator(
+     createConfig({ maxToolCalls: 99, maxTokens: 99, maxToolLoopActiveMs: 500 }),
+     runIds("tb2", "sb2"),
+     new DefaultObservabilityEmitter(),
+   );
 
-    orchestrator.beginToolLoopActiveTimer();
-    orchestrator.beginUserBlocking();
-    orchestrator.beginUserBlocking();
-    await new Promise((resolve) => setTimeout(resolve, 25));
-    orchestrator.endUserBlocking();
-    await new Promise((resolve) => setTimeout(resolve, 15));
-    orchestrator.endUserBlocking();
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    expect(() => orchestrator.recordToolCall()).not.toThrow();
-    orchestrator.endToolLoopActiveTimer();
-  });
+   orchestrator.beginToolLoopActiveTimer();
+   orchestrator.beginUserBlocking();
+   orchestrator.beginUserBlocking();
+   await new Promise((resolve) => setTimeout(resolve, 700));
+   orchestrator.endUserBlocking();
+   await new Promise((resolve) => setTimeout(resolve, 500));
+   orchestrator.endUserBlocking();
+   await new Promise((resolve) => setTimeout(resolve, 5));
+   expect(() => orchestrator.recordToolCall()).not.toThrow();
+   orchestrator.endToolLoopActiveTimer();
+ });
 
  test("tool-loop active budget throws when active time exceeds limit", async () => {
     const orchestrator = new ExecutionOrchestrator(

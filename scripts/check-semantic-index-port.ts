@@ -7,7 +7,7 @@
  * Production hosts must use the policy-aware {@link SemanticRetrievalFacade}
  * + {@link EmbeddingRuntime} + {@link VectorIndexAdapter} stack from
  * `@tachu/core`. The patterns below are pre- abstractions retired by
- * Phase III item 10 — they may only appear in:
+ * the current semantic-retrieval architecture — they may only appear in:
  * 1. The deprecated definition file (if any is kept for migration docs).
  * 2. Explicitly-marked test fixtures under `**\/__tests__/**`, `**\/testing/**`,
  * or `*.test.ts` files.

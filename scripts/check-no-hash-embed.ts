@@ -7,18 +7,19 @@
  * pipeline goes through `EmbeddingRuntime` → numeric vectors → `VectorIndexAdapter`.
  *
  * This script fails the CI gate when either pattern surfaces in production source.
+ *
+ * Implemented with a git-tracked file scan (no external `rg`/ripgrep dependency)
+ * so the gate runs identically on CI runners that do not ship ripgrep.
  */
-import { $ } from "bun";
+import { readFileSync } from "node:fs";
 
 const targets = ["packages/extensions/src/vector", "packages/core/src/vector"];
 
 interface ForbiddenPattern {
- /** Human-readable reason for the failure. */
+  /** Human-readable reason for the failure. */
   reason: string;
- /** ripgrep pattern (regex). */
+  /** Regex pattern. */
   pattern: string;
- /** Optional comma-separated glob list passed via -g. */
-  globs?: readonly string[];
 }
 
 const patterns: readonly ForbiddenPattern[] = [
@@ -42,16 +43,42 @@ const patterns: readonly ForbiddenPattern[] = [
   },
 ];
 
+function listTrackedFiles(target: string): string[] {
+  const result = Bun.spawnSync(["git", "ls-files", "-z", "--", target]);
+  if (result.exitCode !== 0) {
+    console.error(`[check-no-hash-embed] git ls-files failed for ${target}: ${new TextDecoder().decode(result.stderr)}`);
+    process.exit(2);
+  }
+  return new TextDecoder()
+    .decode(result.stdout)
+    .split("\0")
+    .filter((path) => path.length > 0);
+}
+
 let failed = false;
 for (const item of patterns) {
+  const regex = new RegExp(item.pattern);
   for (const target of targets) {
-    const args = item.globs ?? [];
-    const globArgs = args.flatMap((glob) => ["-g", glob]);
-    const result = await $`rg -n ${item.pattern} ${globArgs} ${target}`.quiet().nothrow();
-    if (result.exitCode === 0) {
+    const hits: string[] = [];
+    for (const file of listTrackedFiles(target)) {
+      let content: string;
+      try {
+        content = readFileSync(file, "utf8");
+      } catch {
+        continue;
+      }
+      const lines = content.split("\n");
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i] ?? "";
+        if (regex.test(line)) {
+          hits.push(`${file}:${i + 1}:${line}`);
+        }
+      }
+    }
+    if (hits.length > 0) {
       failed = true;
       console.error(`[check-no-hash-embed] ${item.reason}`);
-      console.error(result.stdout.toString());
+      console.error(hits.join("\n"));
     }
   }
 }

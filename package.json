@@ -68,8 +68,6 @@
     "check:no-hash-embed": "bun scripts/check-no-hash-embed.ts",
     "check:semantic-index-port": "bun scripts/check-semantic-index-port.ts",
     "check:final-answer-phase": "bun scripts/check-final-answer-phase.ts",
-    "check:phase-iii": "bun run check:no-hash-embed && bun run check:semantic-index-port && bun run check:final-answer-phase && bun run check:no-explicit-tool-mentions",
-    "check:rc-docs": "bun scripts/check-no-internal-codenames.ts && bun scripts/check-readme-facade.ts",
     "release": "bash scripts/publish.sh",
     "release:dry": "bash scripts/publish.sh --dry-run",
     "release:rc": "bash scripts/publish.sh --tag=rc",

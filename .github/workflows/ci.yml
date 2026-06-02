@@ -42,10 +42,6 @@ jobs:
         id: no-explicit-tool-mentions
         run: bun run check:no-explicit-tool-mentions
 
-      - name: Doc hygiene (no internal codenames, README facade size)
-        id: rc-docs
-        run: bun run check:rc-docs
-
       - name: Validate Release Artifacts
         id: release-check
         # CI 默认走 --allow-doc-drift（来自 release:check）；

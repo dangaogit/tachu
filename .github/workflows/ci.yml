@@ -45,7 +45,7 @@ jobs:
       - name: Validate Release Artifacts
         id: release-check
         # CI 默认走 --allow-doc-drift（来自 release:check）；
-        # 仓库 main 推送 + release tag 时由 main-gate.yml / release.yml 跑 release:check:strict。
+        # release tag 时由 release.yml 跑 release:check:strict。
         run: bun run release:check
 
       - name: Audit Dependencies

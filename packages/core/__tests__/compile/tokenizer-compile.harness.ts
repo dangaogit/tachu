@@ -1,9 +1,12 @@
-import { createTiktokenTokenizer } from "../../src/prompt/tokenizer";
+import { TiktokenTokenizer } from "../../src/prompt/tokenizer";
 
 const warnings: string[] = [];
-const tokenizer = createTiktokenTokenizer("gpt-4o-mini", (warning) => warnings.push(warning));
+const tokenizer = new TiktokenTokenizer("gpt-4o-mini", (warning) => warnings.push(warning));
+
+await tokenizer.ready();
+
 const count = tokenizer.count("hello world");
-tokenizer.dispose?.();
+tokenizer.dispose();
 
 if (warnings.length > 0) {
   console.error(`tokenizer-compile: unexpected warnings: ${warnings.join("; ")}`);

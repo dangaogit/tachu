@@ -3,7 +3,7 @@ import { ByteEstimateTokenizer } from "./tokenizer-fallback";
 import { TiktokenTokenizer, createTiktokenTokenizer } from "./tokenizer";
 
 describe("tokenizers", () => {
- test("byte fallback tokenizer count/encode/decode", () => {
+  test("byte fallback tokenizer count/encode/decode", () => {
     const tokenizer = new ByteEstimateTokenizer();
     const count = tokenizer.count("hello world");
     expect(count).toBeGreaterThan(0);
@@ -12,9 +12,10 @@ describe("tokenizers", () => {
     expect(decoded).toBe("hello");
   });
 
- test("tiktoken tokenizer counts and decodes with real module", () => {
+  test("tiktoken tokenizer counts and decodes with real module", async () => {
     const warnings: string[] = [];
     const tokenizer = new TiktokenTokenizer("gpt-4o-mini", (warning) => warnings.push(warning));
+    await tokenizer.ready();
     const count = tokenizer.count("hello world");
     expect(count).toBe(2);
     const encoded = tokenizer.encode("hello world");
@@ -24,16 +25,18 @@ describe("tokenizers", () => {
     expect(warnings).toHaveLength(0);
   });
 
- test("falls back to byte estimator when encoding cannot be created", () => {
+  test("falls back to byte estimator when encoding cannot be created", async () => {
     const warnings: string[] = [];
     const tokenizer = new TiktokenTokenizer("unknown-model", (warning) => warnings.push(warning));
+    await tokenizer.ready();
     const count = tokenizer.count("fallback-case");
     expect(count).toBeGreaterThan(0);
     tokenizer.dispose();
   });
 
- test("createTiktokenTokenizer factory returns Tokenizer", () => {
+  test("createTiktokenTokenizer factory returns Tokenizer", async () => {
     const tokenizer = createTiktokenTokenizer("gpt-4o-mini");
+    await (tokenizer as TiktokenTokenizer).ready();
     expect(typeof tokenizer.count("abc")).toBe("number");
     expect(Array.isArray(tokenizer.encode("abc"))).toBe(true);
     const bytes = tokenizer.encode("abc");

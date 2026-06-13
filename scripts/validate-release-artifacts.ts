@@ -142,6 +142,85 @@ function validatePrivatePackages(root: string, version: string | undefined, erro
   }
 }
 
+type BunLockWorkspaceEntry = {
+  name?: string;
+  version?: string;
+};
+
+function readBunLockWorkspaces(root: string): Record<string, BunLockWorkspaceEntry> | null {
+  const lockPath = join(root, "bun.lock");
+  if (!existsSync(lockPath)) return null;
+
+  const text = readFileSync(lockPath, "utf8");
+  const entries: Record<string, BunLockWorkspaceEntry> = {};
+  const workspacePattern = /"(packages\/[^"]+)":\s*\{/g;
+
+  for (const match of text.matchAll(workspacePattern)) {
+    const key = match[1];
+    const blockStart = match.index! + match[0].length;
+    const block = text.slice(blockStart, blockStart + 2_000);
+    entries[key] = {
+      name: block.match(/"name":\s*"([^"]+)"/)?.[1],
+      version: block.match(/"version":\s*"([^"]+)"/)?.[1],
+    };
+  }
+
+  return entries;
+}
+
+function validateWorkspaceLockfileVersions(root: string, errors: string[]): void {
+  const workspaces = readBunLockWorkspaces(root);
+  if (!workspaces) {
+    errors.push("bun.lock missing; run bun install after version bumps");
+    return;
+  }
+
+  for (const [workspaceKey, entry] of Object.entries(workspaces)) {
+    const lockName = entry.name;
+    const lockVersion = entry.version;
+    if (!lockName || !lockVersion) continue;
+
+    const pkg = workspaceKey.slice("packages/".length);
+    const pkgVersion = asString(readJson(packagePath(root, pkg)).version);
+    if (pkgVersion && lockVersion !== pkgVersion) {
+      errors.push(
+        `${lockName} package.json version ${pkgVersion} does not match bun.lock ${lockVersion}; run bun install after version bumps`,
+      );
+    }
+  }
+}
+
+function validateInternalPublishDependencies(
+  root: string,
+  version: string | undefined,
+  errors: string[],
+): void {
+  if (!version) return;
+
+  const workspaces = readBunLockWorkspaces(root);
+  if (!workspaces) return;
+
+  const publishDependencyMap: Record<string, string[]> = {
+    extensions: ["core"],
+    "host-defaults": ["core", "extensions"],
+    cli: ["core", "extensions", "host-defaults"],
+  };
+
+  for (const [pkg, internalDeps] of Object.entries(publishDependencyMap)) {
+    const dependencies = asObject(readJson(packagePath(root, pkg)).dependencies) ?? {};
+    for (const depPkg of internalDeps) {
+      const depName = `@tachu/${depPkg}`;
+      if (asString(dependencies[depName]) !== "workspace:*") continue;
+      const resolvedVersion = workspaces[`packages/${depPkg}`]?.version;
+      if (resolvedVersion !== version) {
+        errors.push(
+          `${depName} resolves to ${resolvedVersion ?? "<missing>"} in bun.lock but lockstep release is ${version}; consumers would install stale workspace deps`,
+        );
+      }
+    }
+  }
+}
+
 function validateWebFetchDockerRuntime(root: string, errors: string[]): void {
   const rootPkg = readJson(join(root, "package.json"));
   const catalog = asObject(asObject(rootPkg.workspaces)?.catalog);
@@ -205,6 +284,8 @@ export function validateReleaseArtifacts(
   }
 
   validatePrivatePackages(root, version, errors);
+  validateWorkspaceLockfileVersions(root, errors);
+  validateInternalPublishDependencies(root, version, errors);
   if (checkDockerRuntime) validateWebFetchDockerRuntime(root, errors);
 
   return { ok: errors.length === 0, version, errors };

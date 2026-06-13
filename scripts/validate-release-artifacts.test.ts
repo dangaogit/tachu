@@ -34,7 +34,7 @@ function createFixtureRoot(): string {
     }
     writeJson(join(pkgRoot, "package.json"), {
       name: `@tachu/${pkg}`,
-      version: "1.0.0-rc.0",
+      version: "1.0.0-rc.2",
       type: "module",
       main: "./dist/index.js",
       types: "./dist/index.d.ts",
@@ -46,6 +46,19 @@ function createFixtureRoot(): string {
       },
       files: ["dist", "README.md", "README_ZH.md", "CHANGELOG.md", "LICENSE"],
       publishConfig: { access: "public" },
+      ...(pkg === "extensions"
+        ? { dependencies: { "@tachu/core": "workspace:*" } }
+        : pkg === "host-defaults"
+          ? { dependencies: { "@tachu/core": "workspace:*", "@tachu/extensions": "workspace:*" } }
+          : pkg === "cli"
+            ? {
+                dependencies: {
+                  "@tachu/core": "workspace:*",
+                  "@tachu/extensions": "workspace:*",
+                  "@tachu/host-defaults": "workspace:*",
+                },
+              }
+            : {}),
     });
   }
 
@@ -59,7 +72,7 @@ function createFixtureRoot(): string {
   mkdirSync(join(root, "packages/web-fetch-server/node_modules/playwright-core"), { recursive: true });
   writeJson(join(root, "packages/web-fetch-server/package.json"), {
     name: "@tachu/web-fetch-server",
-    version: "1.0.0-rc.0",
+    version: "1.0.0-rc.2",
     private: true,
   });
   writeFile(
@@ -72,6 +85,39 @@ function createFixtureRoot(): string {
   );
   writeJson(join(root, "packages/web-fetch-server/node_modules/playwright-core/browsers.json"), {
     browsers: [{ name: "chromium", revision: "1217" }],
+  });
+
+  writeJson(join(root, "bun.lock"), {
+    lockfileVersion: 1,
+    workspaces: {
+      "packages/core": { name: "@tachu/core", version: "1.0.0-rc.2" },
+      "packages/extensions": {
+        name: "@tachu/extensions",
+        version: "1.0.0-rc.2",
+        dependencies: { "@tachu/core": "workspace:*" },
+      },
+      "packages/host-defaults": {
+        name: "@tachu/host-defaults",
+        version: "1.0.0-rc.2",
+        dependencies: {
+          "@tachu/core": "workspace:*",
+          "@tachu/extensions": "workspace:*",
+        },
+      },
+      "packages/cli": {
+        name: "@tachu/cli",
+        version: "1.0.0-rc.2",
+        dependencies: {
+          "@tachu/core": "workspace:*",
+          "@tachu/extensions": "workspace:*",
+          "@tachu/host-defaults": "workspace:*",
+        },
+      },
+      "packages/web-fetch-server": {
+        name: "@tachu/web-fetch-server",
+        version: "1.0.0-rc.2",
+      },
+    },
   });
 
   return root;
@@ -89,7 +135,7 @@ describe("validateReleaseArtifacts", () => {
       requireMirroredDocs: true,
     });
 
-    expect(result).toMatchObject({ ok: true, version: "1.0.0-rc.0", errors: [] });
+    expect(result).toMatchObject({ ok: true, version: "1.0.0-rc.2", errors: [] });
   });
 
  test("fails when an exported file is missing", () => {
@@ -116,6 +162,25 @@ describe("validateReleaseArtifacts", () => {
     );
     expect(result.errors).toContain(
       "@tachu/extensions declared artifact missing: dist/providers/gemini.js",
+    );
+  });
+
+ test("fails when bun.lock workspace versions drift from package.json", () => {
+    const root = createFixtureRoot();
+    const lock = JSON.parse(readText(join(root, "bun.lock"))) as {
+      workspaces: Record<string, { version?: string }>;
+    };
+    lock.workspaces["packages/core"]!.version = "1.0.0-rc.0";
+    writeJson(join(root, "bun.lock"), lock);
+
+    const result = validateReleaseArtifacts({ root });
+
+    expect(result.ok).toBe(false);
+    expect(result.errors).toContain(
+      "@tachu/core package.json version 1.0.0-rc.2 does not match bun.lock 1.0.0-rc.0; run bun install after version bumps",
+    );
+    expect(result.errors).toContain(
+      "@tachu/core resolves to 1.0.0-rc.0 in bun.lock but lockstep release is 1.0.0-rc.2; consumers would install stale workspace deps",
     );
   });
 

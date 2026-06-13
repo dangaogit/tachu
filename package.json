@@ -77,5 +77,10 @@
     "@types/bun": "catalog:",
     "bun-types": "catalog:",
     "typescript": "catalog:"
+  },
+  "dependencies": {
+    "after": "^0.8.2",
+    "bumps": "^0.0.2",
+    "version": "^0.1.2"
   }
 }

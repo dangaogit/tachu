@@ -6,11 +6,13 @@ import { ByteEstimateTokenizer, type TokenizerLike } from "./tokenizer-fallback"
  */
 export interface Tokenizer extends TokenizerLike {}
 
-// import.meta.resolve() does node-module resolution in source mode AND in
-// bun build --compile (Bun rewrites the resolved path into $bunfs and embeds
-// the .wasm as a static asset, so fetch() reads from $bunfs at runtime —
-// no fs.readFileSync, no disk search).
-const WASM_URL = new URL(import.meta.resolve("tiktoken/tiktoken_bg.wasm"));
+// Bun treats `.wasm` imports as static assets and returns the embedded file
+// path (string) — NOT a WebAssembly.Module. In source/test mode the path
+// points into the local node_modules cache; in `bun build --compile` mode it
+// points into $bunfs where the binary embeds the asset automatically.
+// Bun's asset loader returns the embedded file path as a string at runtime,
+// but the package's .d.ts types it as the WASM export namespace — cast through unknown.
+import tiktokenWasmPath from "tiktoken/tiktoken_bg.wasm";
 
 const chooseFallbackEncoding = (model: string): TiktokenEncoding => {
   if (model.includes("gpt-4o") || model.includes("o1") || model.includes("o3")) {
@@ -29,7 +31,9 @@ function getOrInitTiktoken(onWarning?: (msg: string) => void): Promise<TiktokenA
     try {
       const { init, ...api } = await import("tiktoken/init");
       await init(async (imports) => {
-        const bytes = await fetch(WASM_URL).then((r) => r.arrayBuffer());
+        // tiktokenWasmPath is an absolute path string — valid in both source
+        // mode (node_modules on disk) and compiled mode ($bunfs embedded asset).
+        const bytes = await Bun.file(tiktokenWasmPath as unknown as string).arrayBuffer();
         return WebAssembly.instantiate(bytes, imports);
       });
       return api as unknown as TiktokenAPI;
@@ -46,7 +50,7 @@ function getOrInitTiktoken(onWarning?: (msg: string) => void): Promise<TiktokenA
 /**
  * 基于 tiktoken 的精确 Tokenizer（同步计数，异步初始化）。
  *
- * 使用 tiktoken/init + new URL WASM 模式，支持 `bun build --compile` 独立二进制。
+ * 使用 tiktoken/init + Bun 静态资产嵌入模式，支持 `bun build --compile` 独立二进制。
  * 调用 `await tokenizer.ready()` 后可保证精确计数；初始化完成前自动降级到字节估算。
  */
 export class TiktokenTokenizer implements Tokenizer {

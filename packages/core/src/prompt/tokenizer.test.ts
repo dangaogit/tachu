@@ -16,12 +16,12 @@ describe("tokenizers", () => {
     const warnings: string[] = [];
     const tokenizer = new TiktokenTokenizer("gpt-4o-mini", (warning) => warnings.push(warning));
     const count = tokenizer.count("hello world");
-    expect(count).toBeGreaterThan(0);
+    expect(count).toBe(2);
     const encoded = tokenizer.encode("hello world");
     const decoded = tokenizer.decode(encoded);
-    expect(decoded.length).toBeGreaterThan(0);
+    expect(decoded).toBe("hello world");
     tokenizer.dispose();
-    expect(warnings.length).toBeGreaterThanOrEqual(0);
+    expect(warnings).toHaveLength(0);
   });
 
  test("falls back to byte estimator when encoding cannot be created", () => {

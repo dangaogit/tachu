@@ -1,4 +1,4 @@
-import { createRequire } from "node:module";
+import * as tiktokenModule from "tiktoken";
 import { ByteEstimateTokenizer, type TokenizerLike } from "./tokenizer-fallback";
 
 /**
@@ -17,31 +17,7 @@ type TiktokenModule = {
   get_encoding(name: string): TiktokenEncoding;
 };
 
-const requireFn = createRequire(import.meta.url);
-let cachedModule: TiktokenModule | null | undefined;
-let moduleLoadErrorReported = false;
-
-const loadTiktokenModule = (
-  onWarning?: (message: string) => void,
-): TiktokenModule | null => {
-  if (cachedModule !== undefined) {
-    return cachedModule;
-  }
-  try {
-    cachedModule = requireFn("tiktoken") as TiktokenModule;
-  } catch (error) {
-    cachedModule = null;
-    if (!moduleLoadErrorReported) {
-      moduleLoadErrorReported = true;
-      onWarning?.(
-        `tiktoken 加载失败，已降级字节估算: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-    }
-  }
-  return cachedModule;
-};
+const asTiktokenModule = (): TiktokenModule => tiktokenModule as unknown as TiktokenModule;
 
 const chooseFallbackEncoding = (model: string): string => {
   if (model.includes("gpt-4o") || model.includes("o1") || model.includes("o3")) {
@@ -72,11 +48,7 @@ export class TiktokenTokenizer implements Tokenizer {
     private readonly model: string,
     private readonly onWarning?: (message: string) => void,
   ) {
-    const mod = loadTiktokenModule(onWarning);
-    if (!mod) {
-      this.degraded = true;
-      return;
-    }
+    const mod = asTiktokenModule();
     try {
       this.encoding = mod.encoding_for_model(model);
     } catch {

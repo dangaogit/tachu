@@ -3,6 +3,7 @@ import type { PrecheckPhaseOutput } from "./precheck";
 import type { PhaseEnvironment } from "./index";
 import { engineEventFromContext } from "../turn-outcome";
 import { NameMatchToolCandidateStrategy } from "../tool-activation";
+import { expandDiscoverySiblings } from "../tool-activation/discovery-expansion";
 import { readTurnPolicy } from "../turn-policy";
 
 /**
@@ -174,6 +175,9 @@ export const runPlanningPhase = async (
       ...(env.semanticRetrieval !== undefined
         ? { semanticRetrieval: env.semanticRetrieval }
         : {}),
+      ...(env.config.runtime.toolActivation?.discoveryExpansion !== undefined
+        ? { discoveryExpansion: env.config.runtime.toolActivation.discoveryExpansion }
+        : {}),
     });
     visibleTools = toolResult.visibleTools;
   }
@@ -203,6 +207,22 @@ export const runPlanningPhase = async (
     candidateToolNames.includes(name),
   );
 
+ // 发现工具展开（Change 1）：pin 一个「动作类」工具时把同域「发现/列举类」兄弟
+ // 一并纳入本轮下发给 tool-use 的工具集，避免弱模型盲猜标识符。这是「模型实际收到
+ // 的工具集」的真正收窄点——tool-use 会用 input.toolNames 硬过滤 prebuilt tools。
+ // 「宇宙」取全量注册工具（而非被激活收窄后的 candidateToolNames），否则被饿掉的
+ // 兄弟不在候选里、无从并入。enabled=false / 未配置时为纯 no-op，完全等价现状。
+  const discoveryExpansion = env.config.runtime.toolActivation?.discoveryExpansion;
+  const registeredToolNames = new Set<string>([
+    ...(env.scope?.additionalTools ?? []).map((tool) => tool.name),
+    ...env.registry.list("tool").map((tool) => tool.name),
+  ]);
+  const excludeToolSet = new Set<string>(turnPolicy.excludeTools);
+  const applyDiscoveryExpansion = (names: string[]): string[] =>
+    discoveryExpansion
+      ? expandDiscoverySiblings(names, discoveryExpansion, registeredToolNames, excludeToolSet)
+      : names;
+
   let tasks: TaskNode[];
   if (explicitAgentNames.length > 0) {
     env.observability.emit(engineEventFromContext(state.context, {
@@ -218,6 +238,7 @@ export const runPlanningPhase = async (
     }));
     tasks = buildAgentTasks(intentSummary, explicitAgentNames);
   } else if (explicitToolNames.length > 0) {
+    const expandedToolNames = applyDiscoveryExpansion(explicitToolNames);
     env.observability.emit(engineEventFromContext(state.context, {
       timestamp: Date.now(),
       phase: "planning",
@@ -225,13 +246,14 @@ export const runPlanningPhase = async (
       payload: {
         decision: "tool-use",
         toolCount: candidateTools.length,
-        selectedToolNames: explicitToolNames,
+        selectedToolNames: expandedToolNames,
         intent: intentSummary,
         reason: "explicit-tool-mention",
       },
     }));
-    tasks = [buildToolUseTask(intentSummary, explicitToolNames)];
+    tasks = [buildToolUseTask(intentSummary, expandedToolNames)];
   } else if (includeToolNames.length > 0) {
+    const expandedToolNames = applyDiscoveryExpansion(includeToolNames);
     env.observability.emit(engineEventFromContext(state.context, {
       timestamp: Date.now(),
       phase: "planning",
@@ -239,12 +261,12 @@ export const runPlanningPhase = async (
       payload: {
         decision: "tool-use",
         toolCount: candidateTools.length,
-        selectedToolNames: includeToolNames,
+        selectedToolNames: expandedToolNames,
         intent: intentSummary,
         reason: "intent-turn-policy-include",
       },
     }));
-    tasks = [buildToolUseTask(intentSummary, includeToolNames)];
+    tasks = [buildToolUseTask(intentSummary, expandedToolNames)];
   } else if (state.intent.complexity === "simple") {
     tasks = [buildDirectAnswerTask(intentSummary, false)];
   } else {

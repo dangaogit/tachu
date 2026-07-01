@@ -205,6 +205,79 @@ describe("runPlanningPhase (Phase 5 — Task Planning, 路由)", () => {
     expect(decisionEvent).toBeDefined();
   });
 
+ test("includeTools + discoveryExpansion → tool-use 收到同域兄弟工具（pinned 排前）", async () => {
+    const { env } = buildEnv({
+      toolNames: ["query_database", "search_ontology", "list_databases", "unrelated"],
+    });
+    env.config.runtime.toolActivation = {
+      discoveryExpansion: {
+        enabled: true,
+        siblings: {
+          query_database: ["search_ontology", "list_databases"],
+        },
+      },
+    };
+    const state = buildPrecheckState("去年报警数据汇总", {
+      intent: "汇总去年报警数据",
+      complexity: "complex",
+      contextRelevance: "related",
+    });
+    state.input.metadata = {
+      ...state.input.metadata,
+      turnPolicy: {
+        excludeTools: [],
+        includeTools: ["query_database"],
+        explicitSkills: [],
+        excludeSkills: [],
+        pinSkills: [],
+        visualization: "",
+      },
+    };
+    const { planning } = await runPlanningPhase(state, env);
+    const task = planning.plans[0]?.tasks?.[0];
+    expect(task?.ref).toBe("tool-use");
+    const toolNames = (task?.input as { toolNames?: string[] }).toolNames ?? [];
+ // 被 pin 的动作工具排在最前，同域发现工具被一并下发，无关工具不并入
+    expect(toolNames[0]).toBe("query_database");
+    expect(toolNames).toContain("search_ontology");
+    expect(toolNames).toContain("list_databases");
+    expect(toolNames).not.toContain("unrelated");
+  });
+
+ test("discoveryExpansion.excludeTools 命中的兄弟不并入", async () => {
+    const { env } = buildEnv({
+      toolNames: ["query_database", "search_ontology", "list_databases"],
+    });
+    env.config.runtime.toolActivation = {
+      discoveryExpansion: {
+        enabled: true,
+        siblings: { query_database: ["search_ontology", "list_databases"] },
+      },
+    };
+    const state = buildPrecheckState("去年报警数据汇总", {
+      intent: "汇总去年报警数据",
+      complexity: "complex",
+      contextRelevance: "related",
+    });
+    state.input.metadata = {
+      ...state.input.metadata,
+      turnPolicy: {
+        excludeTools: ["list_databases"],
+        includeTools: ["query_database"],
+        explicitSkills: [],
+        excludeSkills: [],
+        pinSkills: [],
+        visualization: "",
+      },
+    };
+    const { planning } = await runPlanningPhase(state, env);
+    const toolNames =
+      (planning.plans[0]?.tasks?.[0]?.input as { toolNames?: string[] }).toolNames ?? [];
+    expect(toolNames).toContain("query_database");
+    expect(toolNames).toContain("search_ontology");
+    expect(toolNames).not.toContain("list_databases");
+  });
+
  test("explicit tool mention overrides includeTools routing", async () => {
     const { env, events } = buildEnv({ toolNames: ["image.qwen", "currentDate"] });
     const state = buildPrecheckState("使用 image.qwen 工具画一只猫", {

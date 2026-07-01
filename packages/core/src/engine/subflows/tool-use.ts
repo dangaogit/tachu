@@ -219,6 +219,18 @@ const TOOL_USE_SYSTEM_PROMPT_BASE = `You are the agentic tool-loop sub-flow of t
 Respond in the same language as the latest user message; default to English when ambiguous.`;
 
 /**
+ * 失败恢复护栏注入的默认纠错提示（domain 无关）。
+ *
+ * 触发时机：本轮「有过工具失败且零成功结果」，模型却给出 terminal（放弃/编造）。
+ * 作为 `system` 角色注入（外部 wrapper，对弱模型的自我修复最有效），要点：
+ * 1. 不点名任何具体工具（保持 domain 无关）
+ * 2. 明确「若因标识符/参数未知失败，先调用发现/列举类工具」
+ * 3. 明确「禁止重复刚才失败的同一调用」
+ * 4. 明确「有成功结果或穷尽发现工具后才可停」
+ */
+const FAILURE_RECOVERY_PROMPT = `The previous tool call(s) failed and no tool has returned a usable result yet. Do NOT give up or fabricate an answer. If the failure was caused by an unknown identifier, name, or argument (for example a table/view/field/resource that may not exist), first call a discovery or listing tool to find the correct value, then retry with corrected arguments. Do not repeat the exact same failed call. Only stop and give a final answer once you have at least one successful tool result, or you have genuinely exhausted the available discovery tools.`;
+
+/**
  * 动态构建 tool-use system prompt。
  *
  * 若 config 注入了业务补充指令（`config.toolUse.systemPromptSuffix`），追加在 core prompt 之后。
@@ -318,7 +330,13 @@ const buildTurnPolicyTailNote = (policy: TurnPolicy | undefined): string | null 
     policy.visualization.length > 0;
   if (!active) return null;
   const visualization = policy.visualization.length > 0 ? policy.visualization : "none";
-  return `Turn policy: visualization=${visualization}. Excluded tools must not be called. Pinned skills define output format for the final answer.`;
+  let note = `Turn policy: visualization=${visualization}. Excluded tools must not be called. Pinned skills define output format for the final answer.`;
+ // Change 3：pin 了偏好工具时，补一句发现指引，引导「标识符未知即失败」的场景先去列举/发现，
+ // 而非盲猜或放弃。仅在 includeTools 非空时追加，避免污染无偏好工具的普通轮次。
+  if (policy.includeTools.length > 0) {
+    note += ` If a preferred tool fails because an identifier or argument is unknown, first use a discovery or listing tool to confirm the correct value before continuing.`;
+  }
+  return note;
 };
 
 const appendTurnPolicyTail = (messages: Message[], policy: TurnPolicy | undefined): Message[] => {
@@ -1172,11 +1190,12 @@ const executeToolCallsBatch = async (
 
 const resolveToolLoopLimits = (
   config: EngineConfig,
-): { maxSteps: number; parallelism: number } => {
+): { maxSteps: number; parallelism: number; failureRecoveryRetries: number } => {
   const toolLoop = config.runtime.toolLoop ?? {};
   return {
     maxSteps: toolLoop.maxSteps ?? 25,
     parallelism: toolLoop.parallelism ?? 4,
+    failureRecoveryRetries: toolLoop.failureRecoveryRetries ?? 1,
   };
 };
 
@@ -1447,7 +1466,7 @@ export const executeToolUse = async (
     throw new Error("tool-use 缺少必填字段 input.prompt");
   }
 
-  const { maxSteps, parallelism } = resolveToolLoopLimits(ctx.config);
+  const { maxSteps, parallelism, failureRecoveryRetries } = resolveToolLoopLimits(ctx.config);
   const route = resolveToolUseRoute(input, ctx);
   const adapter = ctx.providers.get(route.provider);
   if (!adapter) {
@@ -1482,6 +1501,12 @@ export const executeToolUse = async (
 
   const steps: ToolUseResultStep[] = [];
   const observations: ToolUseObservation[] = [];
+ // 失败恢复护栏累积状态：本轮是否出现过（非 approval-denied 的）工具失败、
+ // 是否有过任何成功工具结果、以及已注入的强制恢复次数。
+  let hadToolFailure = false;
+  let hadToolSuccess = false;
+  let recoveryInjections = 0;
+  const failedToolNames: string[] = [];
   const emitStepEnd = (payload: {
     step: number;
     stepId: string;
@@ -1809,6 +1834,47 @@ export const executeToolUse = async (
       });
 
       if (finishReason !== "tool_calls" || toolCalls.length === 0) {
+ // 失败恢复护栏：模型在「有过工具失败且零成功结果」时给出 terminal（放弃/编造），
+ // 注入一条 system 纠错提示并强制再走一步，而非直接收下这份放弃稿。
+ // 计入 maxSteps（自然被外层 for 上限约束），且至多注入 failureRecoveryRetries 次。
+ // 覆盖非空 / 空 terminal 两种情况；对 sub-agent 同样生效（loop 共享）。
+        if (
+          hadToolFailure &&
+          !hadToolSuccess &&
+          recoveryInjections < failureRecoveryRetries
+        ) {
+          recoveryInjections += 1;
+          const configuredPrompt = ctx.config.toolUse?.failureRecoveryPrompt;
+          const recoveryPrompt =
+            typeof configuredPrompt === "string" && configuredPrompt.trim().length > 0
+              ? configuredPrompt
+              : FAILURE_RECOVERY_PROMPT;
+ // premature draft 记入 steps 保留 telemetry，再注入纠错提示驱动下一步。
+          steps.push({ step, modelNotes: content, toolCalls: [] });
+          conversation.push({ role: "system", content: recoveryPrompt });
+          ctx.observability.emit(
+            engineEventFromContext(ctx.executionContext, {
+              timestamp: Date.now(),
+              phase: "tool-use",
+              type: "tool_loop_failure_recovery_injected",
+              payload: {
+                step,
+                stepId,
+                injection: recoveryInjections,
+                failedTools: [...failedToolNames],
+                ...(ctx.agentRunId !== undefined ? { agentRunId: ctx.agentRunId } : {}),
+              },
+            }),
+          );
+          emitStepEnd({
+            step,
+            stepId,
+            success: false,
+            reason: "failure-recovery-injected",
+            stopReason: finishReason,
+          });
+          continue;
+        }
         const terminalStep: ToolUseResultStep = {
           step,
           modelNotes: content,
@@ -1877,6 +1943,14 @@ export const executeToolUse = async (
         toolCalls: stepToolCalls,
       });
       for (const item of batch) {
+ // 失败恢复统计：approval-denied 是用户主动决定，不算「标识符未知」类失败，
+ // 不应触发「去调发现工具」的强制恢复。
+        if (item.success) {
+          hadToolSuccess = true;
+        } else if (item.error?.code !== "TOOL_LOOP_APPROVAL_DENIED") {
+          hadToolFailure = true;
+          failedToolNames.push(item.call.name);
+        }
         observations.push(toObservation(item));
         conversation.push({
           role: "tool",
@@ -1928,6 +2002,7 @@ export const TOOL_USE_CONSTANTS = {
   SYSTEM_PROMPT_BASE: TOOL_USE_SYSTEM_PROMPT_BASE,
   HISTORY_LIMIT: TOOL_USE_HISTORY_LIMIT,
   MAX_TOOL_OUTPUT_CHARS,
+  FAILURE_RECOVERY_PROMPT,
 } as const;
 
 export const __testing = {

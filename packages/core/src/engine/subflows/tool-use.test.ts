@@ -844,7 +844,8 @@ describe("executeToolUse ( Agentic Loop)", () => {
       },
     ]);
     const ctx = buildCtx({
-      config: baseConfig(),
+ // 本用例专测「错误回喂 tool message、不中断循环」，与失败恢复护栏正交：关掉护栏隔离原意。
+      config: baseConfig({ failureRecoveryRetries: 0 }),
       provider: adapter,
       toolSet: [{ name: "list-dir" }],
       taskExecutor: async () => {
@@ -888,7 +889,8 @@ describe("executeToolUse ( Agentic Loop)", () => {
       },
     ]);
     const ctx = buildCtx({
-      config: baseConfig(),
+ // 本用例专测「工具抛错 → 错误进 tool message、不中断循环」，关掉失败恢复护栏隔离原意。
+      config: baseConfig({ failureRecoveryRetries: 0 }),
       provider: adapter,
       toolSet: [{ name: "list-dir" }],
       taskExecutor: async () => {
@@ -903,6 +905,142 @@ describe("executeToolUse ( Agentic Loop)", () => {
     expect(typeof toolMessage?.content === "string" && toolMessage.content).toContain(
       "disk is full",
     );
+  });
+
+ test("失败后放弃 → 注入 system 纠错提示并强制再走一步（默认 failureRecoveryRetries=1）", async () => {
+    const { adapter, calls } = createScriptedProvider([
+      {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{ id: "c-1", name: "query-db", arguments: { sql: "select 1" } }],
+        usage: noopUsage,
+      },
+ // 弱模型：首个工具失败后直接产出 terminal 文本放弃
+      { content: "抱歉，我无法找到相关数据。", finishReason: "stop", usage: noopUsage },
+ // 被强制的恢复步：这次给出真正答案
+      { content: "已找到并汇总。", finishReason: "stop", usage: noopUsage },
+    ]);
+    const ctx = buildCtx({
+      config: baseConfig({ maxSteps: 5 }),
+      provider: adapter,
+      toolSet: [{ name: "query-db" }],
+      taskExecutor: async () => {
+        throw new Error("table not found");
+      },
+    });
+
+    const result = await executeToolUse({ prompt: "去年报警数据汇总" }, ctx);
+ // 拦截了 premature terminal，强制走了第 3 步（而非在第 2 步收下放弃）
+    expect(calls.length).toBe(3);
+ // 纠错提示以 system 角色注入，且第 3 步能看到
+    const step3Systems = (calls[2]?.messages ?? [])
+      .filter((m) => m.role === "system")
+      .map((m) => (typeof m.content === "string" ? m.content : ""));
+    expect(step3Systems).toContain(TOOL_USE_CONSTANTS.FAILURE_RECOVERY_PROMPT);
+ // 最终 draft 来自恢复步
+    expectTerminalDraft(result, "已找到并汇总。");
+  });
+
+ test("failureRecoveryRetries=0 → 失败后 terminal 直接收下（回退现状，不强制再走一步）", async () => {
+    const { adapter, calls } = createScriptedProvider([
+      {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{ id: "c-1", name: "query-db", arguments: {} }],
+        usage: noopUsage,
+      },
+      { content: "抱歉，我无法找到相关数据。", finishReason: "stop", usage: noopUsage },
+    ]);
+    const ctx = buildCtx({
+      config: baseConfig({ maxSteps: 5, failureRecoveryRetries: 0 }),
+      provider: adapter,
+      toolSet: [{ name: "query-db" }],
+      taskExecutor: async () => {
+        throw new Error("table not found");
+      },
+    });
+
+    const result = await executeToolUse({ prompt: "x" }, ctx);
+    expect(calls.length).toBe(2);
+    expectTerminalDraft(result, "抱歉，我无法找到相关数据。");
+  });
+
+ test("仅 approval-denied 失败 → 不触发失败恢复（用户主动拒绝≠标识符未知）", async () => {
+    const { adapter, calls } = createScriptedProvider([
+      {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{ id: "c-1", name: "dangerous", arguments: {} }],
+        usage: noopUsage,
+      },
+      { content: "已按你的要求放弃该操作。", finishReason: "stop", usage: noopUsage },
+    ]);
+    const ctx = buildCtx({
+      config: baseConfig({ maxSteps: 5 }),
+      provider: adapter,
+      toolSet: [{ name: "dangerous", requiresApproval: true, sideEffect: "irreversible" }],
+      taskExecutor: async () => {
+        throw new Error("被拒绝的工具不应进入 taskExecutor");
+      },
+    });
+    ctx.onBeforeToolCall = async () => ({ type: "deny", reason: "该操作过于危险" });
+
+    const result = await executeToolUse({ prompt: "x" }, ctx);
+ // approval-denied 不计入 hadToolFailure → 不强制第 3 步
+    expect(calls.length).toBe(2);
+    expectTerminalDraft(result, "已按你的要求放弃该操作。");
+  });
+
+ test("turn-policy tail note：includeTools 非空时追加发现指引", async () => {
+    const { adapter, calls } = createScriptedProvider([
+      { content: "done.", finishReason: "stop", usage: noopUsage },
+    ]);
+    const ctx = buildCtx({
+      config: baseConfig(),
+      provider: adapter,
+      toolSet: [{ name: "query-db" }],
+      taskExecutor: async () => ok({}),
+    });
+    ctx.turnPolicy = {
+      excludeTools: [],
+      includeTools: ["query-db"],
+      explicitSkills: [],
+      excludeSkills: [],
+      pinSkills: [],
+      visualization: "",
+    };
+    await executeToolUse({ prompt: "x" }, ctx);
+    const systems = (calls[0]?.messages ?? [])
+      .filter((m) => m.role === "system")
+      .map((m) => (typeof m.content === "string" ? m.content : ""));
+    expect(systems.some((c) => c.includes("discovery or listing tool"))).toBe(true);
+  });
+
+ test("turn-policy tail note：includeTools 为空时不追加发现指引（条件式）", async () => {
+    const { adapter, calls } = createScriptedProvider([
+      { content: "done.", finishReason: "stop", usage: noopUsage },
+    ]);
+    const ctx = buildCtx({
+      config: baseConfig(),
+      provider: adapter,
+      toolSet: [{ name: "query-db" }],
+      taskExecutor: async () => ok({}),
+    });
+    ctx.turnPolicy = {
+      excludeTools: [],
+      includeTools: [],
+      explicitSkills: [],
+      excludeSkills: [],
+      pinSkills: [],
+      visualization: "chart",
+    };
+    await executeToolUse({ prompt: "x" }, ctx);
+    const systems = (calls[0]?.messages ?? [])
+      .filter((m) => m.role === "system")
+      .map((m) => (typeof m.content === "string" ? m.content : ""));
+ // tail note 仍在（visualization 触发），但不含发现指引
+    expect(systems.some((c) => c.includes("Turn policy:"))).toBe(true);
+    expect(systems.some((c) => c.includes("discovery or listing tool"))).toBe(false);
   });
 
  test("超过 maxSteps 且已有观察结果 → 返回 exhausted 结构化结果", async () => {

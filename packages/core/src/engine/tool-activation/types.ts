@@ -1,4 +1,5 @@
 import type { ObservabilityEmitter } from "../../modules/observability";
+import type { DiscoveryExpansionConfig } from "../../types/config";
 import type { ToolDescriptor } from "../../types/descriptor";
 import type { TurnPolicy } from "../../types/turn-policy";
 import type { SemanticRetrievalFacade } from "../../semantic-retrieval";
@@ -30,6 +31,11 @@ export interface ToolActivationContext {
   disableAllStrategies?: boolean;
  /** Turn-level include/exclude manifest from intent. */
   turnPolicy?: TurnPolicy;
+ /**
+  * 发现工具展开配置（Change 1）。启用时把 promoted 工具的同域兄弟以低优候选补入
+  * `visibleTools`，与 planning 的 `toolNames` 展开保持一致（观测/路由一致性）。
+  */
+  discoveryExpansion?: DiscoveryExpansionConfig;
 }
 
 export interface ToolCandidateStrategy {

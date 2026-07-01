@@ -1,4 +1,5 @@
 import type { ToolDescriptor } from "../../types/descriptor";
+import { expandDiscoverySiblings } from "./discovery-expansion";
 import type {
   ToolActivationResult,
   ToolActivationContext,
@@ -182,6 +183,28 @@ export class DefaultToolActivator implements ToolActivator {
     ];
 
     const fallbackUsed = topKItems.length > 0;
+
+ // 发现工具展开（Change 1）：把 promoted 工具的同域兄弟以低优候选补入 visibleTools，
+ // 与 planning 对 toolNames 的展开保持一致（观测/路由一致性）。默认 / 未启用时为 no-op。
+    if (ctx.discoveryExpansion?.enabled === true) {
+      const universe = new Set(toolByName.keys());
+      const excludeSet = new Set<string>(ctx.turnPolicy?.excludeTools ?? []);
+      const expanded = expandDiscoverySiblings(
+        promoted.map((p) => p.toolName),
+        ctx.discoveryExpansion,
+        universe,
+        excludeSet,
+      );
+      const alreadyVisible = new Set(visibleTools.map((t) => t.name));
+      for (const name of expanded) {
+        if (alreadyVisible.has(name)) continue;
+        const tool = toolByName.get(name);
+        if (!tool) continue;
+        visibleTools.push(tool);
+        matchedToolNames.push(name);
+        alreadyVisible.add(name);
+      }
+    }
 
     ctx.observability.emit({
       timestamp: Date.now(),

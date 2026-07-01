@@ -39,7 +39,8 @@ export type EventType =
   | "warning"
   | "error"
   | "tool_loop_step_start"
-  | "tool_loop_step_end";
+  | "tool_loop_step_end"
+  | "tool_loop_failure_recovery_injected";
 
 /**
  * 引擎事件结构。

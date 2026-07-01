@@ -195,6 +195,58 @@ describe("validateEngineConfig", () => {
     expect(withUndef.runtime.toolLoop?.parallelism).toBe(4);
   });
 
+ test("runtime.toolLoop.failureRecoveryRetries: 默认 1，可覆盖为 0", () => {
+    const def = validateEngineConfig({});
+    expect(def.runtime.toolLoop?.failureRecoveryRetries).toBe(1);
+    const overridden = validateEngineConfig({
+      runtime: { toolLoop: { failureRecoveryRetries: 0 } },
+    });
+    expect(overridden.runtime.toolLoop?.failureRecoveryRetries).toBe(0);
+  });
+
+ test("runtime.toolLoop.failureRecoveryRetries: 越界抛 ValidationError", () => {
+    expect(() =>
+      validateEngineConfig({ runtime: { toolLoop: { failureRecoveryRetries: 99 } } }),
+    ).toThrow(ValidationError);
+    expect(() =>
+      validateEngineConfig({ runtime: { toolLoop: { failureRecoveryRetries: -1 } } }),
+    ).toThrow(ValidationError);
+  });
+
+ test("runtime.toolActivation.discoveryExpansion: 未指定时缺省（向后兼容）", () => {
+    const config = validateEngineConfig({});
+    expect(config.runtime.toolActivation).toBeUndefined();
+  });
+
+ test("runtime.toolActivation.discoveryExpansion: 全字段回填", () => {
+    const config = validateEngineConfig({
+      runtime: {
+        toolActivation: {
+          discoveryExpansion: {
+            enabled: true,
+            siblings: { query_database: ["search_ontology", "list_databases"] },
+            groupByNamespacePrefix: true,
+            maxTools: 12,
+          },
+        },
+      },
+    });
+    const exp = config.runtime.toolActivation?.discoveryExpansion;
+    expect(exp?.enabled).toBe(true);
+    expect(exp?.siblings).toEqual({
+      query_database: ["search_ontology", "list_databases"],
+    });
+    expect(exp?.groupByNamespacePrefix).toBe(true);
+    expect(exp?.maxTools).toBe(12);
+  });
+
+ test("toolUse.failureRecoveryPrompt: 显式配置被保留", () => {
+    const config = validateEngineConfig({
+      toolUse: { failureRecoveryPrompt: "自定义纠错提示" },
+    });
+    expect(config.toolUse?.failureRecoveryPrompt).toBe("自定义纠错提示");
+  });
+
  test("runtime.toolLoop.shortTaskRoute: 未指定时字段缺省（向后兼容）", () => {
     const config = validateEngineConfig({});
     expect(config.runtime.toolLoop?.shortTaskRoute).toBeUndefined();

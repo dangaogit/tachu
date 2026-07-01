@@ -71,3 +71,5 @@ reports
 .tachu/approvals.jsonl
 .review_*
 .pr/
+
+.codegraph/

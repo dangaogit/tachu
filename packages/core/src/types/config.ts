@@ -214,9 +214,42 @@ export interface ToolLoopConfig {
     capability?: string;
  /** 命中条件：`input.toolNames` 数量上限（含）。默认 `1`。 */
     maxToolNames?: number;
- /** 命中条件：`input.prompt` 字符长度上限（含）。默认 `120`。 */
+    /** 命中条件：`input.prompt` 字符长度上限（含）。默认 `120`。 */
     maxPromptChars?: number;
   };
+  /**
+   * 失败恢复护栏：当某步是 terminal（模型停止且无 toolCalls）、但本轮
+   * 「有过工具失败且零成功结果」时，向对话注入一条 system 纠错提示并**强制再走一步**，
+   * 而非直接收下终稿。用于框住弱模型「首次工具失败即放弃」的行为。
+   *
+   * 语义：至多注入 `failureRecoveryRetries` 次，且每次强制步都计入 `maxSteps`，防死循环。
+   * `TOOL_LOOP_APPROVAL_DENIED`（用户主动拒绝）不计入触发失败。
+   *
+   * 默认 `1`；设为 `0` 时行为完全回退到「terminal 即终止」的历史语义。
+   */
+  failureRecoveryRetries?: number;
+}
+
+/**
+ * 发现工具展开（domain 无关）。
+ *
+ * 动机：意图路由只 `pin` 一个「动作类」工具（如查库工具）时，同域的「发现/列举类」
+ * 工具会被饿掉，弱模型只能盲猜标识符。此配置让「pin 一个成员」时把同域兄弟工具
+ * 一并纳入本轮下发给模型的工具集。tachu 只消费此表，不理解任何 domain 概念。
+ *
+ * 展开语义（有向、单跳、不递归）：对每个 pinned 工具名 `t`，并入 `siblings[t]`；
+ * `groupByNamespacePrefix` 开启时额外并入与 `t` 同命名空间前缀（最后一个 `.`/`__`
+ * 之前的串）的已注册工具。结果 dedup 后 ∩ 已注册集 \ `excludeTools`，pinned 排前。
+ */
+export interface DiscoveryExpansionConfig {
+  /** 是否启用展开。默认 `false` → 完全等价现状。 */
+  enabled?: boolean;
+  /** 工具名 → 需一并激活的兄弟工具名列表（键与值均为最终可见的工具名）。 */
+  siblings?: Record<string, string[]>;
+  /** 是否把「同命名空间前缀」的已注册工具视作兄弟。默认 `false`。 */
+  groupByNamespacePrefix?: boolean;
+  /** 展开后工具名上限。默认 `20`；超出保留全部 pinned + 依序截断兄弟。 */
+  maxTools?: number;
 }
 
 /**
@@ -239,6 +272,14 @@ export interface EngineConfig {
  * 默认值；可通过 `tachu.config.ts` 按项目覆盖。
  */
     toolLoop?: ToolLoopConfig;
+ /**
+ * 工具激活相关配置（planning 阶段消费）。
+ *
+ * 目前仅含 `discoveryExpansion`（发现工具展开）；省略时不改变现有激活行为。
+ */
+    toolActivation?: {
+      discoveryExpansion?: DiscoveryExpansionConfig;
+    };
  /**
  * 为 `true` 时，`direct-answer` 子流程优先走 Provider `chatStream`（底层 `stream=true`），
  * 并通过 `StreamChunk.delta` 向宿主推送正文分片（需 Engine 注入 `onAssistantDelta`）。
@@ -534,11 +575,16 @@ export interface EngineConfig {
  * 典型用途：编码 Agent 的 workflow 指南、特定领域的工具使用惯例。
  */
     systemPromptSuffix?: string;
- /**
- * 替换 tool-use final-answer 阶段的 `TOOL_USE_FINAL_ANSWER_SYSTEM_PROMPT`；
- * Active Skills / chart 规则仍由 core 动态追加。
- */
+    /**
+     * 替换 tool-use final-answer 阶段的 `TOOL_USE_FINAL_ANSWER_SYSTEM_PROMPT`；
+     * Active Skills / chart 规则仍由 core 动态追加。
+     */
     finalAnswerSystemPromptBase?: string;
+    /**
+     * 替换失败恢复护栏注入的纠错提示（`TOOL_USE_CONSTANTS.FAILURE_RECOVERY_PROMPT`）。
+     * 用于 cube 侧本地化或领域化措辞；未设则用 core 内置英文默认。
+     */
+    failureRecoveryPrompt?: string;
   };
  /**
  * direct-answer sub-flow 可扩展配置。

@@ -143,6 +143,31 @@ describe("DefaultToolActivator", () => {
     expect(result.visibleTools.map((t) => t.name)).toContain("c");
   });
 
+  it("discoveryExpansion: promoted 工具的同域兄弟以低优候选补入 visibleTools", async () => {
+    const tools = [
+      makeTool("query_database"),
+      makeTool("search_ontology"),
+      makeTool("list_databases"),
+      makeTool("unrelated"),
+    ];
+ // 仅 promote query_database；兄弟不由任何 strategy 贡献 → 只能靠 discoveryExpansion 补入
+    const strategy = makeStrategy("intent", [
+      { toolName: "query_database", score: 1, reason: "pinned", promote: { reason: "include" } },
+    ]);
+    const { ctx, activator } = makeCtx(tools, [strategy]);
+    ctx.discoveryExpansion = {
+      enabled: true,
+      siblings: { query_database: ["search_ontology", "list_databases"] },
+    };
+
+    const result = await activator.activate(ctx);
+    const names = result.visibleTools.map((t) => t.name);
+    expect(names[0]).toBe("query_database"); // promoted 仍排在最前
+    expect(names).toContain("search_ontology");
+    expect(names).toContain("list_databases");
+    expect(names).not.toContain("unrelated");
+  });
+
   it("topK clipping: non-promoted candidates capped at topK", async () => {
     const tools = [makeTool("a"), makeTool("b"), makeTool("c"), makeTool("d"), makeTool("e")];
     const strategy = makeStrategy("keyword", [

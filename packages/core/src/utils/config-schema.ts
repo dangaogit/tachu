@@ -1,5 +1,6 @@
 import { ValidationError } from "../errors";
 import type {
+  DiscoveryExpansionConfig,
   EngineConfig,
   McpServerConfig,
   McpServersConfig,
@@ -23,6 +24,7 @@ const DEFAULT_CONFIG: EngineConfig = {
       maxSteps: 25,
       parallelism: 4,
       requireApprovalGlobal: false,
+      failureRecoveryRetries: 1,
     },
     streamingOutput: true,
     skillBudget: 0.8,
@@ -497,6 +499,12 @@ export const validateEngineConfig = (raw: unknown): EngineConfig => {
             "runtime.toolLoop.requireApprovalGlobal",
             fallback.requireApprovalGlobal ?? false,
           ),
+          failureRecoveryRetries: asNumber(
+            raw.failureRecoveryRetries,
+            "runtime.toolLoop.failureRecoveryRetries",
+            fallback.failureRecoveryRetries ?? 1,
+            { min: 0, max: 5 },
+          ),
         };
         if (raw.shortTaskRoute !== undefined && raw.shortTaskRoute !== null) {
           const shortRaw = asRecord(raw.shortTaskRoute, "runtime.toolLoop.shortTaskRoute");
@@ -630,6 +638,59 @@ export const validateEngineConfig = (raw: unknown): EngineConfig => {
                 };
               }
               return { byPhase };
+            })(),
+          }
+        : {}),
+      ...(runtime.toolActivation !== undefined && runtime.toolActivation !== null
+        ? {
+            toolActivation: (() => {
+              const rawTa = asRecord(runtime.toolActivation, "runtime.toolActivation");
+              const result: NonNullable<EngineConfig["runtime"]["toolActivation"]> = {};
+              if (
+                rawTa.discoveryExpansion !== undefined &&
+                rawTa.discoveryExpansion !== null
+              ) {
+                const de = asRecord(
+                  rawTa.discoveryExpansion,
+                  "runtime.toolActivation.discoveryExpansion",
+                );
+                const expansion: DiscoveryExpansionConfig = {
+                  enabled: asBoolean(
+                    de.enabled,
+                    "runtime.toolActivation.discoveryExpansion.enabled",
+                    false,
+                  ),
+                  groupByNamespacePrefix: asBoolean(
+                    de.groupByNamespacePrefix,
+                    "runtime.toolActivation.discoveryExpansion.groupByNamespacePrefix",
+                    false,
+                  ),
+                  maxTools: asNumber(
+                    de.maxTools,
+                    "runtime.toolActivation.discoveryExpansion.maxTools",
+                    20,
+                    { min: 1, max: 200 },
+                  ),
+                };
+                if (de.siblings !== undefined && de.siblings !== null) {
+                  const sib = asRecord(
+                    de.siblings,
+                    "runtime.toolActivation.discoveryExpansion.siblings",
+                  );
+                  const siblings: Record<string, string[]> = {};
+                  for (const [key, value] of Object.entries(sib)) {
+                    if (!Array.isArray(value) || value.some((v) => typeof v !== "string")) {
+                      throw ValidationError.invalidConfig(
+                        `runtime.toolActivation.discoveryExpansion.siblings.${key} 必须是 string[]`,
+                      );
+                    }
+                    siblings[key] = value as string[];
+                  }
+                  expansion.siblings = siblings;
+                }
+                result.discoveryExpansion = expansion;
+              }
+              return result;
             })(),
           }
         : {}),
@@ -924,6 +985,13 @@ export const validateEngineConfig = (raw: unknown): EngineConfig => {
               result.systemPromptSuffix = asString(
                 toolUseRaw.systemPromptSuffix,
                 "toolUse.systemPromptSuffix",
+                "",
+              );
+            }
+            if (toolUseRaw.failureRecoveryPrompt !== undefined) {
+              result.failureRecoveryPrompt = asString(
+                toolUseRaw.failureRecoveryPrompt,
+                "toolUse.failureRecoveryPrompt",
                 "",
               );
             }

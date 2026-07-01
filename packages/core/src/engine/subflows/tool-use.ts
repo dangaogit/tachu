@@ -477,6 +477,55 @@ const isShellAutoApproved = (
 };
 
 /**
+ * 单条 `allowed-tools` pattern 是否命中本次调用。
+ *
+ * 支持两种形态（agentskills.io / Claude Code 风格）：
+ * - 裸工具名 `"read-file"`：命中该工具的任意调用（任意参数）。
+ * - `"run-shell(<regex>)"`：仅当 `call.name === "run-shell"` 且 `arguments.command`
+ * 匹配 `<regex>` 时命中；与 `shellAutoApprovePatterns` 同一套“只匹配纯命令、
+ * 带 args 字段一律不豁免”的保守策略，避免 Skill 声明的白名单被参数注入绕过。
+ *
+ * 目前只对 `run-shell` 支持括号内的参数级模式——其余工具的参数结构各异，
+ * 没有一个通用、安全的“参数是否匹配”定义，故只支持工具级豁免。
+ */
+const isAllowedToolsPatternMatch = (pattern: string, call: ToolCallRequest): boolean => {
+  const parenIndex = pattern.indexOf("(");
+  if (parenIndex === -1) {
+    return pattern === call.name;
+  }
+  if (!pattern.endsWith(")")) return false;
+  const toolName = pattern.slice(0, parenIndex);
+  const argPattern = pattern.slice(parenIndex + 1, -1);
+  if (toolName !== "run-shell" || call.name !== "run-shell") return false;
+  const args = call.arguments as { command?: unknown; args?: unknown };
+  const command = typeof args.command === "string" ? args.command.trim() : "";
+  if (command.length === 0) return false;
+  if (Array.isArray(args.args) && args.args.length > 0) return false;
+  try {
+    return new RegExp(argPattern).test(command);
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * 判断本次工具调用是否被当前 turn 的某个 Active Skill 的 `allowed-tools`
+ * 豁免审批（Skill Tool Pre-Approval，见 CONTEXT.md）。
+ *
+ * 关键约束：只查 `activeSkills`（当前 turn 实际被激活、指令已 pin 进 T0 的技能），
+ * 不查 registry 里所有已注册技能——豁免范围严格是“当前 turn 的 Active Skill”，
+ * 不是“系统里存在这个技能”。豁免不落盘，不跨 turn，不需要宿主接入任何东西
+ * （纯 core 内决策，天然对所有 host 生效）。
+ */
+const isSkillAllowedToolsMatch = (
+  call: ToolCallRequest,
+  activeSkills: readonly { allowedTools?: readonly string[] | undefined }[],
+): boolean =>
+  activeSkills.some((skill) =>
+    (skill.allowedTools ?? []).some((pattern) => isAllowedToolsPatternMatch(pattern, call)),
+  );
+
+/**
  * 工具参数预览（截断）——用于事件里把超长 JSON 裁剪成可显示的短摘要。
  */
 const previewArguments = (args: Record<string, unknown>): string => {
@@ -845,7 +894,12 @@ const executeSingleToolCall = async (
 
     const globalApproval = ctx.config.runtime.toolLoop?.requireApprovalGlobal === true;
     const descriptorApproval = descriptor.requiresApproval === true;
-    const autoApproved = isShellAutoApproved(call, ctx.config);
+    const shellAutoApproved = isShellAutoApproved(call, ctx.config);
+    const skillAllowedToolsApproved = isSkillAllowedToolsMatch(
+      call,
+      ctx.prebuiltPrompt.activeSkills,
+    );
+    const autoApproved = shellAutoApproved || skillAllowedToolsApproved;
     if (autoApproved) {
       ctx.observability.emit(
         engineEventFromContext(ctx.executionContext, {
@@ -856,14 +910,14 @@ const executeSingleToolCall = async (
             stage: "approval-auto",
             tool: call.name,
             callId: call.id,
-            reason: "shell-auto-approve-pattern",
+            reason: shellAutoApproved ? "shell-auto-approve-pattern" : "skill-allowed-tools",
           },
         }),
       );
     }
  // 全局策略 (`requireApprovalGlobal`) 与描述符 `requiresApproval` 任一命中即需要审批；
- // 但若本次调用已被 shell 自动审批白名单覆盖，则跳过 approval 回调（用户在
- // `safety.shellAutoApprovePatterns` 里显式声明的命令视为预批准）。
+ // 但若本次调用已被 shell 自动审批白名单覆盖，或被当前 Active Skill 的
+ // `allowed-tools` 豁免，则跳过 approval 回调。
     const approvalNeeded = (descriptorApproval || globalApproval) && !autoApproved;
     if (approvalNeeded && ctx.onBeforeToolCall) {
       const triggeredBy: ToolApprovalRequest["triggeredBy"] = descriptorApproval

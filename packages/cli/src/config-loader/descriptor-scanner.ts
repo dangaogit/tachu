@@ -4,6 +4,10 @@ import { dirname, join } from "node:path";
 import matter from "gray-matter";
 import {
   DescriptorRegistry,
+  discoverSkillResources,
+  isSkillDirectoryForm,
+  requireValidDescriptorNameFormat,
+  warnOnDescriptorIdentityMismatch,
   type AnyDescriptor,
   type RuleDescriptor,
   type ToolDescriptor,
@@ -21,12 +25,24 @@ import { DescriptorScanError } from "../errors";
 const SCAFFOLDING_FILE_NAMES = new Set(["readme.md", ".gitkeep"]);
 
 /**
+ * 技能资源子目录名——递归找描述符文件时必须跳过，否则 `references/*.md`
+ * 这类技能资源文件会被误当成候选描述符扫描到：因为没有 name/description，
+ * 解析后会被判定为"无效描述符"，每次启动都打印一条误导性的
+ * "跳过无效描述符文件" 噪声 warning。与
+ * `packages/core/src/registry/loader.ts` 的 `SKILL_RESOURCE_DIR_NAMES` 保持一致。
+ */
+const SKILL_RESOURCE_DIR_NAMES = new Set(["scripts", "references", "assets"]);
+
+/**
  * 递归列举目录下所有 .md 文件。
  */
 async function listMarkdownFiles(root: string): Promise<string[]> {
   const entries = await readdir(root, { withFileTypes: true });
   const files: string[] = [];
   for (const entry of entries) {
+    if (entry.isDirectory() && SKILL_RESOURCE_DIR_NAMES.has(entry.name)) {
+      continue;
+    }
     const fullPath = join(root, entry.name);
     if (entry.isDirectory()) {
       files.push(...(await listMarkdownFiles(fullPath)));
@@ -41,13 +57,93 @@ async function listMarkdownFiles(root: string): Promise<string[]> {
   return files;
 }
 
+type DescriptorKind = "rule" | "skill" | "tool" | "agent";
+
 /**
- * 将 gray-matter 解析结果转换为 AnyDescriptor。
+ * 与 parseDescriptor 内部四类分支条件保持一致，仅用于在分支前先确定 kind，
+ * 以便统一做 name 格式校验 / identity 一致性提示。
  */
-function parseDescriptor(data: Record<string, unknown>, content: string): AnyDescriptor | null {
+function resolveDescriptorKind(data: Record<string, unknown>): DescriptorKind {
   const kind = typeof data.kind === "string" ? data.kind : undefined;
   const type = typeof data.type === "string" ? data.type : undefined;
+  if (kind === "rule" || type === "rule" || type === "preference") {
+    return "rule";
+  }
+  if (kind === "tool" || "execute" in data || "inputSchema" in data) {
+    return "tool";
+  }
+  if (kind === "agent" || "instructions" in data || "maxDepth" in data) {
+    return "agent";
+  }
+  return "skill";
+}
 
+/**
+ * 解析 `allowed-tools` frontmatter 字段。值可能是：
+ * - 空格分隔的字符串（模式内部可能带括号内的空格，如 `run-shell(python3 *)`，
+ *   按括号深度分词，不能简单按空白切分）
+ * - YAML 字符串数组
+ *
+ * 两者都不存在（或结果为空）时返回 undefined，不设置该字段。
+ */
+function parseAllowedTools(raw: unknown): string[] | undefined {
+  if (Array.isArray(raw)) {
+    const filtered = raw.filter((item): item is string => typeof item === "string");
+    return filtered.length > 0 ? filtered : undefined;
+  }
+  if (typeof raw === "string") {
+    const tokens: string[] = [];
+    let current = "";
+    let depth = 0;
+    for (const ch of raw) {
+      if (ch === "(") depth += 1;
+      if (ch === ")") depth = Math.max(0, depth - 1);
+      if (/\s/.test(ch) && depth === 0) {
+        if (current.length > 0) {
+          tokens.push(current);
+          current = "";
+        }
+        continue;
+      }
+      current += ch;
+    }
+    if (current.length > 0) {
+      tokens.push(current);
+    }
+    return tokens.length > 0 ? tokens : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * 解析 `metadata` frontmatter 字段，过滤掉非字符串 value。
+ */
+function parseMetadata(raw: unknown): Record<string, string> | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return undefined;
+  }
+  const entries = Object.entries(raw as Record<string, unknown>).filter(
+    ([, value]) => typeof value === "string",
+  ) as [string, string][];
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+}
+
+/**
+ * 将 gray-matter 解析结果转换为 AnyDescriptor。
+ *
+ * `sourceFile` 是描述符文件的绝对路径，用于：
+ * - name 格式硬校验（`requireValidDescriptorNameFormat`，不合规抛 `ValidationError`）
+ * - name 与目录名/文件名一致性软提示（`warnOnDescriptorIdentityMismatch`，只 warn）
+ * - skill 分支判断是否为 `SKILL.md` 目录形态（`isSkillDirectoryForm`），
+ *   若是则扫描同目录下的 `scripts/` `references/` `assets/` 生成 `resources`；
+ *   扁平命名的技能文件（如 `foo.md`）不做目录扫描——那样会扫到 `.tachu/skills/`
+ *   这个所有技能共享的父目录，语义是错的。
+ */
+async function parseDescriptor(
+  data: Record<string, unknown>,
+  content: string,
+  sourceFile: string,
+): Promise<AnyDescriptor | null> {
   const name = typeof data.name === "string" && data.name.length > 0 ? data.name : null;
   const description = typeof data.description === "string" && data.description.length > 0
     ? data.description
@@ -55,6 +151,10 @@ function parseDescriptor(data: Record<string, unknown>, content: string): AnyDes
   if (!name || !description) {
     return null;
   }
+
+  const resolvedKind = resolveDescriptorKind(data);
+  requireValidDescriptorNameFormat(name, sourceFile);
+  warnOnDescriptorIdentityMismatch(resolvedKind, name, sourceFile);
 
   const base = {
     name,
@@ -71,7 +171,8 @@ function parseDescriptor(data: Record<string, unknown>, content: string): AnyDes
       : undefined,
   };
 
-  if (kind === "rule" || type === "rule" || type === "preference") {
+  if (resolvedKind === "rule") {
+    const type = typeof data.type === "string" ? data.type : undefined;
     const descriptor: RuleDescriptor = {
       ...base,
       kind: "rule",
@@ -84,7 +185,7 @@ function parseDescriptor(data: Record<string, unknown>, content: string): AnyDes
     return descriptor;
   }
 
-  if (kind === "tool" || "execute" in data || "inputSchema" in data) {
+  if (resolvedKind === "tool") {
     const execute = typeof data.execute === "string" ? data.execute : name;
     const descriptor: ToolDescriptor = {
       ...base,
@@ -105,7 +206,7 @@ function parseDescriptor(data: Record<string, unknown>, content: string): AnyDes
     return descriptor;
   }
 
-  if (kind === "agent" || "instructions" in data || "maxDepth" in data) {
+  if (resolvedKind === "agent") {
     const descriptor: AgentDescriptor = {
       ...base,
       kind: "agent",
@@ -125,13 +226,19 @@ function parseDescriptor(data: Record<string, unknown>, content: string): AnyDes
     return descriptor;
   }
 
+  const resources = isSkillDirectoryForm(sourceFile)
+    ? await discoverSkillResources(dirname(sourceFile))
+    : undefined;
+
   const descriptor: SkillDescriptor = {
     ...base,
     kind: "skill",
     instructions: content,
-    resources: Array.isArray(data.resources)
-      ? (data.resources as SkillDescriptor["resources"])
-      : undefined,
+    resources,
+    license: typeof data.license === "string" ? data.license : undefined,
+    compatibility: typeof data.compatibility === "string" ? data.compatibility : undefined,
+    metadata: parseMetadata(data.metadata),
+    allowedTools: parseAllowedTools(data["allowed-tools"]),
   };
   return descriptor;
 }
@@ -210,9 +317,10 @@ export async function scanDescriptors(
         try {
           const raw = await readFile(file, "utf8");
           const parsed = matter(raw);
-          const descriptor = parseDescriptor(
+          const descriptor = await parseDescriptor(
             parsed.data as Record<string, unknown>,
             parsed.content.trim(),
+            file,
           );
           if (descriptor) {
             await registerOne(descriptor, file);
@@ -239,15 +347,21 @@ export async function scanDescriptors(
           try {
             const raw = await readFile(file, "utf8");
             const parsed = matter(raw);
-            const descriptor = parseDescriptor(
+            const descriptor = await parseDescriptor(
               parsed.data as Record<string, unknown>,
               parsed.content.trim(),
+              file,
             );
             if (descriptor) {
               await registerOne(descriptor, `builtin:rules`);
+            } else {
+              console.warn(`[tachu] 跳过无效内置描述符文件：${file}`);
             }
-          } catch {
- // 忽略单个内置 rule 解析失败
+          } catch (err) {
+ // 内置描述符校验失败（如 name 格式不合法）只 warn 并跳过该条：
+ // 内置描述符不受用户控制，不应因为单条历史遗留问题让整个启动流程崩溃，
+ // 也不应吞掉用户描述符的加载（用户目录的扫描在此之前已经独立完成）。
+            console.warn(`[tachu] 跳过无效内置描述符文件 ${file}：${err}`);
           }
         }
       } catch (err) {

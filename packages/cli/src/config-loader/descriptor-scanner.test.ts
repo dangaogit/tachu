@@ -2,6 +2,7 @@ import { describe, expect, it, afterEach } from "bun:test";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import type { SkillDescriptor } from "@tachu/core";
 import { scanDescriptors } from "./descriptor-scanner";
 
 let tmpDir: string;
@@ -245,5 +246,177 @@ agent 指令正文。
     const agent = registry.get("agent", "test-agent");
     expect(agent).not.toBeNull();
     expect(agent!.kind).toBe("agent");
+  });
+
+  it("SKILL.md 目录形态：扫描 scripts/ 与 references/ 生成 resources，忽略 frontmatter 手写 resources", async () => {
+    const tachyDir = await makeTachyDir();
+    const skillDir = join(tachyDir, "skills", "pdf-processing");
+    await mkdir(join(skillDir, "scripts"), { recursive: true });
+    await mkdir(join(skillDir, "references"), { recursive: true });
+    await writeFile(join(skillDir, "scripts", "x.sh"), "#!/bin/sh\necho hi\n", "utf8");
+    await writeFile(join(skillDir, "references", "y.md"), "# ref\n", "utf8");
+    const skillMd = `---
+name: pdf-processing
+description: 处理 PDF 文件
+kind: skill
+resources:
+  - path: fake/should-be-ignored.txt
+---
+
+skill 指令内容。
+`;
+    await writeFile(join(skillDir, "SKILL.md"), skillMd, "utf8");
+
+    const registry = await scanDescriptors(tachyDir, false);
+    const skill = registry.get("skill", "pdf-processing") as SkillDescriptor | null;
+    expect(skill).not.toBeNull();
+    expect(skill!.resources).toEqual([
+      { path: "references/y.md" },
+      { path: "scripts/x.sh" },
+    ]);
+  });
+
+  it("skill 的 references/ assets/ scripts/ 资源文件不会被当成候选描述符，不产生 '跳过无效描述符' 警告", async () => {
+    const tachyDir = await makeTachyDir();
+    const skillDir = join(tachyDir, "skills", "pdf-processing");
+    await mkdir(join(skillDir, "references"), { recursive: true });
+    await mkdir(join(skillDir, "assets"), { recursive: true });
+    await mkdir(join(skillDir, "scripts"), { recursive: true });
+    // 无 frontmatter（无 name/description）的普通资源文档：
+    // 应被 listMarkdownFiles 在目录层面跳过，而不是"扫描到但解析失败后丢弃"。
+    const noFrontmatterDoc = "# 参考文档\n\n这是一份没有 YAML frontmatter 的普通说明文档。\n";
+    const refFile = join(skillDir, "references", "no-frontmatter.md");
+    const assetFile = join(skillDir, "assets", "notes.md");
+    await writeFile(refFile, noFrontmatterDoc, "utf8");
+    await writeFile(assetFile, noFrontmatterDoc, "utf8");
+    const skillMd = `---
+name: pdf-processing
+description: 处理 PDF 文件
+kind: skill
+---
+
+skill 指令内容。
+`;
+    await writeFile(join(skillDir, "SKILL.md"), skillMd, "utf8");
+
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]): void => {
+      warnings.push(args.map((a) => String(a)).join(" "));
+    };
+    try {
+      const registry = await scanDescriptors(tachyDir, false);
+      const skill = registry.get("skill", "pdf-processing");
+      expect(skill).not.toBeNull();
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(warnings.some((w) => w.includes("跳过无效描述符"))).toBe(false);
+    expect(warnings.some((w) => w.includes(refFile))).toBe(false);
+    expect(warnings.some((w) => w.includes(assetFile))).toBe(false);
+  });
+
+  it("扁平命名的 skill 文件（非 SKILL.md）不做目录扫描，resources 为 undefined", async () => {
+    const tachyDir = await makeTachyDir();
+    const skillMd = `---
+name: foo
+description: 扁平命名的技能
+kind: skill
+---
+
+skill 指令内容。
+`;
+    await writeFile(join(tachyDir, "skills", "foo.md"), skillMd, "utf8");
+
+    const registry = await scanDescriptors(tachyDir, false);
+    const skill = registry.get("skill", "foo") as SkillDescriptor | null;
+    expect(skill).not.toBeNull();
+    expect(skill!.resources).toBeUndefined();
+  });
+
+  it("name 格式不合法（含大写字母）的描述符文件被跳过，不影响 scanDescriptors 整体成功", async () => {
+    const tachyDir = await makeTachyDir();
+    const invalidMd = `---
+name: Invalid-Name
+description: name 含大写字母
+kind: rule
+type: rule
+scope: ["*"]
+---
+
+正文内容。
+`;
+    await writeFile(join(tachyDir, "rules", "Invalid-Name.md"), invalidMd, "utf8");
+
+    const registry = await scanDescriptors(tachyDir, false);
+    expect(registry.list().length).toBe(0);
+    expect(registry.get("rule", "Invalid-Name")).toBeNull();
+  });
+
+  it("name 与目录名/文件名不一致时只 warn，不影响加载成功", async () => {
+    const tachyDir = await makeTachyDir();
+    const ruleMd = `---
+name: mismatched-name
+description: name 与文件名不一致
+kind: rule
+type: rule
+scope: ["*"]
+---
+
+正文内容。
+`;
+    await writeFile(join(tachyDir, "rules", "actual-file-name.md"), ruleMd, "utf8");
+
+    const registry = await scanDescriptors(tachyDir, false);
+    const rule = registry.get("rule", "mismatched-name");
+    expect(rule).not.toBeNull();
+  });
+
+  it("skill 的 license / compatibility / metadata / allowed-tools（空格分隔字符串）frontmatter 被正确解析", async () => {
+    const tachyDir = await makeTachyDir();
+    const skillMd = `---
+name: deploy-helper
+description: 部署辅助技能
+kind: skill
+license: Apache-2.0
+compatibility: Requires python3 and pypdf
+metadata:
+  author: acme
+  version: "1.0"
+allowed-tools: "run-shell(python3 *) read-file"
+---
+
+skill 指令内容。
+`;
+    await writeFile(join(tachyDir, "skills", "deploy-helper.md"), skillMd, "utf8");
+
+    const registry = await scanDescriptors(tachyDir, false);
+    const skill = registry.get("skill", "deploy-helper") as SkillDescriptor | null;
+    expect(skill).not.toBeNull();
+    expect(skill!.license).toBe("Apache-2.0");
+    expect(skill!.compatibility).toBe("Requires python3 and pypdf");
+    expect(skill!.metadata).toEqual({ author: "acme", version: "1.0" });
+    expect(skill!.allowedTools).toEqual(["run-shell(python3 *)", "read-file"]);
+  });
+
+  it("skill 的 allowed-tools 支持 YAML 列表写法", async () => {
+    const tachyDir = await makeTachyDir();
+    const skillMd = `---
+name: deploy
+description: 部署技能
+kind: skill
+allowed-tools:
+  - run-shell
+  - read-file
+---
+
+skill 指令内容。
+`;
+    await writeFile(join(tachyDir, "skills", "deploy.md"), skillMd, "utf8");
+
+    const registry = await scanDescriptors(tachyDir, false);
+    const skill = registry.get("skill", "deploy") as SkillDescriptor | null;
+    expect(skill).not.toBeNull();
+    expect(skill!.allowedTools).toEqual(["run-shell", "read-file"]);
   });
 });

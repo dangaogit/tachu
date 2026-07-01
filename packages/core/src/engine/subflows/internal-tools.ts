@@ -31,7 +31,7 @@ export const getInternalToolDefinitions = (): ToolDefinition[] => [
   {
     name: "read_skill_resource",
     description:
-      "Read a declared resource file from a skill (reference, script, or asset). Returns text only; does not execute scripts.",
+      "Read a resource file bundled with a skill (discovered under the skill's scripts/, references/, or assets/ directory). Returns text only; does not execute scripts.",
     inputSchema: {
       type: "object",
       properties: {

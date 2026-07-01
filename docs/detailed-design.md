@@ -152,30 +152,35 @@ Skill 设计对齐行业通用规范（参考 SKILL.md 标准），采用**渐�
 
 ```typescript
 interface SkillDescriptor extends BaseDescriptor {
-  instructions: string;            // Markdown 正文（激活后注入 LLM 上下文）
-  resources?: SkillResource[];     // 附属资源声明
+  instructions: string;              // Markdown 正文（激活后注入 LLM 上下文）
+  resources?: SkillResource[];       // 加载时自动扫描生成，不接受手写声明
+  sourceDir?: string;                // SKILL.md 所在目录（read_skill_resource 解析路径用）
+  license?: string;                  // 可选，agentskills.io 超集字段
+  compatibility?: string;            // 可选，环境要求说明
+  metadata?: Record<string, string>; // 可选，任意 key-value
+  allowedTools?: string[];           // 可选，预授权工具调用模式（见下）
 }
 
 interface SkillResource {
-  path: string;                    // 资源相对路径
-  type: 'script' | 'reference' | 'asset';
-  loadHint?: string;               // 何时加载的自然语言提示（供 LLM 判断）
+  path: string;   // 目录前缀即类型：scripts/x.sh、references/y.md、assets/z.md
 }
 ```
 
-**文件约定**（与行业标准对齐）：
+**文件约定**（对齐 [agentskills.io](https://agentskills.io) 开放规范）：
 
 ```
 skill-name/
-├── SKILL.md              # 必须，YAML frontmatter（元信息）+ Markdown body（指令）
-└── resources/            # 可选
-    ├── scripts/          # 可执行脚本（确定性/重复性任务）
-    ├── references/       # 参考文档（按需加载到上下文）
-    └── assets/           # 输出用素材（模板、图标等）
+├── SKILL.md          # 必须，YAML frontmatter（元信息）+ Markdown body（指令）
+├── scripts/          # 可选，可执行脚本（确定性/重复性任务）
+├── references/       # 可选，参考文档（按需加载到上下文）
+└── assets/           # 可选，输出用素材（模板、图标等）
 ```
 
+`resources` 由 loader 在加载时扫描 `scripts/` `references/` `assets/` 三个子目录自动生成（只对 `SKILL.md` 目录形态生效），**不支持**在 frontmatter 里手写 `resources:` 数组。`name` 格式必须是小写字母/数字/连字符（硬校验）；建议与所在目录名一致（不一致只 warn，不阻断加载）。
+
 - 激活后，`instructions` + `requires` 引用的依赖内容一起注入 LLM 上下文
-- 资源层内容不自动加载，由 LLM 根据 `loadHint` 按需读取
+- 资源层内容不自动加载：`scripts/` 能否执行取决于宿主是否提供 shell 类通用工具（不是框架专用入口）；`references/`、`assets/` 通过内置 `read_skill_resource` 工具按需读取（白名单即扫描到的 `resources` 集合）
+- `allowedTools`（frontmatter `allowed-tools`）：当该 Skill 是当前 turn 的 Active Skill 时，`tool-use` 子流程对匹配的工具调用（裸工具名，或 `run-shell(<regex>)`）跳过审批回调，作用域仅限当前 turn，不落盘。详见 `docs/adr/0001-skill-agentskills-io-alignment.md`（本地文档）
 - `requires` 可引用其他 Skills、Rules、Tools、Agents
 
 ### 3.4 Tools

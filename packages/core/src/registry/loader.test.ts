@@ -139,5 +139,134 @@ second`,
     expect(registry.get("rule", "keep-a")).toBeNull();
     expect(registry.get("rule", "keep-b")).not.toBeNull();
   });
+
+  test("discovers skill resources from scripts/references/assets when the file is named SKILL.md", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tachu-loader-resources-"));
+    const skillDir = join(root, "skills", "git-workflow");
+    await mkdir(join(skillDir, "scripts"), { recursive: true });
+    await mkdir(join(skillDir, "references"), { recursive: true });
+    await writeFile(join(skillDir, "scripts", "check.sh"), "#!/bin/sh", "utf8");
+    await writeFile(join(skillDir, "references", "guide.md"), "guide", "utf8");
+    await writeFile(
+      join(skillDir, "SKILL.md"),
+      `---
+name: git-workflow
+description: Git workflow knowledge
+resources:
+  - path: legacy-frontmatter-should-be-ignored.md
+    type: reference
+---
+
+instructions`,
+      "utf8",
+    );
+
+    const registry = new DescriptorRegistry();
+    const loader = new RegistryLoader(registry);
+    await loader.loadFromDirectory(root);
+    const skill = registry.get("skill", "git-workflow");
+    expect(skill?.resources).toEqual([
+      { path: "references/guide.md" },
+      { path: "scripts/check.sh" },
+    ]);
+  });
+
+  test("does not scan for resources when a skill is a flat .md file (not named SKILL.md)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tachu-loader-flat-skill-"));
+    await mkdir(join(root, "skills"), { recursive: true });
+    // A sibling skill's own scripts/ dir; must never leak into the flat skill below.
+    await mkdir(join(root, "skills", "scripts"), { recursive: true });
+    await writeFile(join(root, "skills", "scripts", "unrelated.sh"), "#!/bin/sh", "utf8");
+    await writeFile(
+      join(root, "skills", "explain-code.md"),
+      `---
+name: explain-code
+description: Explains code snippets
+---
+
+instructions`,
+      "utf8",
+    );
+
+    const registry = new DescriptorRegistry();
+    const loader = new RegistryLoader(registry);
+    await loader.loadFromDirectory(root);
+    const skill = registry.get("skill", "explain-code");
+    expect(skill?.resources).toBeUndefined();
+  });
+
+  test("parses agentskills.io optional frontmatter fields on a skill", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tachu-loader-skill-fields-"));
+    const skillDir = join(root, "skills", "pdf-processing");
+    await mkdir(skillDir, { recursive: true });
+    await writeFile(
+      join(skillDir, "SKILL.md"),
+      `---
+name: pdf-processing
+description: Extract PDF text, fill forms, merge files
+license: Apache-2.0
+compatibility: Requires python3 and pypdf
+metadata:
+  author: acme
+  version: "1.0"
+allowed-tools: "run-shell(python3 *) read-file"
+---
+
+instructions`,
+      "utf8",
+    );
+
+    const registry = new DescriptorRegistry();
+    const loader = new RegistryLoader(registry);
+    await loader.loadFromDirectory(root);
+    const skill = registry.get("skill", "pdf-processing");
+    expect(skill?.license).toBe("Apache-2.0");
+    expect(skill?.compatibility).toBe("Requires python3 and pypdf");
+    expect(skill?.metadata).toEqual({ author: "acme", version: "1.0" });
+    expect(skill?.allowedTools).toEqual(["run-shell(python3 *)", "read-file"]);
+  });
+
+  test("accepts allowed-tools as a YAML list", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tachu-loader-skill-allowed-list-"));
+    const skillDir = join(root, "skills", "deploy");
+    await mkdir(skillDir, { recursive: true });
+    await writeFile(
+      join(skillDir, "SKILL.md"),
+      `---
+name: deploy
+description: Deploy the application
+allowed-tools:
+  - run-shell
+  - read-file
+---
+
+instructions`,
+      "utf8",
+    );
+
+    const registry = new DescriptorRegistry();
+    const loader = new RegistryLoader(registry);
+    await loader.loadFromDirectory(root);
+    const skill = registry.get("skill", "deploy");
+    expect(skill?.allowedTools).toEqual(["run-shell", "read-file"]);
+  });
+
+  test("rejects a descriptor name with an invalid format (uppercase)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tachu-loader-invalid-name-"));
+    await writeFile(
+      join(root, "bad.md"),
+      `---
+kind: rule
+name: Bad-Name
+description: invalid name format
+type: rule
+---
+
+content`,
+      "utf8",
+    );
+    const loader = new RegistryLoader(new DescriptorRegistry());
+    await expect(loader.loadFromDirectory(root)).rejects.toBeInstanceOf(ValidationError);
+  });
 });
 

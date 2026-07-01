@@ -56,6 +56,14 @@ _Avoid_: Treating Agent snapshot skills as user explicit mention, letting the in
 When resolving active skills for a turn: Explicit Skill Mention beats `excludeSkills`, which beats `pinSkills`, which beats Agent snapshot refs, always-trigger, sticky, and retrieval candidates.
 _Avoid_: Flat merge without priority, letting exclude remove user explicit skills
 
+**Skill Resource**:
+A bundled file discovered under a skill's `scripts/`, `references/`, or `assets/` subdirectory (agentskills.io directory convention). The directory prefix in `path` carries the type — core never branches on a separate type field. Discovered by scanning the skill's `sourceDir` at load time, not declared by hand in frontmatter; only applies to the directory form (a `SKILL.md` file with its own directory) — a flat single-file skill (any other filename directly under `skills/`) has no `sourceDir` scan and no resources. Readable through the `read_skill_resource` tool, whose path whitelist is this discovered set.
+_Avoid_: A hand-written `resources: [{path, type}]` frontmatter array, a `loadHint` field, treating resource "type" as engine-branchable state, recursing descriptor discovery into `scripts/`/`references/`/`assets/` subdirectories (their `.md` files are resources, not standalone descriptors)
+
+**Skill Tool Pre-Approval**:
+The `allowed-tools` frontmatter field on a `SkillDescriptor` (agentskills.io optional field). Enforced inside core's `tool-use` sub-flow (alongside `shellAutoApprovePatterns`), not in any host's approval UI: when a tool call matches a pattern declared by one of the current turn's Active Skills (`ctx.prebuiltPrompt.activeSkills`), the `onBeforeToolCall` approval callback is skipped entirely — approved transparently, for every host, with no host-specific wiring required. Patterns are either a bare tool name (any arguments) or `run-shell(<regex>)` (matches only `arguments.command`, same conservative no-extra-`args` rule as `shellAutoApprovePatterns`). The exemption is scoped to that turn only (only Active Skills are consulted, never the full registry) and is never written to the persistent `ApprovalStore`.
+_Avoid_: Wiring this into a specific host's approval prompt, persisting skill-granted approval across turns, confusing this with the user-driven persistent `ApprovalStore` records
+
 **Visualization Mode**:
 Optional opaque field on Turn Policy, defined and interpreted by the host (for example `data-chart` vs `generated-image`). Tachu persists and emits it for observability but does not branch execution on its value.
 _Avoid_: Engine-owned visualization enum, coupling visualization to built-in routing

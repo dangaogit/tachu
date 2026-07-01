@@ -36,16 +36,33 @@ scope: ["*"]
 
 const README_SKILLS = `# Skills
 
-本目录存放 Skill 描述符（\`SKILL.md\`）。
+本目录存放 Skill 描述符（\`SKILL.md\`），遵循 [agentskills.io](https://agentskills.io) 开放规范的目录约定。
 
-Skill 采用渐进式加载三层结构：元信息层 / 指令层 / 资源层。
+Skill 采用渐进式加载三层结构：元信息层（name/description，启动即读）/ 指令层（SKILL.md 正文，命中触发条件后加载）/ 资源层（\`scripts/\` \`references/\` \`assets/\`，模型按需读取或执行）。
 
 ## 约定目录结构
+
+资源按子目录表达类型，不用 frontmatter 手写声明——加载时自动扫描：
 
 \`\`\`
 skill-name/
 ├── SKILL.md
-└── resources/
+├── scripts/      # 可执行脚本；能否跑取决于宿主是否提供 shell 类工具
+├── references/   # 按需读的参考文档
+└── assets/       # 模板 / 静态资源
+\`\`\`
+
+## 常用 frontmatter
+
+\`\`\`yaml
+---
+name: skill-name        # 小写字母/数字/连字符，建议与目录名一致
+description: 简短描述
+tags: [example]
+license: Apache-2.0           # 可选
+compatibility: 需要的运行环境  # 可选
+allowed-tools: "read-file"     # 可选：预授权工具调用模式
+---
 \`\`\`
 `;
 

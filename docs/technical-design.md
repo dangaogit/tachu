@@ -191,15 +191,14 @@ tags: [security]
 
 #### Skills
 
-对齐 SKILL.md 行业标准，支持附属资源目录：
+对齐 [agentskills.io](https://agentskills.io) 开放规范，支持附属资源目录（直接挂在技能目录下，不套一层 `resources/`）：
 
 ```
 skill-name/
 ├── SKILL.md
-└── resources/
-    ├── scripts/
-    ├── references/
-    └── assets/
+├── scripts/
+├── references/
+└── assets/
 ```
 
 ```markdown

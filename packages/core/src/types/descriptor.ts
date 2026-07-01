@@ -53,16 +53,25 @@ export interface RuleDescriptor extends BaseDescriptor {
 }
 
 /**
- * Skill 资源声明。
+ * Skill 资源声明（agentskills.io 目录约定）。
+ *
+ * `path` 自带目录前缀（`scripts/x.py` / `references/y.md` / `assets/z.md`），
+ * 前缀本身即类型信息——不再有单独的 `type` 字段。由 loader 在加载时扫描技能
+ * 目录下的 `scripts/` `references/` `assets/` 子目录自动生成，不接受
+ * frontmatter 手写声明。
  */
 export interface SkillResource {
   path: string;
-  type: "script" | "reference" | "asset";
-  loadHint?: string | undefined;
 }
 
 /**
  * Skill 描述符。
+ *
+ * `license` / `compatibility` / `metadata` / `allowedTools` 对应
+ * agentskills.io 规范的可选 frontmatter 字段（`license` / `compatibility` /
+ * `metadata` / `allowed-tools`）。前三者仅透传存储，不接行为；`allowedTools`
+ * 在该 skill 处于 Active Skill 状态期间驱动工具调用的预授权豁免
+ * （见 tool-use 子流程 `isSkillAllowedToolsMatch`）。
  */
 export interface SkillDescriptor extends BaseDescriptor {
   kind: "skill";
@@ -70,6 +79,11 @@ export interface SkillDescriptor extends BaseDescriptor {
   resources?: SkillResource[] | undefined;
  /** Loader 写入的 SKILL.md 所在目录（供 read_skill_resource 解析路径）。 */
   sourceDir?: string | undefined;
+  license?: string | undefined;
+  compatibility?: string | undefined;
+  metadata?: Record<string, string> | undefined;
+ /** 对应 frontmatter `allowed-tools`：预授权的工具调用模式列表。 */
+  allowedTools?: string[] | undefined;
 }
 
 /**

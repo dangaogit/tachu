@@ -10,19 +10,36 @@ import type {
   ToolDescriptor,
   TriggerCondition,
 } from "../types";
+import {
+  isSkillDirectoryForm,
+  requireValidDescriptorNameFormat,
+  warnOnDescriptorIdentityMismatch,
+} from "./descriptor-naming";
+import { discoverSkillResources } from "./skill-resources";
 import type { DescriptorRegistry } from "./registry";
+
+/**
+ * agentskills.io 资源子目录名——递归找描述符文件时必须跳过，否则
+ * `references/*.md` 这类技能资源会被误当成独立描述符加载（缺 frontmatter
+ * 的 name/description 会直接报错，导致技能目录多带一个 references 文档就
+ * 炸掉整个加载）。
+ */
+const SKILL_RESOURCE_DIR_NAMES = new Set(["scripts", "references", "assets"]);
 
 const listMarkdownFiles = async (root: string): Promise<string[]> => {
   const entries = await readdir(root, { withFileTypes: true });
   const files: string[] = [];
   for (const entry of entries) {
-    const fullPath = join(root, entry.name);
     if (entry.isDirectory()) {
+      if (SKILL_RESOURCE_DIR_NAMES.has(entry.name)) {
+        continue;
+      }
+      const fullPath = join(root, entry.name);
       files.push(...(await listMarkdownFiles(fullPath)));
       continue;
     }
     if (entry.isFile() && entry.name.toLowerCase().endsWith(".md")) {
-      files.push(fullPath);
+      files.push(join(root, entry.name));
     }
   }
   return files;
@@ -56,11 +73,11 @@ const requireString = (value: unknown, field: string): string => {
   return value;
 };
 
-const toDescriptor = (
+const toDescriptor = async (
   data: Record<string, unknown>,
   content: string,
   sourceFile?: string,
-): AnyDescriptor => {
+): Promise<AnyDescriptor> => {
   const kind = typeof data.kind === "string" ? data.kind : undefined;
   const type = typeof data.type === "string" ? data.type : undefined;
   const knownFields = new Set([
@@ -87,13 +104,19 @@ const toDescriptor = (
     "resources",
     "maxDepth",
     "availableTools",
+    "license",
+    "compatibility",
+    "metadata",
+    "allowed-tools",
   ]);
   const extraFields = Object.fromEntries(
     Object.entries(data).filter(([field]) => !knownFields.has(field)),
   );
+  const name = requireString(data.name, "name");
+  requireValidDescriptorNameFormat(name, sourceFile);
   const base = {
     ...extraFields,
-    name: requireString(data.name, "name"),
+    name,
     description: requireString(data.description, "description"),
     version: typeof data.version === "string" ? data.version : undefined,
     displayName: typeof data.displayName === "string" ? data.displayName : undefined,
@@ -122,6 +145,7 @@ const toDescriptor = (
         : ["*"],
       content,
     };
+    warnOnDescriptorIdentityMismatch("rule", descriptor.name, sourceFile);
     return descriptor;
   }
 
@@ -146,6 +170,7 @@ const toDescriptor = (
           : undefined,
       execute: requireString(data.execute, "execute"),
     };
+    warnOnDescriptorIdentityMismatch("tool", descriptor.name, sourceFile);
     return descriptor;
   }
 
@@ -166,22 +191,73 @@ const toDescriptor = (
         : undefined,
       instructions: typeof data.instructions === "string" ? data.instructions : content,
     };
+    warnOnDescriptorIdentityMismatch("agent", descriptor.name, sourceFile);
     return descriptor;
   }
 
   const skillName = base.name;
   const trigger = normalizeTrigger(data.trigger, skillName, sourceFile ?? skillName);
+  const sourceDir = sourceFile !== undefined ? dirname(sourceFile) : undefined;
+  const resources =
+    sourceFile !== undefined && sourceDir !== undefined && isSkillDirectoryForm(sourceFile)
+      ? await discoverSkillResources(sourceDir)
+      : undefined;
   const descriptor: SkillDescriptor = {
     ...base,
     kind: "skill",
     trigger,
     instructions: content,
-    resources: Array.isArray(data.resources)
-      ? (data.resources as SkillDescriptor["resources"])
-      : undefined,
-    ...(sourceFile !== undefined ? { sourceDir: dirname(sourceFile) } : {}),
+    resources,
+    ...(sourceDir !== undefined ? { sourceDir } : {}),
+    ...parseSkillFrontmatterExtras(data),
   };
+  warnOnDescriptorIdentityMismatch("skill", descriptor.name, sourceFile);
   return descriptor;
+};
+
+/**
+ * 把 `allowed-tools` 的空格分隔字符串写法切分成 token。
+ *
+ * 不能用朴素的 `.split(/\s+/)`：agentskills.io / Claude Code 的写法允许模式内部
+ * 带空格，如 `Bash(git commit *)`——必须整体保留为一个 token。用
+ * `[^\s()]+(\([^)]*\))?` 逐个匹配：先吃一段不含空白/括号的前缀，再可选吃一对
+ * 完整括号（括号内允许任意非右括号字符，包含空格）。
+ */
+const tokenizeAllowedTools = (raw: string): string[] => raw.match(/[^\s()]+(?:\([^)]*\))?/g) ?? [];
+
+/**
+ * 解析 agentskills.io 规范的 Skill 可选 frontmatter 超集字段：
+ * `license` / `compatibility` / `metadata` / `allowed-tools`。
+ *
+ * `allowed-tools` 支持规范里的两种写法：空格分隔字符串，或 YAML 列表。
+ */
+const parseSkillFrontmatterExtras = (
+  data: Record<string, unknown>,
+): Pick<SkillDescriptor, "license" | "compatibility" | "metadata" | "allowedTools"> => {
+  const allowedToolsRaw = data["allowed-tools"];
+  const allowedTools =
+    typeof allowedToolsRaw === "string"
+      ? tokenizeAllowedTools(allowedToolsRaw)
+      : Array.isArray(allowedToolsRaw)
+        ? allowedToolsRaw.filter((item): item is string => typeof item === "string")
+        : undefined;
+
+  const metadataRaw = data.metadata;
+  const metadata =
+    metadataRaw && typeof metadataRaw === "object" && !Array.isArray(metadataRaw)
+      ? Object.fromEntries(
+          Object.entries(metadataRaw as Record<string, unknown>).filter(
+            (entry): entry is [string, string] => typeof entry[1] === "string",
+          ),
+        )
+      : undefined;
+
+  return {
+    license: typeof data.license === "string" ? data.license : undefined,
+    compatibility: typeof data.compatibility === "string" ? data.compatibility : undefined,
+    metadata,
+    allowedTools,
+  };
 };
 
 /**
@@ -202,7 +278,7 @@ export class RegistryLoader {
     for (const file of markdownFiles) {
       const raw = await readFile(file, "utf8");
       const parsed = matter(raw);
-      const descriptor = toDescriptor(
+      const descriptor = await toDescriptor(
         parsed.data as Record<string, unknown>,
         parsed.content.trim(),
         file,

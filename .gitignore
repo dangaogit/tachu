@@ -50,6 +50,7 @@ npm-debug.log*
 # ───────── Draft / local docs ─────────
 docs-draft-*
 docs/superpowers/
+docs/adr/
 CL/
 
 # Tachu

@@ -694,6 +694,154 @@ describe("executeToolUse ( Agentic Loop)", () => {
     expect(approvalCalls).toBe(1);
   });
 
+ test("Active Skill 的 allowed-tools 命中裸工具名 → 跳过 approval 回调直接执行", async () => {
+    const { adapter } = createScriptedProvider([
+      {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{ id: "c-skill-1", name: "read-file", arguments: { path: "a.txt" } }],
+        usage: noopUsage,
+      },
+      { content: "已读取。", finishReason: "stop", usage: noopUsage },
+    ]);
+    const config = baseConfig();
+    let executed = false;
+    let approvalCalls = 0;
+    const ctx = buildCtx({
+      config,
+      provider: adapter,
+      toolSet: [{ name: "read-file", requiresApproval: true, sideEffect: "readonly" }],
+      taskExecutor: async () => {
+        executed = true;
+        return ok({ content: "file contents" });
+      },
+    });
+    ctx.prebuiltPrompt = {
+      ...ctx.prebuiltPrompt,
+      activeSkills: [
+        {
+          kind: "skill",
+          name: "reader-skill",
+          description: "reads files",
+          instructions: "read files",
+          allowedTools: ["read-file"],
+        },
+      ],
+    };
+    ctx.onBeforeToolCall = async () => {
+      approvalCalls += 1;
+      return { type: "approve" };
+    };
+    const result = await executeToolUse({ prompt: "read it" }, ctx);
+    expectTerminalDraft(result, "已读取。");
+    expect(executed).toBe(true);
+    expect(approvalCalls).toBe(0);
+  });
+
+ test("Active Skill 的 allowed-tools 用 run-shell(regex) 命中 command → 跳过 approval", async () => {
+    const { adapter } = createScriptedProvider([
+      {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{ id: "c-skill-2", name: "run-shell", arguments: { command: "git status" } }],
+        usage: noopUsage,
+      },
+      { content: "已查询。", finishReason: "stop", usage: noopUsage },
+    ]);
+    const config = baseConfig();
+    let approvalCalls = 0;
+    const ctx = buildCtx({
+      config,
+      provider: adapter,
+      toolSet: [{ name: "run-shell", requiresApproval: true, sideEffect: "irreversible" }],
+      taskExecutor: async () => ok({ stdout: "clean", stderr: "", exitCode: 0 }),
+    });
+    ctx.prebuiltPrompt = {
+      ...ctx.prebuiltPrompt,
+      activeSkills: [
+        {
+          kind: "skill",
+          name: "git-workflow",
+          description: "git helper",
+          instructions: "help with git",
+          allowedTools: ["run-shell(^git (status|diff)(\\b|$))"],
+        },
+      ],
+    };
+    ctx.onBeforeToolCall = async () => {
+      approvalCalls += 1;
+      return { type: "approve" };
+    };
+    await executeToolUse({ prompt: "check status" }, ctx);
+    expect(approvalCalls).toBe(0);
+  });
+
+ test("Active Skill 的 run-shell(regex) 不命中 command → 仍走 approval 回调", async () => {
+    const { adapter } = createScriptedProvider([
+      {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{ id: "c-skill-3", name: "run-shell", arguments: { command: "rm -rf /tmp/x" } }],
+        usage: noopUsage,
+      },
+      { content: "已执行。", finishReason: "stop", usage: noopUsage },
+    ]);
+    const config = baseConfig();
+    let approvalCalls = 0;
+    const ctx = buildCtx({
+      config,
+      provider: adapter,
+      toolSet: [{ name: "run-shell", requiresApproval: true, sideEffect: "irreversible" }],
+      taskExecutor: async () => ok({ stdout: "", stderr: "", exitCode: 0 }),
+    });
+    ctx.prebuiltPrompt = {
+      ...ctx.prebuiltPrompt,
+      activeSkills: [
+        {
+          kind: "skill",
+          name: "git-workflow",
+          description: "git helper",
+          instructions: "help with git",
+          allowedTools: ["run-shell(^git (status|diff)(\\b|$))"],
+        },
+      ],
+    };
+    ctx.onBeforeToolCall = async () => {
+      approvalCalls += 1;
+      return { type: "approve" };
+    };
+    await executeToolUse({ prompt: "cleanup" }, ctx);
+    expect(approvalCalls).toBe(1);
+  });
+
+ test("allowed-tools 只对当前 Active Skill 生效：非 active 的技能声明不豁免审批", async () => {
+    const { adapter } = createScriptedProvider([
+      {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{ id: "c-skill-4", name: "read-file", arguments: { path: "a.txt" } }],
+        usage: noopUsage,
+      },
+      { content: "已读取。", finishReason: "stop", usage: noopUsage },
+    ]);
+    const config = baseConfig();
+    let approvalCalls = 0;
+    const ctx = buildCtx({
+      config,
+      provider: adapter,
+      toolSet: [{ name: "read-file", requiresApproval: true, sideEffect: "readonly" }],
+      taskExecutor: async () => ok({ content: "file contents" }),
+    });
+    // activeSkills 为空——即便某个已注册的技能声明了 allowed-tools，未被激活也不生效。
+    ctx.prebuiltPrompt = { ...ctx.prebuiltPrompt, activeSkills: [] };
+    ctx.onBeforeToolCall = async () => {
+      approvalCalls += 1;
+      return { type: "approve" };
+    };
+    await executeToolUse({ prompt: "read it" }, ctx);
+    expect(approvalCalls).toBe(1);
+  });
+
  test("两轮循环：tool_calls → 工具执行 → 终止 stop", async () => {
     const { adapter, calls } = createScriptedProvider([
       {

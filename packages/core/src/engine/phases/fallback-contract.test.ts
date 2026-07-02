@@ -30,7 +30,6 @@ import type {
   EngineConfig,
   ExecutionContext,
   InputEnvelope,
-  IntentResult,
   OutputMetadata,
   StepStatus,
   ValidationResult,
@@ -54,9 +53,7 @@ import type { PhaseEnvironment } from "./index";
 const FORBIDDEN_TERMS: ReadonlyArray<RegExp> = [
   /task-tool-\d+/i,
   /task-tool-use\b/i,
-  /task-direct-answer\b/i,
   /\bPhase\s*\d+/i,
-  /direct-answer\s*子流程/i,
   /tool-use\s*子流程/i,
   /capability\s*路由/i,
   /Tool\s*\/\s*Agent\s*描述符/i,
@@ -92,7 +89,7 @@ const buildEnv = (): PhaseEnvironment =>
   }) satisfies PhaseEnvironment;
 
 const buildValidationState = (overrides: {
-  intent: IntentResult;
+  intent: { intent: string };
   validation: ValidationResult;
   taskResults?: Record<string, unknown>;
   steps?: StepStatus[];
@@ -118,9 +115,7 @@ const buildValidationState = (overrides: {
     context,
     violations: [],
     intent: overrides.intent,
-    precheck: { budget: { allowed: true } },
-    planning: { plans: [{ rank: 1, tasks: [], edges: [] }] },
-    graphCheck: { passed: true },
+    route: { tasks: [], edges: [] },
     steps: overrides.steps ?? [],
     taskResults: overrides.taskResults ?? {},
     validation: overrides.validation,
@@ -329,10 +324,8 @@ describe("Contract 2 · validation.ts 不得在 reason 中泄漏内部 task ID",
         scopes: ["*"],
       },
       violations: [],
-      intent: { complexity: "complex", intent: "x", contextRelevance: "unrelated" },
-      precheck: { budget: { allowed: true } },
-      planning: { plans: [{ rank: 1, tasks: [], edges: [] }] },
-      graphCheck: { passed: true },
+      intent: { intent: "x" },
+      route: { tasks: [], edges: [] },
       steps: failedSteps,
       taskResults: {},
       evidence: [],
@@ -364,9 +357,7 @@ describe("Contract 3 · Output fallback 契约（最小长度 / 无术语 / 含�
     const out = await runOutputPhase(
       buildValidationState({
         intent: {
-          complexity: "complex",
           intent: "retrieve a pig image",
-          contextRelevance: "unrelated",
         },
         validation: {
           passed: false,
@@ -402,8 +393,6 @@ describe("Contract 3 · Output fallback 契约（最小长度 / 无术语 / 含�
  // 硬门槛：不得 stringify 内部 state
     expect(content).not.toContain('"validation"');
     expect(content).not.toContain('"taskResults"');
-    expect(content).not.toContain('"graphCheck"');
-    expect(content).not.toContain('"precheck"');
 
  // 保留意图摘要供用户理解
     expect(content).toContain("retrieve a pig image");
@@ -411,7 +400,7 @@ describe("Contract 3 · Output fallback 契约（最小长度 / 无术语 / 含�
 
  test("ensureFallbackText 在无 provider 时仍返回合规模板（不抛）", async () => {
     const state = buildValidationState({
-      intent: { complexity: "complex", intent: "some request", contextRelevance: "unrelated" },
+      intent: { intent: "some request" },
       validation: { passed: false },
     });
     const text = await ensureFallbackText(state, buildEnv());
@@ -424,7 +413,7 @@ describe("Contract 3 · Output fallback 契约（最小长度 / 无术语 / 含�
  test("validation 失败但 intent 为空字符串 → 仍产出合规文案", async () => {
     const out = await runOutputPhase(
       buildValidationState({
-        intent: { complexity: "complex", intent: "", contextRelevance: "unrelated" },
+        intent: { intent: "" },
         validation: { passed: false },
       }),
       buildEnv(),
@@ -453,11 +442,10 @@ describe("Contract 4 · sanitizeInternalTerms 基础行为", () => {
     expect(out).toContain("执行阶段");
   });
 
- test("替换 direct-answer 子流程 / capability 路由 / Tool / Agent 描述符", () => {
+ test("替换 capability 路由 / Tool / Agent 描述符", () => {
     const out = sanitizeInternalTerms(
-      "请检查 Tool / Agent 描述符 是否已注册并在 capability 路由中可达；direct-answer 子流程 将接管",
+      "请检查 Tool / Agent 描述符 是否已注册并在 capability 路由中可达",
     );
-    expect(out).not.toContain("direct-answer 子流程");
     expect(out).not.toContain("capability 路由");
     expect(out).not.toContain("Tool / Agent 描述符");
   });
@@ -472,7 +460,7 @@ describe("Contract 4 · sanitizeInternalTerms 基础行为", () => {
   });
 
  test("幂等：多次脱敏结果相同", () => {
-    const input = "task-tool-9 task-tool-use Phase 5 direct-answer 子流程 tool-use 子流程";
+    const input = "task-tool-9 task-tool-use Phase 5 tool-use 子流程";
     const once = sanitizeInternalTerms(input);
     const twice = sanitizeInternalTerms(once);
     expect(twice).toBe(once);

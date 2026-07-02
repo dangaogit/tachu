@@ -31,7 +31,7 @@ type UserMessageTemplate = (context?: Record<string, unknown>) => string;
  *
  * 覆盖 core 与 extensions 中所有已知的 `code`：
  * - 对每个 code 提供一句"问题是什么"+ 一句"你可以怎么做"的文案
- * - 不得包含内部术语：`Phase \d+` / `task-tool-\d+` / `direct-answer 子流程` /
+ * - 不得包含内部术语：`Phase \d+` / `task-tool-\d+` / `tool-use 子流程` /
  * `capability 路由` / `Tool / Agent 描述符`
  * - 不得引用错误 code 本身（留给开发者日志）
  * - 必须 ≥ 20 字 ≤ 200 字；便于 CLI 单屏展示

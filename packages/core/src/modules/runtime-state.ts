@@ -1,4 +1,4 @@
-import type { RankedPlan } from "../types";
+import type { ExecutionRoute } from "../types";
 
 /**
  * 任务状态。
@@ -19,7 +19,7 @@ export interface Checkpoint {
  */
 export interface ExecutionState {
   currentPhase: string;
-  activePlan: RankedPlan | null;
+  activeRoute: ExecutionRoute | null;
   taskProgress: Map<string, TaskStatus>;
   retryCount: {
     task: number;
@@ -46,7 +46,7 @@ export interface RuntimeState {
 
 const createInitialState = (): ExecutionState => ({
   currentPhase: "idle",
-  activePlan: null,
+  activeRoute: null,
   taskProgress: new Map(),
   retryCount: {
     task: 0,

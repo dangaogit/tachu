@@ -1,21 +1,19 @@
 import { resolve } from "node:path";
 import { BudgetExhaustedError, SafetyError } from "../errors";
-import type { EngineConfig, ExecutionContext, InputEnvelope } from "../types";
+import type { EngineConfig, EnginePhase, ExecutionContext, InputEnvelope } from "../types";
 import type { ObservabilityEmitter } from "./observability";
 
 /**
  * 引擎标准阶段名（用于 `SafetyPolicy.scope`）。
+ *
+ * 直接复用 `EnginePhase`(ADR-0006 塌陷后 6 阶段:session / safety /
+ * tool-routing / execution / validation / output),避免此处再手写一份
+ * 独立字面量联合类型、随管线阶段变化而漂移——曾经的教训:塌陷前该类型
+ * 手写了 9 个阶段名,`intent`/`precheck`/`planning`/`graph-check` 四个阶段
+ * 删除后这里未同步更新，导致 host 注册在这些已死 scope 上的 `SafetyPolicy`
+ * 会被 `isPolicyInScope` 悄悄判定为"永不匹配"而静默失效，且没有任何告警。
  */
-export type PhaseName =
-  | "session"
-  | "safety"
-  | "intent"
-  | "precheck"
-  | "planning"
-  | "graph-check"
-  | "execution"
-  | "validation"
-  | "output";
+export type PhaseName = EnginePhase;
 
 /**
  * 安全违规项（按 detailed-design §9.6 规约）。

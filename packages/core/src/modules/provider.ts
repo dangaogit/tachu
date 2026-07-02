@@ -110,8 +110,8 @@ export type ChatFinishReason =
  * Chat 返回结果（ 扩展）。
  *
  * 向后兼容：`toolCalls` / `finishReason` 为可选字段；未参与 Agentic Loop 的调用方
- * （如 `direct-answer` Sub-flow、Intent 阶段、Memory 压缩、Vision Transformer）
- * 只需关心 `content` + `usage` 即可，与本 ADR 之前的行为完全一致。
+ * （如 Memory 压缩、Vision Transformer）只需关心 `content` + `usage` 即可，与本
+ * ADR 之前的行为完全一致。
  */
 export interface ChatResponse {
   content: string;
@@ -149,7 +149,7 @@ export interface ChatResponse {
  * `qwen-image-*`）在成功返回图片时填充；普通 chat 轮次保持 `undefined`。
  *
  * 字段与 `content` 的 Markdown `![](url)` 文本**互补**：content 面向用户渲染，
- * `images` 面向宿主机器消费。上游 `direct-answer` Sub-flow 会把本字段透传到
+ * `images` 面向宿主机器消费。上游 `tool-use` 子流程会把本字段透传到
  * {@link import("../types").OutputMetadata.generatedImages}，CLI / SDK 据此
  * 完成下载落盘、卡片渲染、审计等操作。
  */

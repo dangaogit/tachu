@@ -1,7 +1,7 @@
 import type { StreamChunk } from "../types";
 
 /**
- * 标记 direct-answer 流式 delta 结束（与 {@link StreamChunk} 分开发送）。
+ * 标记顶层流式 delta 结束（与 {@link StreamChunk} 分开发送）。
  */
 export const DELTA_STREAM_END = Symbol("DELTA_STREAM_END");
 

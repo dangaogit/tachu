@@ -49,8 +49,8 @@ Options:
   --markdown              Enable terminal Markdown rendering for --output text
                           (default: on when stdout is a TTY and NO_COLOR is unset)
   --no-markdown           Disable terminal Markdown rendering (force raw text)
-  --no-validation         Skip Phase 8 result validation
-  --plan-mode             Enable Plan mode (pause after Phase 5 for approval)
+  --no-validation         Skip result validation (validation phase)
+  --plan-mode             Enable Plan mode (pause after the tool-routing phase for approval)
   --verbose, -v           Verbose output (phase transitions, each phase line has `(Nms)` duration appended)
   --debug                 Debug mode: implies --verbose and streams every engine observability
                           event (phase / llm / tool / MCP) to stderr, color-coded.

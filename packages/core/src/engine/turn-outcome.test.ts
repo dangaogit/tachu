@@ -11,29 +11,18 @@ describe("validationOutcomeToEvent — P1 γ outcome→event mapping", () => {
     expect(validationOutcomeToEvent(outcome, ts)).toBeNull();
   });
 
- test("retry+next-plan emits retry event with target preserved", () => {
+ test("retry+retry-turn emits retry event with target preserved", () => {
     const outcome: ValidationOutcome = {
       kind: "retry",
       reason: "execution_failed",
-      target: "next-plan",
+      target: "retry-turn",
     };
     expect(validationOutcomeToEvent(outcome, ts)).toEqual({
       timestamp: ts,
       phase: "validation",
       type: "retry",
-      payload: { reason: "execution_failed", target: "next-plan" },
+      payload: { reason: "execution_failed", target: "retry-turn" },
     });
-  });
-
- test("retry+same-plan emits retry event with target=same-plan", () => {
-    const outcome: ValidationOutcome = {
-      kind: "retry",
-      reason: "transient_provider_5xx",
-      target: "same-plan",
-    };
-    const ev = validationOutcomeToEvent(outcome, ts);
-    expect(ev?.type).toBe("retry");
-    expect((ev?.payload as { target: string }).target).toBe("same-plan");
   });
 
  test("retry+tool-loop-finalize emits retry event with target=tool-loop-finalize", () => {

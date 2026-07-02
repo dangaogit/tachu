@@ -8,7 +8,7 @@
 [![bun](https://img.shields.io/badge/runtime-bun-orange)](https://bun.sh)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-blue)](https://www.typescriptlang.org)
 
-> **项目状态 —— Release Candidate。** 9 阶段主干、Registry、Prompt 组装、CLI、OpenAI / Anthropic / Qwen / Gemini Adapter、MCP Adapter、向量存储与可观测性 Emitter 已完成接线并有测试覆盖。Phase 3（意图分析）是真实 LLM 调用，Phase 5 会把复杂且具备可见工具的请求路由到内置 `tool-use` loop，Phase 8 运行 deterministic 验证规则并支持可选 semantic judge。Runtime provider fallback 与 semantic judge 生产级策略属于 rc 后续加固。请使用 `@rc` dist-tag 安装。
+> **项目状态 —— Release Candidate。** 引擎以**一个深单 agentic loop** 作为执行主干(外层 6 阶段骨架:`session → safety → tool-routing → execution → validation → output`)，Registry、Prompt 组装、CLI、OpenAI / Anthropic / Qwen / Gemini Adapter、MCP Adapter、向量存储与可观测性 Emitter 已完成接线并有测试覆盖。`tool-routing` 是确定性阶段(不含 LLM 调用)，为每个请求构造单个 `tool-use` 任务；`tool-use` loop 内由 LLM 自主决定调用工具、派发只读 subagent 还是直接作答，`validation` 作为 `turnStop` guardrail 运行 deterministic 验证规则并支持可选 semantic judge。Runtime provider fallback 与 semantic judge 生产级策略属于 rc 后续加固。请使用 `@rc` dist-tag 安装。
 
 ---
 
@@ -18,7 +18,7 @@
 
 Tachu 的目标是成为一个**你可以基于它做真实产品的 Agentic 引擎**——不是 Demo 玩具，不是 API 薄封装。它是等式 **Agent = Model + Harness** 中的 *Harness*：提供结构骨架（协议、生命周期、安全、记忆、编排），让任何 LLM 都能成为可靠、可观测的 Agent。
 
-引擎本身刻意**不感知业务领域**——它不知道你的业务逻辑、用户身份或领域词汇。取而代之的是，它定义了一套极简的核心抽象（Rules、Skills、Tools、Agents），业务通过这些抽象注入所有智能。Tachu 被设计来处理那些真正困难的部分：9 阶段执行主干、双平面语义匹配、上下文窗口管理、精确 Token 计数的 Prompt 组装、结构化重试/降级、取消传播，以及端到端可观测性。
+引擎本身刻意**不感知业务领域**——它不知道你的业务逻辑、用户身份或领域词汇。取而代之的是，它定义了一套极简的核心抽象（Rules、Skills、Tools、Agents），业务通过这些抽象注入所有智能。Tachu 被设计来处理那些真正困难的部分：深单 agentic loop + loop-lifecycle 守卫面、双平面语义匹配、上下文窗口管理、精确 Token 计数的 Prompt 组装、结构化重试/降级、取消传播，以及端到端可观测性。
 
 Tachu 以 Bun 原生 TypeScript Monorepo 形式发布，包含三个已发布包：零依赖引擎核心（`@tachu/core`）、官方扩展库（`@tachu/extensions`），以及完整功能的 CLI 程序（`@tachu/cli`，同时也是参考实现）；另外有 `@tachu/host-defaults` 供 CLI 与嵌入式 host 共享默认装配，以及一个可选的私有 sidecar 包（`@tachu/web-fetch-server`），用于远端浏览器抓取类工具。
 
@@ -26,7 +26,7 @@ Tachu 以 Bun 原生 TypeScript Monorepo 形式发布，包含三个已发布包
 
 ## 项目状态（Project Status）
 
-**当前发布版本：** `1.0.0-rc.0`（`rc` dist-tag）
+**当前发布版本：** `1.0.0-rc.10`（`rc` dist-tag）
 
 **版本术语：** 当前产品线为 **Tachu v1**。Release candidate 是 `1.0.0` 的稳定化构建，不是新的框架代际；`/v1/extract` 等仅为 HTTP API 版本。详见 [详细设计 · 版本与发布术语](docs/detailed-design.md#版本与发布术语必读)。
 
@@ -34,7 +34,7 @@ Tachu 以 Bun 原生 TypeScript Monorepo 形式发布，包含三个已发布包
 
 | 能力 | 状态 | 说明 |
 |-----|------|-----|
-| 9 阶段主干骨架（类型、编排器、状态机、Hook 链路） | ✅ 已实现 | `packages/core/src/engine` |
+| 6 阶段外层骨架 + 深单 agentic loop（类型、编排器、状态机、loop-lifecycle Hook） | ✅ 已实现 | `packages/core/src/engine`；`EnginePhase` = `session/safety/tool-routing/execution/validation/output` |
 | Descriptor Registry（Rules / Skills / Tools / Agents） | ✅ 已实现 | Markdown + YAML frontmatter 加载、语义索引、启动校验 |
 | Prompt 组装器（tiktoken、KV Cache 友好顺序） | ✅ 已实现 | `packages/core/src/prompt` |
 | 任务调度器、DAG 校验、turn/task 重试簿记 | ✅ 已实现 | `packages/core/src/engine/scheduler.ts`；**LLM 失败时的 runtime provider fallback 未接线**（见 [LLM Provider](./docs/guides/providers-and-integrations.md)） |
@@ -48,11 +48,11 @@ Tachu 以 Bun 原生 TypeScript Monorepo 形式发布，包含三个已发布包
 | OTel / JSONL Emitter | ✅ 已实现 | |
 | `tachu init` / `tachu run` / `tachu chat` CLI、流式渲染、Session 持久化、Ctrl+C 语义 | ✅ 已实现 | |
 | **CLI 终端 Markdown 渲染** | ✅ **已实现** | 基于 `marked` + `marked-terminal` + `cli-highlight` 栈。作用于 `tachu chat` / `tachu run --output text` 的最终回复：TTY 环境自动开启，`NO_COLOR` / 非 TTY / `--no-color` 下自动关闭；`tachu run` 支持通过 `--markdown` / `--no-markdown` 显式开关。专用封装 `renderMarkdownToAnsi`（`packages/cli/src/renderer/markdown.ts`），附 12 个单测（`markdown.test.ts`）。 |
-| **Phase 3 意图分析（LLM 调用，纯分类）** | ✅ **已实现** | 仅做分类（`IntentResult`）；面向用户的最终答复由 Phase 7 `direct-answer` 负责。**实现：** `packages/core/src/engine/phases/intent.ts`（`INTENT_SYSTEM_PROMPT_BASE`、快速路径、JSON 解析、启发式兜底）；测试：`intent.test.ts`。宿主可 **`config.intent.systemPromptBase`** 完整替换 base；可选追加 few-shot：`config.intent.fewShotExamples`（Agent Context / explicit selections 仍由 core 追加）。 |
-| **Phase 5 任务规划（planning router）** | ✅ **已实现** | 强制 `plans[0].tasks.length >= 1`。规则：(1) `simple` 意图 → 单步 `direct-answer` 子流程任务；(2) `complex` + 有可见工具 → 单步 `tool-use` 子流程任务；(3) `complex` + 无可见工具 → 单步 `direct-answer` 子流程任务（携带 `warn: true`）；(4) 后置守护：上游回归导致 `tasks` 为空时自动兜底。多步行为由 `tool-use` 内部承担；未来可以继续演进 Plan Preview / Human Review，但主路径不存在单独的默认 LLM 预规划器。 |
-| **`direct-answer` 内置子流程（Phase 7）** | ✅ **已实现** | `packages/core/src/engine/subflows/direct-answer.ts`。解析 `capabilityMapping.intent`（未命中时回退到 `fast-cheap`），组合 system + ≤10 条历史 + 用户 prompt，以合并后的 AbortSignal 调用 `ProviderAdapter.chat()`，单次超时 60s。System Prompt 强制**自然语言 + Markdown**、禁止 JSON 壳 / `"已识别请求：…"` 模板 / 4 空格缩进式代码块；`warn: true` 时子流程会坦诚说明"当前无匹配工具"。observability 事件统一以 `phase: "direct-answer"` 发出（`llm_call_start` / `llm_call_end`）。保留名机制：`DescriptorRegistry` 会把 `direct-answer` 列入保留名，业务侧注册 / 注销同名描述符将抛 `RegistryError.reservedName`。 |
-| **Phase 8 结果验证 Outcome** | 🟡 **部分接线** | `ValidationOutcome` 联合类型 + `ValidationRuleRegistry`（**5 条 deterministic rules**，见 `buildDefaultValidationRuleRegistry()`，`packages/core/src/engine/phases/validation/index.ts`）。可选 `ProviderSemanticJudgeAdapter` / `BudgetedSemanticJudgeAdapter`。Engine 消费 `retry`（turn 循环，`decideTurnRetry`）、`degrade` / `handoff`（退出到 Output）。缺口：无独立 `ExecutionPolicy` 类型；runtime provider fallback 未实现，semantic judge 尚非 production-complete。 |
-| **Phase 9 输出装配** | ✅ **已实现** | 内容选择顺序：`taskResults['task-direct-answer']` → 结构化 `{intent, taskResults}` JSON（工具链成功路径；语义层面的润色仍依赖真实 Phase 8）→ 中文诚实回退文案（validation 未通过）。内部 state JSON 不会再外泄到用户侧。专项测试见 `output.test.ts`。 |
+| **`tool-routing` 确定性路由（不含 LLM 调用）** | ✅ **已实现** | 取代原 `intent`/`precheck`/`planning`/`graph-check` 四个 phase（均已物理删除）。恒产出单个 `RankedPlan`（`rank: 1`），内含一个 `{ type: "sub-flow", ref: "tool-use" }` 任务；经 `ToolActivator.visibleTools` 收窄工具集，并内联做最小依赖图校验（`validatePlan`）。**实现：** `packages/core/src/engine/phases/tool-routing.ts`；测试：`tool-routing.test.ts`。 |
+| **`tool-use` 深单 agentic loop（唯一主干）** | ✅ **已实现** | 每一步由 LLM 自主决定调用工具、派发只读 subagent（`dispatch_agent`）还是直接作答——无工具调用的一步自然成为终答（`terminalDraft`），因此不再有独立的"直接回答"子流程。loop-lifecycle 9 个 Hook（`turnStart`/`preLLM`/`postLLM`/`preToolUse`/`postToolUse`/`turnStop`/`preSubagent`/`postSubagent`/`preCompact`）在每一步触发；内置 per-step 上下文预算自动压缩与 `shortTaskRoute` 低价模型快速路径。**实现：** `packages/core/src/engine/subflows/tool-use.ts`。 |
+| **Subagent 派发（`dispatch_agent`，ADR-0006 D6）** | ✅ **已实现** | 内置 Task-style 工具，允许 loop LLM 派发**只读** subagent（Single-Writer Rule：`allowedTools` 确定性过滤为 `readonly`，未知工具 fail-closed 排除）；返回**summary-only** 结果（`output` + `evidence`，不含完整子 loop transcript）；`maxDepth` 默认 `1`（禁止嵌套派发）。 |
+| **`turnStop` guardrail —— 结果验证** | 🟡 **部分接线** | `ValidationOutcome` 联合类型 + `ValidationRuleRegistry`（**5 条 deterministic rules**，见 `buildDefaultValidationRuleRegistry()`，`packages/core/src/engine/phases/validation/index.ts`），以 `Guardrail`（`pass/block/degrade/annotate`）形式挂载在 `turnStop`。可选 `ProviderSemanticJudgeAdapter` / `BudgetedSemanticJudgeAdapter`。Engine 通过 turn 级 do-while 循环消费 `retry`（`decideTurnRetry`，经 `runtime.maxTurnRetries` 显式开启，默认 `0`）、`degrade` / `handoff`（退出到 `output`）。缺口：runtime provider fallback 未实现，semantic judge 尚非 production-complete。 |
+| **`output` 输出装配** | ✅ **已实现** | 内容选择顺序：`candidateAnswer.content`（loop 的 `terminalDraft`，validation 通过）→ agent 派发汇总文案 → 结构化 `{intent, taskResults}` JSON（兜底路径）→ 本地确定性模板兜底（validation 未通过；ADR-0006 D4 起**绝不**调用 LLM）。内部 state JSON 不会再外泄到用户侧。专项测试见 `output.test.ts`。 |
 | 真实环境端到端烟测（OpenAI / Anthropic / Azure 等） | 🟡 **已手工验证；可选脚本化** | CI 内 Adapter 以 Mock 单测为主；维护者已 **手工跑通** 真实 LLM 路径（含自建网关）。仓库提供 **可选** 脚本化 e2e —— 预先配置 `TACHU_REAL_E2E=1` 与 `TACHU_E2E_API_KEY` / `TACHU_E2E_API_BASE` / `TACHU_E2E_PROVIDER`（见[贡献指南](./CONTRIBUTING.md)）—— 但默认 CI 不发布签署记录。 |
 | 生产加固（SLO、错误预算、故障注入、签名 provenance） | 🔴 未开展 | `1.0.0`（Tachu v1）目标。 |
 
@@ -62,16 +62,16 @@ Tachu 以 Bun 原生 TypeScript Monorepo 形式发布，包含三个已发布包
 
 ## 核心亮点（Key Features）
 
-- **9 阶段执行主干** — 会话管理 → 安全准入 → 意图分析（纯分类）→ 前置校验 → planning router → DAG 校验 → 子任务执行 → 结果验证 outcome → 输出规范；每个阶段类型安全、可挂钩，且每个请求（simple 或 complex）都会完整穿过 9 个阶段，Rules / Hooks / Observability / 预算熔断统一生效
-- **任务计划 + 工具循环（Task Planning + Tool-use Loop）** — Phase 5 不预先生成完整的排序多步计划，而是把 `simple` 请求路由到 `direct-answer`，把 `complex + 可见工具` 路由进内置 `tool-use` Agentic Loop，由循环内部完成 LLM 工具选择 → 受控工具执行 → 工具结果回灌 → 最终答复。
-- **`direct-answer` 内置子流程** — 对 simple 请求（以及 complex 但无匹配工具的请求），最终答复由一个引擎内置的一等公民子流程在 Phase 7 产出，不再由意图分析阶段捎带。
+- **深单 Agentic Loop** — 会话管理 → 安全准入 → 确定性 tool-routing → `tool-use` loop → 结果验证 → 输出规范；每个请求都完整穿过同一套 6 阶段骨架，Rules / Hooks / Observability / 预算熔断统一生效，而多步 LLM 决策只发生在 loop 内部（完整动机见 [ADR-0006](https://github.com/tachu-project/tachu-docs/blob/main/adr/decisions/0006-loop-lifecycle-harness-surface.md)）
+- **Loop-Lifecycle 守卫面** — 9 个 Hook 点（`turnStart`/`preLLM`/`postLLM`/`preToolUse`/`postToolUse`/`turnStop`/`preSubagent`/`postSubagent`/`preCompact`）取代原先按 phase 挂载的 Hook；对称 `Guardrail` 契约（`pass`/`block`/`degrade`/`annotate`，fail-closed）挂载在 `turnStart`（SafetyModule baseline + 业务策略）与 `turnStop`（结果验证）
+- **Subagent 派发** — loop 内 LLM 可通过内置 `dispatch_agent` 工具派发只读 subagent（Single-Writer Rule、summary-only 契约、`maxDepth` 默认 1）
 - **双平面匹配（Dual-Plane Matching）** — 语义发现（向量相似度）+ 确定性执行闸门（Scopes、白名单、审批），作用于所有 Rules、Skills、Tools 和 Agents
 - **四大核心抽象** — 以 Markdown + YAML frontmatter 描述符声明 Rules、Skills、Tools、Agents；引擎自动解析、激活并编排
 - **OpenAI 与 Anthropic Adapter** — 流式、函数调用、`baseURL` / `organization` / `timeoutMs` 可配置；可对接 Azure OpenAI / LiteLLM / OpenRouter / 任意自建网关
 - **MCP 集成** — 通过 `McpToolAdapter` 接入任意 MCP 服务端（stdio 或 SSE）；MCP Tools 成为引擎一等公民
 - **精确 Token 计数** — 基于 tiktoken 的精确 Token 统计；KV Cache 友好的 Prompt 布局；自动上下文压缩（Head-Middle-Tail 策略）
 - **结构化记忆（Memory System）** — 会话上下文窗口（含可配置上限）；压缩前强制归档；长期向量记忆召回
-- **OpenTelemetry 可观测性** — 每个阶段进入/退出、LLM 调用、Tool 调用、重试和降级都产出结构化 `EngineEvent`；内置 OTel 与 JSONL Emitter
+- **OpenTelemetry 可观测性** — 6 阶段进入/退出边界 + loop 内扁平 per-step 事件（`tool_loop_step_*` / `tool_call_*` / `llm_call_*` / `hook_fired`，以 `parentStepId` 关联）、重试和降级都产出结构化 `EngineEvent`；内置 OTel 与 JSONL Emitter
 - **交互式 CLI** — `tachu chat` / `tachu run` / `tachu init`，完整参数体系、流式渲染、Session 持久化、Ctrl+C 取消传播
 - **终端 Markdown 渲染** —— 最终回复由 `marked` + `marked-terminal` + `cli-highlight` 渲染；支持标题、粗体 / 斜体、列表、块引用、链接、表格、带代码高亮的 fenced code block。`NO_COLOR` / 非 TTY / `--no-color` 下自动关闭；`tachu run` 可通过 `--markdown` / `--no-markdown` 显式控制。
 - **Fail-Closed 安全基线** — 循环防护、预算熔断、基础输入校验硬编码于引擎核心，不可关闭
@@ -103,7 +103,7 @@ Rule、Skill、Tool、Agent 以 Markdown + YAML 描述符声明。语义发现�
 
 ## 架构概览（摘要）
 
-请求经 **9 阶段主干**；复杂工具任务在 Phase 7 进入内置 `tool-use` Agentic Loop。
+请求经 **6 阶段外层骨架**（`session → safety → tool-routing → execution → validation → output`）；`tool-routing` 确定性地把每个请求路由进内置 `tool-use` **深单 agentic loop**，多步 LLM 决策只发生在这个 loop 内部。
 
 详见 [Pipeline 阶段详解](./docs/architecture/pipeline-phases.md) · [概要设计](./docs/overview-design.md)。
 
@@ -129,7 +129,7 @@ bun add -g @tachu/cli@rc
 安装完成后验证：
 
 ```bash
-tachu --version   # 预期输出 1.0.0-rc.0 或更新
+tachu --version   # 预期输出 1.0.0-rc.10 或更新
 ```
 
 ---
@@ -167,7 +167,7 @@ tachu chat --resume
 | [概要设计](./docs/overview-design.md) | 愿景、分层、抽象、主干流程 |
 | [详细设计](./docs/detailed-design.md) | 类型、模块、配置 Schema |
 | [技术设计](./docs/technical-design.md) | 工程结构与实现指南 |
-| [Pipeline 阶段详解](./docs/architecture/pipeline-phases.md) | 9 阶段与 tool-use 循环 |
+| [Pipeline 阶段详解](./docs/architecture/pipeline-phases.md) | 6 阶段骨架与 tool-use 深单 loop |
 | [包结构](./docs/architecture/package-layout.md) | Monorepo 包与依赖 |
 | [设计原则](./docs/architecture/design-principles.md) | 核心工程原则 |
 | [CLI 参考](./docs/guides/cli.md) | 命令与参数 |

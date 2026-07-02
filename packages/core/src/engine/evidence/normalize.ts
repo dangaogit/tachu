@@ -1,7 +1,7 @@
 import type {
   AgentDescriptor,
   AnyDescriptor,
-  RankedPlan,
+  ExecutionRoute,
   StepStatus,
   ToolDescriptor,
   ToolUseObservation,
@@ -89,7 +89,7 @@ const observationToEvidence = (
  */
 export interface FileWriteNormalizationInput {
   steps: readonly StepStatus[];
-  plan?: RankedPlan | undefined;
+  plan?: ExecutionRoute | undefined;
   registry?: DescriptorRegistryView | undefined;
   toolUseResult?: ToolUseResult | null | undefined;
 }

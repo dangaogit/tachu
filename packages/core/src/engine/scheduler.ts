@@ -1,5 +1,5 @@
 import { EngineError, PlanningError, TimeoutError } from "../errors";
-import type { ExecutionContext, RankedPlan, TaskNode, TurnErrorSource } from "../types";
+import type { ExecutionContext, ExecutionRoute, TaskNode, TurnErrorSource } from "../types";
 import { createLinkedAbortController, throwIfAborted } from "../utils";
 
 export interface TaskExecutionError {
@@ -91,32 +91,32 @@ export class TaskScheduler {
   constructor(private readonly executor: TaskExecutor) {}
 
  /**
- * 执行规划中的任务图并持续产出任务状态。
+ * 执行路由中的任务图并持续产出任务状态。
  *
- * @param plan 已通过校验的任务计划
+ * @param route 已通过校验的执行路由（任务图）
  * @param context 执行上下文
  * @param options 调度与运行时控制选项
  * @returns 任务结果异步流
  * @throws PlanningError 当依赖图非法或存在环时抛出
  */
   async *execute(
-    plan: RankedPlan,
+    route: ExecutionRoute,
     context: ExecutionContext,
     options: SchedulerOptions,
   ): AsyncIterable<TaskResult> {
     const maxConcurrency = options.maxConcurrency ?? 4;
     const taskTimeoutMs = options.taskTimeoutMs ?? DEFAULT_TASK_TIMEOUT_MS;
     const failFast = options.failFast ?? false;
-    const taskMap = new Map(plan.tasks.map((task) => [task.id, task]));
+    const taskMap = new Map(route.tasks.map((task) => [task.id, task]));
     const inDegree = new Map<string, number>();
     const outgoing = new Map<string, string[]>();
 
-    for (const task of plan.tasks) {
+    for (const task of route.tasks) {
       inDegree.set(task.id, 0);
       outgoing.set(task.id, []);
     }
 
-    for (const edge of plan.edges) {
+    for (const edge of route.edges) {
       if (!taskMap.has(edge.from) || !taskMap.has(edge.to)) {
         throw PlanningError.invalidPlan(`依赖边引用未知任务: ${edge.from} -> ${edge.to}`);
       }
@@ -146,7 +146,7 @@ export class TaskScheduler {
       running.set(taskId, promise);
     };
 
-    while (finished < plan.tasks.length) {
+    while (finished < route.tasks.length) {
       throwIfAborted(options.abortSignal);
 
       while (readyQueue.length > 0 && running.size < maxConcurrency) {

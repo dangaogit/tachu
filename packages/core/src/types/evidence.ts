@@ -3,7 +3,6 @@ import type { EnginePhase } from "./io";
 export type EvidenceProducerId =
   | EnginePhase
   | "tool-use"
-  | "direct-answer"
   | "agent-runtime"
   | "host";
 

@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import type {
   AgentDescriptor,
   AnyDescriptor,
-  RankedPlan,
+  ExecutionRoute,
   ToolDescriptor,
   ToolUseResult,
 } from "../../types";
@@ -95,8 +95,7 @@ describe("normalizeFileWriteRecords (descriptor-driven file writes)", () => {
     maxDepth: 1,
     instructions: "",
   };
-  const plan: RankedPlan = {
-    rank: 1,
+  const plan: ExecutionRoute = {
     tasks: [
       { id: "t-write", type: "tool", ref: "write-file", input: {} },
       { id: "t-deploy", type: "agent", ref: "deploy-agent", input: {} },
@@ -147,7 +146,6 @@ describe("normalizeFileWriteRecords (descriptor-driven file writes)", () => {
     const evidence = normalizeFileWriteRecords({
       steps: [{ name: "t-write", status: "completed" }],
       plan: {
-        rank: 1,
         tasks: [{ id: "t-write", type: "tool", ref: "patch-irrelevant", input: {} }],
         edges: [],
       },
@@ -168,8 +166,7 @@ describe("normalizeExternalSourceRefs (descriptor-driven external sources)", () 
     name: "read-file",
     dataSource: "internal",
   };
-  const plan: RankedPlan = {
-    rank: 1,
+  const plan: ExecutionRoute = {
     tasks: [
       { id: "t-fetch", type: "tool", ref: "web-fetch", input: {} },
       { id: "t-read", type: "tool", ref: "read-file", input: {} },

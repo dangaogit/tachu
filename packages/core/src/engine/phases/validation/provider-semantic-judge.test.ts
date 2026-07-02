@@ -33,7 +33,7 @@ describe("ProviderSemanticJudgeAdapter", () => {
     const findings = await adapter.judge({
       prompt: "intent=test",
       signals: {
-        finalAnswerHasClaims: true,
+        answerHasClaims: true,
         hasToolObservations: false,
         hasExternalSources: true,
         hasFileWrites: false,
@@ -75,7 +75,7 @@ describe("ProviderSemanticJudgeAdapter", () => {
     await adapter.judge({
       prompt: "intent=test",
       signals: {
-        finalAnswerHasClaims: false,
+        answerHasClaims: false,
         hasToolObservations: false,
         hasExternalSources: false,
         hasFileWrites: false,
@@ -103,7 +103,7 @@ describe("ProviderSemanticJudgeAdapter", () => {
     const findings = await adapter.judge({
       prompt: "intent=test",
       signals: {
-        finalAnswerHasClaims: false,
+        answerHasClaims: false,
         hasToolObservations: false,
         hasExternalSources: false,
         hasFileWrites: false,

@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
 import { performance } from "node:perf_hooks";
-import { TaskScheduler, type RankedPlan, type TaskNode } from "../src";
+import { TaskScheduler, type ExecutionRoute, type TaskNode } from "../src";
 
-const buildPlan = (): RankedPlan => {
+const buildPlan = (): ExecutionRoute => {
   const tasks: TaskNode[] = [];
-  const edges: RankedPlan["edges"] = [];
+  const edges: ExecutionRoute["edges"] = [];
   const layers = 25;
   const width = 4;
   for (let l = 0; l < layers; l += 1) {
@@ -23,13 +23,13 @@ const buildPlan = (): RankedPlan => {
       }
     }
   }
-  return { rank: 1, tasks, edges };
+  return { tasks, edges };
 };
 
 test("scheduler benchmark 100 tasks dag", async () => {
   const scheduler = new TaskScheduler(async (task) => {
     await Bun.sleep(1);
-    return task.id;
+    return { ok: true, output: task.id };
   });
   const plan = buildPlan();
   const started = performance.now();

@@ -39,7 +39,7 @@ const isToolUseResult = (value: unknown): value is ToolUseResult => {
  *
  * 判定规则：
  * - 只看本轮 `state.steps` 中真实跑过的任务（不含 skipped）；
- * - 通过 `state.planning.plans[0].tasks` 找到 task → descriptor 的映射；
+ * - 通过 `state.route.tasks` 找到 task → descriptor 的映射；
  * - 仅 `tool` / `agent` 描述符携带 `sideEffect`，二者 `sideEffect ∈ {write, irreversible}` 视为写入类。
  *
  * 当 registry 未绑定（test fixture 兼容）时返回 `false`，避免抛错。
@@ -49,14 +49,13 @@ const detectFileWriteSideEffect = (
   env: PhaseEnvironment,
 ): boolean => {
   if (!env.registry || typeof env.registry.get !== "function") return false;
-  const plan = state.planning.plans[0];
-  if (!plan) return false;
+  const route = state.route;
   const executedTaskIds = new Set(
     state.steps
       .filter((step) => step.status !== "skipped")
       .map((step) => step.name),
   );
-  for (const task of plan.tasks) {
+  for (const task of route.tasks) {
     if (!executedTaskIds.has(task.id)) continue;
     if (task.type !== "tool" && task.type !== "agent") continue;
     const descriptor = env.registry.get(task.type, task.ref);
@@ -81,7 +80,7 @@ const buildSignals = (
   const observations = toolUseResults.flatMap((result) => result.observations);
   const claimCount = candidateAnswer?.claims.length ?? 0;
   return {
-    finalAnswerHasClaims: claimCount > 0,
+    answerHasClaims: claimCount > 0,
     hasToolObservations: observations.length > 0,
     hasExternalSources: evidence.some(
       (entry) =>
@@ -125,7 +124,7 @@ const reduceOutcome = (findings: readonly ValidationFinding[]): ValidationOutcom
       target:
         retryableError.code === "tool_use_partial"
           ? "tool-loop-finalize"
-          : "next-plan",
+          : "retry-turn",
     };
   }
   const error = findings.find((finding) => finding.severity === "error");
@@ -150,7 +149,7 @@ const reduceOutcome = (findings: readonly ValidationFinding[]): ValidationOutcom
  * - `policyMode === "deterministic-only"` → 永远不触发；
  * - `policyMode === "auto"` → 仅当满足任一条件：
  * a. signals.descriptorSemanticRequired === true；
- * b. signals.finalAnswerHasClaims === true 且 hasExternalSources === true。
+ * b. signals.answerHasClaims === true 且 hasExternalSources === true。
  */
 const shouldInvokeSemanticJudge = (signals: ValidationSignals): boolean => {
   switch (signals.policyMode) {
@@ -162,7 +161,7 @@ const shouldInvokeSemanticJudge = (signals: ValidationSignals): boolean => {
     case "auto":
       return (
         signals.descriptorSemanticRequired === true ||
-        (signals.finalAnswerHasClaims === true && signals.hasExternalSources === true)
+        (signals.answerHasClaims === true && signals.hasExternalSources === true)
       );
     default:
       return false;
@@ -215,7 +214,7 @@ export const runValidationPhase = async (
   semanticJudge?: SemanticJudgeAdapter,
 ): Promise<ValidationPhaseOutput> => {
   const failed = state.steps.filter((step) => step.status === "failed");
-  const plan = state.planning.plans[0];
+  const route = state.route;
   const validationConfig = (env.config as ValidationConfigShape).validation;
   const evidence = state.evidence ?? [];
   const candidateAnswer = state.candidateAnswer;
@@ -225,18 +224,14 @@ export const runValidationPhase = async (
     ...state,
     validationConfig: validationConfig ?? {},
   } as typeof state & { validationConfig: NonNullable<ValidationConfigShape["validation"]> };
-  const ruleContext = plan
-    ? {
-        state: stateWithConfig,
-        plan,
-        registry: env.registry,
-        evidence,
-        candidateAnswer,
-      }
-    : null;
-  const deterministicFindings = ruleContext
-    ? registry.evaluateAll(ruleContext)
-    : [];
+  const ruleContext = {
+    state: stateWithConfig,
+    route,
+    registry: env.registry,
+    evidence,
+    candidateAnswer,
+  };
+  const deterministicFindings = registry.evaluateAll(ruleContext);
   const policyMode: ValidationSignals["policyMode"] =
     validationConfig?.policyMode ?? "deterministic-only";
   const baseSignals = buildSignals(
@@ -320,5 +315,5 @@ const buildSemanticJudgePrompt = (state: ExecutionPhaseOutput): string => {
   const steps = state.steps
     .map((step) => `${step.name}:${step.status}`)
     .join(",");
-  return `intent=${state.intent.intent};complexity=${state.intent.complexity};steps=[${steps}]`;
+  return `intent=${state.intent.intent};steps=[${steps}]`;
 };

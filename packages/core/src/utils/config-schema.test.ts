@@ -575,32 +575,20 @@ describe("validateEngineConfig", () => {
  describe("systemPromptBase 各阶段覆盖", () => {
  test("接受合法 systemPromptBase 并透传", () => {
       const config = validateEngineConfig({
-        intent: { systemPromptBase: "custom intent base" },
         toolUse: {
           systemPromptBase: "custom tool base",
-          finalAnswerSystemPromptBase: "custom final base",
           systemPromptSuffix: "suffix",
         },
-        directAnswer: { systemPromptBase: "custom direct base" },
         validation: { semanticJudgeSystemPromptBase: "custom judge base" },
       });
-      expect(config.intent?.systemPromptBase).toBe("custom intent base");
       expect(config.toolUse?.systemPromptBase).toBe("custom tool base");
-      expect(config.toolUse?.finalAnswerSystemPromptBase).toBe("custom final base");
       expect(config.toolUse?.systemPromptSuffix).toBe("suffix");
-      expect(config.directAnswer?.systemPromptBase).toBe("custom direct base");
       expect(config.validation?.semanticJudgeSystemPromptBase).toBe("custom judge base");
     });
 
  test("空串 systemPromptBase 抛 ValidationError", () => {
       expect(() =>
-        validateEngineConfig({ intent: { systemPromptBase: "" } }),
-      ).toThrow(ValidationError);
-      expect(() =>
         validateEngineConfig({ toolUse: { systemPromptBase: "   " } }),
-      ).toThrow(ValidationError);
-      expect(() =>
-        validateEngineConfig({ directAnswer: { systemPromptBase: "" } }),
       ).toThrow(ValidationError);
       expect(() =>
         validateEngineConfig({ validation: { semanticJudgeSystemPromptBase: "" } }),
@@ -610,7 +598,7 @@ describe("validateEngineConfig", () => {
  test("超长 systemPromptBase 抛 ValidationError", () => {
       const oversized = "A".repeat(32 * 1024 + 1);
       expect(() =>
-        validateEngineConfig({ intent: { systemPromptBase: oversized } }),
+        validateEngineConfig({ toolUse: { systemPromptBase: oversized } }),
       ).toThrow(ValidationError);
     });
   });

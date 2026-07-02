@@ -43,7 +43,7 @@ describe("withDefaultGate", () => {
     });
 
     const result = await gated(
-      buildToolTask({ type: "sub-flow", ref: "direct-answer" }),
+      buildToolTask({ type: "sub-flow", ref: "tool-use" }),
       buildContext(),
       new AbortController().signal,
     );

@@ -50,13 +50,11 @@ export type ResourceDemand =
     };
 
 /**
- * 消费该次物化的下游单元。区分**推理/函数调用**（tool-use）、
- * 直答（direct-answer）与终答合成（candidate-answer），用于 degradation 分域处理。
+ * 消费该次物化的下游单元。区分**推理/函数调用**（tool-use，ADR-0006 塌陷为深单
+ * loop 后的唯一 Provider 调用点）与终答合成（candidate-answer），用于
+ * degradation 分域处理。
  */
-export type ResourceDemandUnit =
-  | "direct-answer"
-  | "tool-use"
-  | "candidate-answer";
+export type ResourceDemandUnit = "tool-use" | "candidate-answer";
 
 /**
  * kind→key 展开的消息作用域。

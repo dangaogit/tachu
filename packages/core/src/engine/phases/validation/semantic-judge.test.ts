@@ -10,7 +10,7 @@ import type { ValidationFinding, ValidationSignals } from "../../../types";
 
 const signals: ValidationSignals = {
   intentValidationNeed: "semantic",
-  finalAnswerHasClaims: true,
+  answerHasClaims: true,
   hasToolObservations: true,
   hasExternalSources: false,
   hasFileWrites: false,

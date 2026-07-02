@@ -1,22 +1,4 @@
 import type { ToolDescriptor } from "./descriptor";
-import type { IntentTurnPolicyLlmOutput } from "./turn-policy";
-
-/**
- * 意图分析结果。
- *
- * `IntentResult` 以复杂度 + 意图摘要 + 会话相关性为主干；
- * 本轮能力进退清单由可选字段 `turnPolicy` 表达（见 
- * 不包含 `directAnswer`：面向用户的自然语言答复统一由 Phase 7 的内置
- * Sub-flow `direct-answer` 产出（参见 ADR 0001）。
- */
-export interface IntentResult {
-  complexity: "simple" | "complex";
-  intent: string;
-  contextRelevance: "related" | "unrelated";
- /** Intent LLM subset; normalized to {@link InputMetadata.turnPolicy} after intent phase. */
-  turnPolicy?: IntentTurnPolicyLlmOutput | undefined;
-  relevantContext?: unknown | undefined;
-}
 
 /**
  * 任务节点。
@@ -52,19 +34,15 @@ export interface TaskEdge {
 }
 
 /**
- * 排名方案。
+ * tool-routing 确定性阶段产出的单步执行路由。
+ *
+ * 深单 loop（ADR-0006）下 tool-routing 恒产出**单一** route —— 一个
+ * `tool-use` 任务，或显式 `@agent` 提及的 agent-batch 任务集 —— 不再有
+ * 历史 `PlanningResult { plans: RankedPlan[] }` 的多方案排名 / 切换结构。
  */
-export interface RankedPlan {
-  rank: number;
+export interface ExecutionRoute {
   tasks: TaskNode[];
   edges: TaskEdge[];
-}
-
-/**
- * 规划结果。
- */
-export interface PlanningResult {
-  plans: RankedPlan[];
  /** Visible tools resolved by ToolActivator for the tool-use sub-flow. */
   visibleTools?: ToolDescriptor[];
 }
@@ -93,14 +71,18 @@ export type ValidationOutcome =
   | {
       kind: "retry";
       reason: string;
-      target: "same-plan" | "next-plan" | "tool-loop-finalize";
+     /**
+      * `retry-turn`：回到 `tool-routing` 重跑整个 turn（受 maxRetries 约束）。
+      * `tool-loop-finalize`：tool-use sub-flow 内部信号，turn 级 exit。
+      */
+      target: "retry-turn" | "tool-loop-finalize";
     }
   | { kind: "degrade"; reason: string; userVisibleReason: string }
   | { kind: "handoff"; reason: string; userVisibleReason: string };
 
 export interface ValidationSignals {
   intentValidationNeed?: "none" | "deterministic" | "semantic" | undefined;
-  finalAnswerHasClaims: boolean;
+  answerHasClaims: boolean;
   hasToolObservations: boolean;
   hasExternalSources: boolean;
   hasFileWrites: boolean;
@@ -126,14 +108,12 @@ export interface ValidationResult {
   findings?: ValidationFinding[] | undefined;
   signals?: ValidationSignals | undefined;
   diagnosis?: {
-    type: "execution_issue" | "planning_issue";
+    type: "execution_issue";
     reason: string;
  /**
  * 失败任务 ID 列表（可选）。
  *
- * 用于：
- * - Orchestrator 在切换备选方案时定位"失败子图"
- * - Output 阶段在 honest fallback 中输出"哪些任务失败"
+ * 供 Output 阶段在 honest fallback 中输出"哪些任务失败"。
  */
     failedTaskIds?: string[];
   } | undefined;

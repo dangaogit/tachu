@@ -35,7 +35,7 @@ export interface RegistryOptions {
  /**
  * 保留名集合。
  *
- * 设计目的：引擎内置 Sub-flow（`direct-answer` / `tool-use`）会被 Phase 5
+ * 设计目的：引擎内置 Sub-flow（`tool-use`）会被 `tool-routing` phase
  * 规划为 `TaskNode.ref`。如果业务注册同名 Tool/Agent/Skill/Rule，
  * 虽然不会与内置 Sub-flow 直接冲突（TaskExecutor 根据 `type==='sub-flow'` 分流），
  * 但会在可观测日志、向量检索、自定义 TaskExecutor 里引起歧义。因此引擎在

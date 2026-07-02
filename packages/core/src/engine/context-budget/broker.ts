@@ -23,13 +23,8 @@ const trimOrderFor = (scope: ContextBudgetRequest["scope"]): string[] => {
       return ["recalled-memory", "available-skills", "history"];
     case "main-agent":
       return ["recalled-memory", "available-skills", "history", "tool-definitions"];
-    case "direct-answer":
- // 直答阶段：tools/skills 不参与生成；最先丢；最后才动用户上下文。
-      return ["tool-definitions", "available-skills", "recalled-memory", "history"];
     case "tool-use-loop":
       return ["old-tool-observations", "old-assistant-turns", "tool-definitions"];
-    case "tool-use-final-answer":
-      return ["old-observations", "terminal-draft", "user-request"];
     case "fallback-summary":
  // Fallback 摘要阶段：原始 step 详情优先压缩，保留结论与失败原因。
       return ["step-details", "tool-observations", "history"];

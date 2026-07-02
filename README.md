@@ -8,7 +8,7 @@
 [![bun](https://img.shields.io/badge/runtime-bun-orange)](https://bun.sh)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-blue)](https://www.typescriptlang.org)
 
-> **Project Status — Release Candidate.** The 9-phase pipeline, registry, prompt assembler, CLI, OpenAI / Anthropic / Qwen / Gemini adapters, MCP adapters, vector stores and observability emitters are wired up and tested. Phase 3 (Intent Analysis) is a real LLM call, Phase 5 routes complex tool-capable requests to the built-in `tool-use` loop, and Phase 8 runs deterministic validation rules with optional semantic judge. Runtime provider fallback and semantic judge production hardening remain post-rc work. Install via the `@rc` dist-tag.
+> **Project Status — Release Candidate.** The engine runs a **deep single agentic loop** as its execution spine (6-phase outer skeleton: `session → safety → tool-routing → execution → validation → output`), registry, prompt assembler, CLI, OpenAI / Anthropic / Qwen / Gemini adapters, MCP adapters, vector stores and observability emitters are wired up and tested. `tool-routing` deterministically constructs a single `tool-use` task for every request (no LLM classification step); the `tool-use` loop lets the LLM decide whether to call tools, dispatch a read-only sub-agent, or answer directly, and `validation` runs deterministic rules (with optional semantic judge) as a `turnStop` guardrail. Runtime provider fallback and semantic judge production hardening remain post-rc work. Install via the `@rc` dist-tag.
 
 ---
 
@@ -16,7 +16,7 @@
 
 Tachu aims to be an **agentic engine you can build a real product on** — not a toy demo, not a thin wrapper. It is the *Harness* in the equation **Agent = Model + Harness**: it provides the structural skeleton (protocol, lifecycle, safety, memory, orchestration) so that any LLM becomes a reliable, observable Agent.
 
-The engine is intentionally **domain-agnostic**: it knows nothing about your business logic, your users, or your domain vocabulary. Instead, it defines a small set of core abstractions (Rules, Skills, Tools, Agents) through which your business fills in all the intelligence. Tachu is designed to handle the hard parts — 9-phase execution pipeline, dual-plane semantic matching, context window management, token-precise prompt assembly, structured retry/fallback, cancellation propagation, and end-to-end observability.
+The engine is intentionally **domain-agnostic**: it knows nothing about your business logic, your users, or your domain vocabulary. Instead, it defines a small set of core abstractions (Rules, Skills, Tools, Agents) through which your business fills in all the intelligence. Tachu is designed to handle the hard parts — a deep single agentic loop with a loop-lifecycle guard surface, dual-plane semantic matching, context window management, token-precise prompt assembly, structured retry/fallback, cancellation propagation, and end-to-end observability.
 
 Tachu ships as a Bun-native TypeScript monorepo with three published packages — the zero-dependency engine core (`@tachu/core`), an official extensions library (`@tachu/extensions`), and a fully-featured CLI program (`@tachu/cli`) that doubles as the reference implementation — plus `@tachu/host-defaults` for shared CLI/embedded host wiring, and an optional private sidecar package (`@tachu/web-fetch-server`) for remote browser-backed web tools.
 
@@ -24,15 +24,15 @@ Tachu ships as a Bun-native TypeScript monorepo with three published packages �
 
 ## Project Status
 
-**Current release:** `1.0.0-rc.0` on the `rc` dist-tag.
+**Current release:** `1.0.0-rc.10` on the `rc` dist-tag.
 
 **Version terminology:** The product line is **Tachu v1**. Release candidates are stabilization builds for `1.0.0`, not a separate framework generation. HTTP paths like `/v1/extract` are API versions only. See [detailed-design § version glossary](docs/detailed-design.md#版本与发布术语必读).
 
-This is the **first release candidate**. The table below is a readability index only; runtime behavior, defaults, and edge cases are authoritative in the cited source files and tests.
+This is a **release candidate**. The table below is a readability index only; runtime behavior, defaults, and edge cases are authoritative in the cited source files and tests.
 
 | Capability | Status | Notes |
 |-----------|--------|-------|
-| 9-phase pipeline skeleton (types, orchestrator, state machine, hooks) | ✅ Implemented | `packages/core/src/engine` |
+| 6-phase outer skeleton + deep single agentic loop (types, orchestrator, state machine, loop-lifecycle hooks) | ✅ Implemented | `packages/core/src/engine`; `EnginePhase` = `session/safety/tool-routing/execution/validation/output` |
 | Descriptor Registry (Rules / Skills / Tools / Agents) | ✅ Implemented | Markdown + YAML frontmatter loader, semantic indexing, startup validation |
 | Prompt assembler (tiktoken, KV-cache-friendly ordering) | ✅ Implemented | `packages/core/src/prompt` |
 | Task scheduler, DAG validator, turn/task retry bookkeeping | ✅ Implemented | `packages/core/src/engine/scheduler.ts`; **runtime provider fallback on LLM errors is not wired** (see [Providers guide](./docs/guides/providers-and-integrations.md)) |
@@ -46,11 +46,11 @@ This is the **first release candidate**. The table below is a readability index 
 | OTel / JSONL emitters | ✅ Implemented | |
 | `tachu init` / `tachu run` / `tachu chat` CLI surface, streaming renderer, session persistence, Ctrl+C semantics | ✅ Implemented | |
 | **CLI terminal Markdown rendering** | ✅ **Implemented** | `marked` + `marked-terminal` + `cli-highlight` stack. Applied to the final assistant reply in `tachu chat` / `tachu run --output text` when stdout is a TTY; automatically disables under `NO_COLOR` / non-TTY / `--no-color`. Explicit control via `--markdown` / `--no-markdown` on `tachu run`. Dedicated `renderMarkdownToAnsi` wrapper (`packages/cli/src/renderer/markdown.ts`) with 12 unit tests in `markdown.test.ts`. |
-| **Phase 3 — Intent Analysis (LLM call, pure classification)** | ✅ **Implemented** | Pure classification only (`IntentResult`); final user reply is Phase 7 `direct-answer`. **Implementation:** `packages/core/src/engine/phases/intent.ts` (`INTENT_SYSTEM_PROMPT_BASE`, fast paths, JSON parse, heuristic fallback); tests: `intent.test.ts`. Hosts may **`config.intent.systemPromptBase`** to replace the base wholesale; optional extra few-shots: `config.intent.fewShotExamples` (Agent Context / explicit selections still appended by core). |
-| **Phase 5 — Task Planning (planning router)** | ✅ **Implemented** | Enforces `plans[0].tasks.length >= 1`. Rules: (1) `simple` intent → single `direct-answer` sub-flow task; (2) `complex` + visible tools → single `tool-use` sub-flow task; (3) `complex` + no visible tool → single `direct-answer` sub-flow task with `warn: true`; (4) defensive post-guard catches upstream regressions that leave `tasks` empty. Multi-step behavior lives inside `tool-use`; optional plan preview / human review may still evolve, but there is no separate default LLM pre-planner on the main path. |
-| **`direct-answer` built-in Sub-flow (Phase 7)** | ✅ **Implemented** | `packages/core/src/engine/subflows/direct-answer.ts`. Resolves `capabilityMapping.intent` (fallback to `fast-cheap`), composes system + ≤10 memory-history entries + user prompt, calls `ProviderAdapter.chat()` with a 60 s per-call timeout merged with the phase abort signal. System prompt mandates **natural-language Markdown**, forbids JSON wrappers / `"已识别请求：…"` templates / 4-space indented code blocks, and supports a `warn: true` flag for honest tool-missing disclaimers. Emits `llm_call_start` / `llm_call_end` observability events under `phase: "direct-answer"`. Non-overridable: `DescriptorRegistry` registers `direct-answer` as a reserved name and rejects business registration / unregistration with `RegistryError.reservedName`. |
-| **Phase 8 — Result Validation Outcome** | 🟡 **Partially wired** | `ValidationOutcome` union + `ValidationRuleRegistry` with **5 deterministic rules** via `buildDefaultValidationRuleRegistry()` (`packages/core/src/engine/phases/validation/index.ts`). Optional `ProviderSemanticJudgeAdapter` / `BudgetedSemanticJudgeAdapter`. Engine consumes `retry` (turn loop via `decideTurnRetry`), `degrade` / `handoff` (exit to Output). Gaps: no standalone `ExecutionPolicy` type; runtime provider fallback is not implemented and semantic judge is not production-complete. |
-| **Phase 9 — Output Assembly** | ✅ **Implemented** | Content selector: `taskResults['task-direct-answer']` → `{intent, taskResults}` structured JSON (tool-chain success path; semantic polish still depends on real Phase 8) → honest-fallback plain-language message with recognized intent + internal diagnosis + *"rephrase as simple"* suggestion (validation failed). Internal state JSON is never leaked to end users. Covered by `output.test.ts`. |
+| **`tool-routing` — deterministic routing (no LLM call)** | ✅ **Implemented** | Replaces the former `intent`/`precheck`/`planning`/`graph-check` phases (physically deleted). Always constructs a single `RankedPlan` (`rank: 1`) with one `{ type: "sub-flow", ref: "tool-use" }` task, narrows the visible tool set via `ToolActivator.visibleTools`, and runs a minimal dependency-graph check inline (`validatePlan`). **Implementation:** `packages/core/src/engine/phases/tool-routing.ts`; tests: `tool-routing.test.ts`. |
+| **`tool-use` — deep single agentic loop (唯一主干)** | ✅ **Implemented** | The LLM decides each turn whether to call tools, dispatch a read-only sub-agent (`dispatch_agent`), or answer directly — a tool-call-free turn naturally becomes the final answer (`terminalDraft`), so there is no separate "direct answer" sub-flow. Loop-lifecycle hooks (`turnStart`/`preLLM`/`postLLM`/`preToolUse`/`postToolUse`/`turnStop`/`preSubagent`/`postSubagent`/`preCompact`) fire at every step; per-step context-budget auto-compact and a `shortTaskRoute` cheap-model fast path are built in. **Implementation:** `packages/core/src/engine/subflows/tool-use.ts`. |
+| **Subagent dispatch (`dispatch_agent`, ADR-0006 D6)** | ✅ **Implemented** | Built-in Task-style tool lets the loop LLM spawn a **read-only** sub-agent (Single-Writer Rule: `allowedTools` deterministically filtered to `readonly`, fail-closed for unknown tools); returns a **summary-only** result (`output` + `evidence`, no full sub-loop transcript); `maxDepth` defaults to `1` (no nested spawning). |
+| **`turnStop` guardrail — Result Validation** | 🟡 **Partially wired** | `ValidationOutcome` union + `ValidationRuleRegistry` with **5 deterministic rules** via `buildDefaultValidationRuleRegistry()` (`packages/core/src/engine/phases/validation/index.ts`), exposed as a `Guardrail` (`pass/block/degrade/annotate`) mounted at `turnStop`. Optional `ProviderSemanticJudgeAdapter` / `BudgetedSemanticJudgeAdapter`. Engine consumes `retry` via a turn-level do-while loop (`decideTurnRetry`, opt-in via `runtime.maxTurnRetries`, default `0`), `degrade` / `handoff` (exit to `output`). Gaps: runtime provider fallback is not implemented and semantic judge is not production-complete. |
+| **`output` — Output Assembly** | ✅ **Implemented** | Content selector: `candidateAnswer.content` (the loop's `terminalDraft`, validation passing) → agent-dispatch synthesis text → `{intent, taskResults}` structured JSON (fallback path) → honest local-template fallback (validation failed; **never** calls an LLM per ADR-0006 D4). Internal state JSON is never leaked to end users. Covered by `output.test.ts`. |
 | Real-world smoke tests against OpenAI / Anthropic / Azure | 🟡 **Manually verified; opt-in automated** | Mock unit tests cover adapters in CI. Maintainers have **hand-run** real LLM paths (custom gateways included). An **opt-in** scripted e2e exists — set `TACHU_REAL_E2E=1` plus `TACHU_E2E_API_KEY` / `TACHU_E2E_API_BASE` / `TACHU_E2E_PROVIDER` (see [Contributing](./CONTRIBUTING.md)) — but default CI does not publish signed recordings. |
 | Production hardening (SLO, error budgets, failure injection, signed provenance) | 🔴 Not yet | Target for `1.0.0` (Tachu v1). |
 
@@ -60,16 +60,16 @@ Legend: ✅ implemented and tested · 🟡 stub / placeholder present, real impl
 
 ## Key Features
 
-- **9-Phase Execution Pipeline** — session management → safety → intent analysis (pure classification) → pre-check → planning router → DAG validation → execution → result validation outcome → output normalization; each phase is a typed, hookable stage, and every request — simple or complex — flows through all nine phases with uniform Rules / Hooks / Observability / budget accounting
-- **Task Planning + Tool-use Loop** — Phase 5 does not precompute a ranked multi-step plan. It routes `simple` requests to `direct-answer`, routes `complex + visible tools` into the built-in `tool-use` Agentic Loop, and lets that loop perform iterative LLM tool selection → gated tool execution → tool-result feedback → final answer.
-- **`direct-answer` built-in Sub-flow** — answers to simple requests (and to complex requests with no matching tool) are produced by a first-class engine-internal Sub-flow running in Phase 7, not baked into the intent prompt.
+- **Deep Single Agentic Loop** — session management → safety → deterministic tool-routing → the `tool-use` loop → result validation → output normalization; every request flows through the same 6-phase skeleton with uniform Rules / Hooks / Observability / budget accounting, and the loop itself is the only place where multi-step LLM decisions happen (see [ADR-0006](https://github.com/tachu-project/tachu-docs/blob/main/adr/decisions/0006-loop-lifecycle-harness-surface.md) for the full rationale)
+- **Loop-Lifecycle Guard Surface** — 9 hook points (`turnStart`/`preLLM`/`postLLM`/`preToolUse`/`postToolUse`/`turnStop`/`preSubagent`/`postSubagent`/`preCompact`) replace the old per-phase hooks; a symmetric `Guardrail` contract (`pass`/`block`/`degrade`/`annotate`, fail-closed) is mounted at `turnStart` (SafetyModule baseline + business policy) and `turnStop` (Result Validation)
+- **Subagent Dispatch** — the loop LLM can spawn a read-only sub-agent via the built-in `dispatch_agent` tool (Single-Writer Rule, summary-only contract, `maxDepth` defaults to 1)
 - **Dual-Plane Matching** — semantic discovery (vector similarity) + deterministic execution gate (scopes, whitelist, approval) for every Rule, Skill, Tool, and Agent
 - **Four Core Abstractions** — declare Rules, Skills, Tools, and Agents as Markdown + YAML frontmatter descriptors; the engine resolves, activates, and orchestrates them automatically
 - **OpenAI & Anthropic Adapters** — streaming, function calling, configurable `baseURL` / `organization` / `timeoutMs`; works with Azure OpenAI, LiteLLM, OpenRouter, or any self-hosted gateway
 - **MCP Integration** — connect any MCP server (stdio or SSE) via `McpToolAdapter`; MCP tools become first-class engine Tools
 - **Token-Precise Prompt Assembly** — tiktoken-based exact token counting; KV-cache-friendly prompt layout; automatic context compression (Head-Middle-Tail strategy)
 - **Structured Memory** — session context window with configurable limits; archive-before-summarize guarantee; vector recall for long-term memory
-- **OpenTelemetry Observability** — every phase entry/exit, LLM call, tool call, retry, and fallback emits a structured `EngineEvent`; OTel and JSONL emitters included
+- **OpenTelemetry Observability** — 6-phase entry/exit boundaries plus flat per-step loop events (`tool_loop_step_*` / `tool_call_*` / `llm_call_*` / `hook_fired`) with `parentStepId` correlation, retry, and fallback all emit a structured `EngineEvent`; OTel and JSONL emitters included
 - **Interactive CLI** — `tachu chat` / `tachu run` / `tachu init` with full parameter sets, streaming render, session persistence, and Ctrl+C cancellation
 - **Terminal Markdown rendering** — final assistant replies are rendered via `marked` + `marked-terminal` + `cli-highlight`; headings, bold / italic, lists, block quotes, links, tables and fenced code blocks (with syntax highlighting) are all supported. Automatically disabled under `NO_COLOR` / non-TTY / `--no-color`; explicitly controllable with `--markdown` / `--no-markdown` on `tachu run`.
 - **Fail-Closed Safety Baseline** — loop protection, budget circuit-breaker, and basic input validation are hardwired into the engine and cannot be disabled
@@ -102,7 +102,7 @@ Details: [Overview · abstractions](./docs/overview-design.md#三四大核心抽
 
 ## Architecture (summary)
 
-Requests flow through a **9-phase pipeline**. Complex tool work enters the built-in `tool-use` loop in Phase 7.
+Requests flow through a **6-phase outer skeleton** (`session → safety → tool-routing → execution → validation → output`); `tool-routing` deterministically routes every request into the built-in `tool-use` **deep single agentic loop**, which is the only place multi-step LLM decisions happen.
 
 Details: [Pipeline phases](./docs/architecture/pipeline-phases.md) · [Overview design](./docs/overview-design.md).
 
@@ -128,7 +128,7 @@ bun add -g @tachu/cli@rc
 After global installation, verify with:
 
 ```bash
-tachu --version   # expect 1.0.0-rc.0 or newer
+tachu --version   # expect 1.0.0-rc.10 or newer
 ```
 
 ---
@@ -166,7 +166,7 @@ Programmatic embedding: see [Configuration](./docs/guides/configuration.md) and 
 | [Overview Design](./docs/overview-design.md) | Vision, layers, abstractions, pipeline concepts |
 | [Detailed Design](./docs/detailed-design.md) | Types, modules, configuration schema |
 | [Technical Design](./docs/technical-design.md) | Engineering structure and implementation guide |
-| [Pipeline phases](./docs/architecture/pipeline-phases.md) | 9-phase pipeline and tool-use loop |
+| [Pipeline phases](./docs/architecture/pipeline-phases.md) | 6-phase skeleton and the tool-use deep single loop |
 | [Package layout](./docs/architecture/package-layout.md) | Monorepo packages and dependencies |
 | [Design principles](./docs/architecture/design-principles.md) | Core engineering principles |
 | [CLI reference](./docs/guides/cli.md) | All commands and flags |

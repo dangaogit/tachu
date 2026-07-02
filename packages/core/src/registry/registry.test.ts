@@ -27,7 +27,7 @@ describe("DescriptorRegistry", () => {
       description: "ensure safe output",
       version: "1.0.0",
       type: "rule",
-      scope: ["output"],
+      scope: ["turnStop"],
       content: "never output secrets",
       tags: ["security"],
       trigger: { type: "semantic" },

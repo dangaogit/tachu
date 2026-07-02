@@ -169,8 +169,8 @@ describe("resolveProviderDemand + degradation surfacing ()", () => {
     const demand = await resolveProviderDemand(undefined, {
       adapter: stubAdapter(() => {}),
       model: "m",
-      unit: "direct-answer",
-      phase: "direct-answer",
+      unit: "tool-use",
+      phase: "tool-use",
       messages: [tokenMessage("file_1")],
     });
     expect(demand).toBeUndefined();

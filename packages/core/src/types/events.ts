@@ -8,9 +8,9 @@ import type { ExecutionCorrelation, ExecutionSubject } from "./context";
  * 各自带 `_start` / `_end` / `_fired` 等明确后缀，避免语义歧义。
  *
  * `progress` 专门用于表示"阶段内部的进度快照"——例如 `tool-use` 子流程每轮循环
- * 开始时发一条带 step / maxSteps 的 progress，或 Planning 阶段选择 Agentic 分支
- * 时发一条带 decision 的 progress。与 `phase_enter/phase_exit` 的差异是：后者
- * 描述"主干阶段边界"，progress 描述"阶段内部状态"。
+ * 开始时发一条带 step / maxSteps 的 progress。与 `phase_enter/phase_exit` 的
+ * 差异是：后者描述"主干阶段边界"（6 个 `EnginePhase`），progress 描述"阶段
+ * 内部状态"。
  */
 export type EventType =
   | "phase_enter"

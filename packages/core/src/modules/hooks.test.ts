@@ -3,7 +3,7 @@ import { DefaultHookRegistry } from "./hooks";
 import { DefaultObservabilityEmitter } from "./observability";
 
 const hookEvent = (traceId: string, sessionId: string) => ({
-  point: "beforePlanning" as const,
+  point: "turnStart" as const,
   timestamp: Date.now(),
   correlation: {
     traceId,
@@ -19,7 +19,7 @@ describe("DefaultHookRegistry", () => {
     const registry = new DefaultHookRegistry(new DefaultObservabilityEmitter(), 200);
     const order: number[] = [];
     registry.register(
-      "beforePlanning",
+      "turnStart",
       async () => {
         order.push(2);
         return { type: "continue" };
@@ -27,14 +27,14 @@ describe("DefaultHookRegistry", () => {
       { priority: 20 },
     );
     registry.register(
-      "beforePlanning",
+      "turnStart",
       async () => {
         order.push(1);
         return { type: "continue" };
       },
       { priority: 10 },
     );
-    await registry.fire("beforePlanning", hookEvent("t1", "s1"));
+    await registry.fire("turnStart", hookEvent("t1", "s1"));
     expect(order).toEqual([1, 2]);
   });
 
@@ -47,16 +47,16 @@ describe("DefaultHookRegistry", () => {
 
     const registry = new DefaultHookRegistry(emitter, 200);
     let called = 0;
-    const unsubscribe = registry.subscribe("beforePlanning", () => {
+    const unsubscribe = registry.subscribe("turnStart", () => {
       called += 1;
       throw new Error("subscriber failed");
     });
-    await registry.fire("beforePlanning", hookEvent("t-sub", "s-sub"));
+    await registry.fire("turnStart", hookEvent("t-sub", "s-sub"));
     expect(called).toBe(1);
     expect(events).toContain("hook-subscribe");
 
     unsubscribe();
-    await registry.fire("beforePlanning", hookEvent("t-sub-2", "s-sub-2"));
+    await registry.fire("turnStart", hookEvent("t-sub-2", "s-sub-2"));
     expect(called).toBe(1);
   });
 
@@ -68,18 +68,18 @@ describe("DefaultHookRegistry", () => {
       errorEvents.push(String(event.payload.source));
     });
     registry.register(
-      "beforePlanning",
+      "turnStart",
       async () => {
         await new Promise((resolve) => setTimeout(resolve, 60));
         return { type: "continue" as const };
       },
       { id: "slow", timeout: 10 },
     );
-    registry.register("beforePlanning", async () => ({ type: "continue" }), {
+    registry.register("turnStart", async () => ({ type: "continue" }), {
       id: "fast",
       timeout: 30,
     });
-    const result = await registry.fire("beforePlanning", hookEvent("t-timeout", "s-timeout"));
+    const result = await registry.fire("turnStart", hookEvent("t-timeout", "s-timeout"));
     expect(result).toBeUndefined();
     expect(errorEvents).toContain("hook-register");
   });
@@ -89,7 +89,7 @@ describe("DefaultHookRegistry", () => {
     const registry = new DefaultHookRegistry(emitter, 200);
     const called: string[] = [];
     registry.register(
-      "beforePlanning",
+      "turnStart",
       async () => {
         called.push("first");
         throw new Error("broken");
@@ -97,7 +97,7 @@ describe("DefaultHookRegistry", () => {
       { priority: 1 },
     );
     registry.register(
-      "beforePlanning",
+      "turnStart",
       async () => {
         called.push("second");
         return { type: "deny", reason: "manual block" };
@@ -105,15 +105,41 @@ describe("DefaultHookRegistry", () => {
       { priority: 2 },
     );
     registry.register(
-      "beforePlanning",
+      "turnStart",
       async () => {
         called.push("third");
         return { type: "continue" };
       },
       { priority: 3 },
     );
-    const action = await registry.fire("beforePlanning", hookEvent("t-action", "s-action"));
+    const action = await registry.fire("turnStart", hookEvent("t-action", "s-action"));
     expect(action?.type).toBe("deny");
     expect(called).toEqual(["first", "second"]);
+  });
+
+ test("fire 无条件发 hook_fired observability 事件(ADR-0006 D2:防死面复发)，即便无人订阅/注册", async () => {
+    const emitter = new DefaultObservabilityEmitter();
+    const hookFiredEvents: Array<{ payload: Record<string, unknown> }> = [];
+    emitter.on("hook_fired", (event) => {
+      hookFiredEvents.push({ payload: event.payload });
+    });
+    const registry = new DefaultHookRegistry(emitter, 200);
+// 无任何 subscribe/register：hook_fired 仍应发出，证明这是真实 fire 位而非死面。
+    await registry.fire("turnStart", hookEvent("t-empty", "s-empty"));
+    expect(hookFiredEvents.length).toBe(1);
+    expect(hookFiredEvents[0]?.payload).toMatchObject({
+      point: "turnStart",
+      subscriberCount: 0,
+      registrarCount: 0,
+    });
+
+    registry.register("turnStart", async () => ({ type: "deny", reason: "x" }));
+    await registry.fire("turnStart", hookEvent("t-with-handler", "s-with-handler"));
+    expect(hookFiredEvents.length).toBe(2);
+    expect(hookFiredEvents[1]?.payload).toMatchObject({
+      point: "turnStart",
+      registrarCount: 1,
+      action: "deny",
+    });
   });
 });

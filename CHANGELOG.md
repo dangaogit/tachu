@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-rc.10] - 2026-07-03
+
+### Changed
+
+#### `@tachu/core`
+
+- **ADR-0006 — deep single loop refactor**: the 9-phase homogeneous pipeline collapsed into "one deep `tool-use` agentic loop as the sole execution spine + a loop-lifecycle guard/mount surface". `EnginePhase` converged from 9 to 6 (`session · safety · tool-routing · execution · validation · output`). See ADR-0006 (`tachu-docs/adr/decisions/0006-loop-lifecycle-harness-surface.md`).
+- `HookPoint` redefined from 14 phase-named points (of which only `afterPlanning` ever fired) to 9 loop-lifecycle events: `turnStart · preLLM · postLLM · preToolUse · postToolUse · turnStop · preSubagent · postSubagent · preCompact`, each with a real fire site and tests.
+- `RuleScope` collapsed from 7 phase names to the loop-lifecycle vocabulary `{ turnStart, preLLM, turnStop, * }`, shared with `HookPoint`; output-format rules move to `preLLM` and shape the `terminalDraft` directly.
+- Added a symmetric `Guardrail` seam (`types/guardrail.ts`) mounted at `turnStart` (pre-guard, default `SafetyModule` baseline) and `turnStop` (post-guard, default Result Validation), fail-closed with `pass / block / degrade / annotate` semantics.
+- Added the Engine Seatbelt: after each free-mutation hook (`preLLM`/`postLLM`) the engine runs a structural normalize/re-validate so a malformed conversation never reaches the Provider.
+- Added per-step context compaction (`preCompact`) inside the loop, replacing the single pre-loop context-budget decision.
+- Added the built-in Task-style `dispatch_agent` tool for read-only subagent dispatch, governed by the Single-Writer Rule (`maxDepth` defaults to 1).
+
+### Removed
+
+#### `@tachu/core`
+
+- Removed the standalone `intent` (LLM simple/complex classification), `precheck`, `planning`, and `graph-check` phases (`intent.ts` / `precheck.ts` / `planning.ts` / `graph-check.ts` and their tests physically deleted); their routing role is now covered by the single deterministic `tool-routing` phase.
+- Removed the built-in `direct-answer` sub-flow; a no-tool turn is now handled by the `tool-use` loop's first step producing no `tool_call`.
+- Removed the `candidate-answer` final-answer writer LLM; the loop's `terminalDraft` is delivered directly as the candidate answer, eliminating format drift.
+- Removed `IntentResult.complexity` / `contextRelevance`, `STRONG_*_MARKERS`, and `inferComplexityFallback`; turn-policy-as-LLM-manifest dropped — soft routing moves into the Layered System Prompt while hard tool/skill gating stays deterministic (host explicit selection / config / agent snapshot).
+- **Public type-surface consolidation** (BREAKING for downstream importing these types): collapsed `PlanningResult` / `RankedPlan` into a single `ExecutionRoute { tasks; edges; visibleTools? }`; removed the `IntentResult` type entirely (`ToolRoutingPhaseOutput.intent` is now `{ intent: string }`); renamed `ValidationSignals.finalAnswerHasClaims` → `answerHasClaims`; collapsed `ValidationOutcome.target` `same-plan` / `next-plan` → `retry-turn`; renamed the `plan-preview` StreamChunk field `plan` → `route`, `ExecutionState.activePlan` → `activeRoute`, and `ValidationRuleContext.plan` → `route`; removed the dead `tool-use-final-answer` context scope; dropped `planning_issue` from `ValidationResult.diagnosis.type`; removed the internal `buildToolUseLocalFallbackText` soft fallback (validation failure now uses the deterministic `ensureFallbackText` template). See `tachu-docs/migration/loop-refactor-downstream-guide.md` (§ 进一步 API 收敛).
+
+### Notes
+
+- Version bumped to `1.0.0-rc.10` in lockstep across `@tachu/core`, `@tachu/extensions`, `@tachu/host-defaults`, `@tachu/cli`, and `@tachu/web-fetch-server`.
+- ADR-0006 records `0.2.0` as its historical design target-release label; the actual published release line is `1.0.0-rc`.
+
 ## [1.0.0-rc.2] - 2026-06-13
 
 ### Fixed

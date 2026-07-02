@@ -3,6 +3,7 @@ export * from "./context";
 export * from "./descriptor";
 export * from "./events";
 export * from "./execution";
+export * from "./guardrail";
 export * from "./hooks";
 export * from "./io";
 export * from "./message";

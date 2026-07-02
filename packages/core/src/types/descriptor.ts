@@ -30,17 +30,15 @@ export interface BaseDescriptor {
 }
 
 /**
- * Rule 的作用阶段。
+ * Rule 的作用阶段(ADR-0006 D5)。
+ *
+ * 7 个 phase 名塌陷为 loop-lifecycle 子集,与 `HookPoint` 共用一套词汇。
+ * 映射:`safety`/`intent`/`precheck` → `turnStart`;`planning`/`execution`
+ * → `preLLM`(输出格式类规则从这里直接塑形 terminalDraft,根治 chart-output
+ * 格式漂移);`validation`/`output` → `turnStop`(只做 check/block/annotate,
+ * 不 reformat)。
  */
-export type RuleScope =
-  | "safety"
-  | "intent"
-  | "precheck"
-  | "planning"
-  | "execution"
-  | "validation"
-  | "output"
-  | "*";
+export type RuleScope = "turnStart" | "preLLM" | "turnStop" | "*";
 
 /**
  * Rule 描述符。

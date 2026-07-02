@@ -228,6 +228,29 @@ export interface ToolLoopConfig {
    * 默认 `1`；设为 `0` 时行为完全回退到「terminal 即终止」的历史语义。
    */
   failureRecoveryRetries?: number;
+ /**
+ * loop 内 LLM 自决派发只读 sub-agent 的内置 Task-style 工具（`dispatch_agent`）配置
+ * (ADR-0006 D6)。
+ *
+ * 复用现有 Agent runtime(`agentRunId` history-scope、`decideSubAgentBudget`、
+ * 同一 `toolUseExecutor`)；零新增架构面，仅新增一个内置工具 + 深度闸门。
+ */
+  subagentDispatch?: {
+ /**
+ * 是否暴露 `dispatch_agent` 工具。默认 `true`；当 registry 中无任何已注册
+ * `agent` 描述符时，无论此值为何都不会暴露（没有可派发的对象）。
+ */
+    enabled?: boolean;
+ /**
+ * 允许的最大派发深度，对齐 Claude Code「Task 工具不可在子 agent 内再次
+ * 调用」的默认策略。默认 `1`：主 loop（深度 0）可派发一层 sub-agent（深度 1），
+ * sub-agent 自身的 tool-use loop 内该工具不再可见/可用。
+ *
+ * 该值同时作为 `AgentRunConstraints.maxDepth` 的硬上限（与 `AgentDescriptor.maxDepth`
+ * 取更小值），防止深度在 runtime 层漂移。
+ */
+    maxDepth?: number;
+  };
 }
 
 /**
@@ -268,12 +291,12 @@ export interface EngineConfig {
  /**
  * Agentic 工具循环默认约束（
  *
- * 省略时使用 `maxSteps=8 / parallelism=4 / requireApprovalGlobal=false` 的
+ * 省略时使用 `maxSteps=25 / parallelism=4 / requireApprovalGlobal=false` 的
  * 默认值；可通过 `tachu.config.ts` 按项目覆盖。
  */
     toolLoop?: ToolLoopConfig;
  /**
- * 工具激活相关配置（planning 阶段消费）。
+ * 工具激活相关配置（`tool-routing` 阶段消费,收窄 loop 默认可见工具集）。
  *
  * 目前仅含 `discoveryExpansion`（发现工具展开）；省略时不改变现有激活行为。
  */
@@ -281,8 +304,8 @@ export interface EngineConfig {
       discoveryExpansion?: DiscoveryExpansionConfig;
     };
  /**
- * 为 `true` 时，`direct-answer` 子流程优先走 Provider `chatStream`（底层 `stream=true`），
- * 并通过 `StreamChunk.delta` 向宿主推送正文分片（需 Engine 注入 `onAssistantDelta`）。
+ * 为 `true` 时，`tool-use` 子流程优先走 Provider `chatStream`（底层 `stream=true`），
+ * 并通过 `tool-loop-delta` chunk 向宿主推送正文分片（需 Engine 注入 `onToolLoopEvent`）。
  * 经 `validateEngineConfig` 时默认为 `true`；显式设为 `false` 则全程非流式 `chat()`。
  */
     streamingOutput?: boolean;
@@ -322,24 +345,17 @@ export interface EngineConfig {
     candidateTopK?: number;
  /** 是否暴露 `search_skills` 内部工具。默认 false。 */
     enableSearchSkillsTool?: boolean;
- /**
- * Final-answer 继承的 Active Skill 范围（ / CONTEXT.md）。
- *
- * - `all-active`（默认）：传递当轮全部 active skills
- * - `output-format-only`（实验性）：仅传递 tag 含 `output-format` 的 active skills
- */
-    finalAnswerSkillScope?: "all-active" | "output-format-only";
  /** @deprecated legacy 模式：向量召回 skill 候选池大小。默认 10。 */
     recallTopN?: number;
  /** @deprecated legacy 模式：召回相似度阈值。默认 0.80。 */
     activationThreshold?: number;
- /**
- * Turn 级 retry 上限。
- *
- * ValidationPhase 输出 `outcome.kind === "retry"` 时，Engine 主循环最多回到
- * PlanningPhase 多少次。默认 0（关闭：保持线性 planning→output）。设为正整数
- * 时启用 turn-level retry loop，受 {@link decideTurnRetry} 反死循环约束。
- */
+/**
+* Turn 级 retry 上限。
+*
+* validation 阶段输出 `outcome.kind === "retry"` 时，Engine 主循环最多回到
+* tool-routing 阶段多少次。默认 0（关闭：保持线性 tool-routing→output）。设为
+* 正整数时启用 turn-level retry loop，受 {@link decideTurnRetry} 反死循环约束。
+*/
     maxTurnRetries?: number;
   };
   memory: {
@@ -516,49 +532,6 @@ export interface EngineConfig {
     failureBehavior: "continue" | "abort";
   };
  /**
- * Intent 阶段分类可扩展配置。
- *
- * Core 只内置真正普遍的 complex 信号（URL / 文件路径 / 实时数据等）；
- * 领域特定的匹配规则（shell 命令名、项目文件修改动词等）由业务层通过此字段注入，
- * 与引擎内置规则取并集生效。
- */
-  intent?: {
- /**
- * 替换 `INTENT_SYSTEM_PROMPT_BASE`；未设则用 core 内置默认。
- *
- * Agent Context / User explicit selections 仍由 core 在 base 之后追加。
- */
-    systemPromptBase?: string;
- /**
- * 额外的强 complex 正则源串（JavaScript RegExp 源，不含 `/` 围栏）。
- *
- * 每条源串会在运行时被编译为 `/pattern/ui` 并加入 complex 快速路径检测。
- * 编译失败时 `validateEngineConfig` 会以 `VALIDATION_INVALID_CONFIG` 拒绝。
- */
-    additionalComplexPatterns?: string[];
- /**
- * 禁用内置 `STRONG_SIMPLE_MARKERS` 的短输入快速路径（strong-simple-short fast-path）。
- *
- * 默认 `false`（保持原有行为）。
- * 设为 `true` 时，≤40 字的输入不再被启发式直接判为 simple；
- * 所有输入均交由 intent LLM 分类，或在 LLM 不可用时回退到长度/弱关键词启发式。
- *
- * 适用场景：Agent 配备了大量工具，短指令（如"列出流程"、"查询知识库"）
- * 需要工具调用才能完成，不能被 fast-path 截断到 direct-answer 路径。
- */
-    disableSimpleMarkers?: boolean;
- /**
- * 注入到 intent 分类 system prompt 末尾的 few-shot 示例。
- *
- * 格式与内置示例相同；由业务层补充领域样本，不改变 core prompt 本体。
- */
-    fewShotExamples?: Array<{
-      input: string;
-      complexity: "simple" | "complex";
-      intent: string;
-    }>;
-  };
- /**
  * Tool-use sub-flow 可扩展配置。
  *
  * Core 的 tool-use system prompt 只描述通用循环语义；领域工作流指导
@@ -576,25 +549,10 @@ export interface EngineConfig {
  */
     systemPromptSuffix?: string;
     /**
-     * 替换 tool-use final-answer 阶段的 `TOOL_USE_FINAL_ANSWER_SYSTEM_PROMPT`；
-     * Active Skills / chart 规则仍由 core 动态追加。
-     */
-    finalAnswerSystemPromptBase?: string;
-    /**
      * 替换失败恢复护栏注入的纠错提示（`TOOL_USE_CONSTANTS.FAILURE_RECOVERY_PROMPT`）。
      * 用于 cube 侧本地化或领域化措辞；未设则用 core 内置英文默认。
      */
     failureRecoveryPrompt?: string;
-  };
- /**
- * direct-answer sub-flow 可扩展配置。
- *
- * 仅作用于 subflow 自带的 system 消息；若走 PromptAssembler prebuilt，
- * 主 system 仍以 assembler / SessionScope.systemInstruction 为准。
- */
-  directAnswer?: {
- /** 替换 `DIRECT_ANSWER_SYSTEM_PROMPT`；未设则用 core 内置默认。 */
-    systemPromptBase?: string;
   };
  /**
  * Validation 阶段可扩展配置。

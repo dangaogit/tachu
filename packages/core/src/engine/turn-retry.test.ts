@@ -3,15 +3,10 @@ import { describe, expect, it } from "bun:test";
 import type { ValidationOutcome } from "../types";
 import { decideTurnRetry } from "./turn-retry";
 
-const sameRetry: ValidationOutcome = {
+const retryTurn: ValidationOutcome = {
   kind: "retry",
   reason: "deterministic finding",
-  target: "same-plan",
-};
-const nextRetry: ValidationOutcome = {
-  kind: "retry",
-  reason: "alt plan needed",
-  target: "next-plan",
+  target: "retry-turn",
 };
 const toolLoopRetry: ValidationOutcome = {
   kind: "retry",
@@ -64,19 +59,9 @@ describe("decideTurnRetry — terminal outcomes always exit", () => {
 
 describe("decideTurnRetry — retry outcomes obey budget", () => {
   for (const retryCount of [0, 1]) {
-    it(`retry/same-plan retryCount=${retryCount} → continue, next=${retryCount + 1}`, () => {
+    it(`retry/retry-turn retryCount=${retryCount} → continue, next=${retryCount + 1}`, () => {
       const d = decideTurnRetry({
-        outcome: sameRetry,
-        retryCount,
-        maxRetries: 2,
-        previousOutcomeKinds: [],
-      });
-      expect(d.kind).toBe("continue");
-      if (d.kind === "continue") expect(d.nextRetryCount).toBe(retryCount + 1);
-    });
-    it(`retry/next-plan retryCount=${retryCount} → continue, next=${retryCount + 1}`, () => {
-      const d = decideTurnRetry({
-        outcome: nextRetry,
+        outcome: retryTurn,
         retryCount,
         maxRetries: 2,
         previousOutcomeKinds: [],
@@ -85,24 +70,15 @@ describe("decideTurnRetry — retry outcomes obey budget", () => {
       if (d.kind === "continue") expect(d.nextRetryCount).toBe(retryCount + 1);
     });
   }
-  it("retry/same-plan retryCount=2 (== maxRetries) → exit (budget)", () => {
+  it("retry/retry-turn retryCount=2 (== maxRetries) → exit (budget)", () => {
     const d = decideTurnRetry({
-      outcome: sameRetry,
+      outcome: retryTurn,
       retryCount: 2,
       maxRetries: 2,
       previousOutcomeKinds: ["retry", "retry"],
     });
     expect(d.kind).toBe("exit");
     if (d.kind === "exit") expect(d.reason).toContain("max");
-  });
-  it("retry/next-plan retryCount=2 → exit (budget)", () => {
-    const d = decideTurnRetry({
-      outcome: nextRetry,
-      retryCount: 2,
-      maxRetries: 2,
-      previousOutcomeKinds: ["retry", "retry"],
-    });
-    expect(d.kind).toBe("exit");
   });
 });
 
@@ -121,7 +97,7 @@ describe("decideTurnRetry — tool-loop-finalize is not a turn retry", () => {
 describe("decideTurnRetry — anti-loop on repeated kind", () => {
   it("retry kind repeated twice in a row → exit anti-loop", () => {
     const d = decideTurnRetry({
-      outcome: sameRetry,
+      outcome: retryTurn,
       retryCount: 1,
       maxRetries: 5,
       previousOutcomeKinds: ["retry"],

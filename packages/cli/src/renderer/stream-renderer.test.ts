@@ -313,6 +313,34 @@ describe("StreamRenderer", () => {
     expect(stdout).toBe("");
   });
 
+  it("tool-loop-delta 与 finalize 正文一致时按流式正文输出且避免重复打印", () => {
+    const renderer = new StreamRenderer({ renderMarkdown: false });
+    const streamed = captureOutput(() => {
+      renderChunk(renderer, { type: "tool-loop-delta", step: 1, content: "tool loop answer" });
+    });
+    expect(streamed.stdout).toBe("tool loop answer");
+
+    const finalized = captureOutput(() => {
+      renderer.finalize(
+        {
+          type: "text",
+          content: "tool loop answer",
+          steps: [],
+          metadata: {
+            outcome: "completed",
+            toolCalls: [],
+            durationMs: 1,
+            tokenUsage: { input: 1, output: 1, total: 2 },
+          },
+          correlation,
+          deliveryMode: "streaming",
+        },
+        "text",
+      );
+    });
+    expect(finalized.stdout).toBe("");
+  });
+
   it("多轮共享同一渲染器时 streamedBody 不应跨轮累加导致 finalize 重复打印", () => {
     const renderer = new StreamRenderer({ renderMarkdown: false });
 

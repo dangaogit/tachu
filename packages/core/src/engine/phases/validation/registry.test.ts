@@ -6,7 +6,7 @@ import {
 } from "./index";
 import type { ValidationRule } from "./registry";
 import type { ExecutionPhaseOutput } from "../execution";
-import type { RankedPlan, ToolUseResult } from "../../../types";
+import type { ExecutionRoute, ToolUseResult } from "../../../types";
 
 const baseState = (
   overrides: Partial<ExecutionPhaseOutput> = {},
@@ -18,21 +18,20 @@ const baseState = (
     ...overrides,
   }) as ExecutionPhaseOutput;
 
-const basePlan: RankedPlan = {
-  rank: 1,
+const baseRoute: ExecutionRoute = {
   tasks: [{ id: "task-a", type: "tool", ref: "run-tests", input: {} }],
   edges: [],
 };
 
 const ruleCtx = (overrides: {
   state?: Partial<ExecutionPhaseOutput>;
-  plan?: RankedPlan;
+  route?: ExecutionRoute;
   registry?: unknown;
   evidence?: readonly [];
   candidateAnswer?: import("../../../types/evidence").CandidateAnswer;
 } = {}) => ({
   state: baseState(overrides.state),
-  plan: overrides.plan ?? basePlan,
+  route: overrides.route ?? baseRoute,
   registry: (overrides.registry ?? {}) as never,
   evidence: overrides.evidence ?? [],
   ...(overrides.candidateAnswer !== undefined

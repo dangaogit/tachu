@@ -6,9 +6,6 @@ import type {
   EngineConfig,
   ExecutionContext,
   InputEnvelope,
-  IntentResult,
-  Message,
-  SkillDescriptor,
   StepStatus,
   ToolDescriptor,
 } from "../../types";
@@ -16,7 +13,7 @@ import { DEFAULT_ADAPTER_CALL_CONTEXT } from "../../types/context";
 import { createDefaultEngineConfig } from "../../utils";
 import type { ExecutionPhaseOutput } from "./execution";
 import type { PhaseEnvironment } from "./index";
-import { resolveFinalAnswerSkills, runCandidateAnswerPhase } from "./candidate-answer";
+import { runCandidateAnswerPhase } from "./candidate-answer";
 
 const buildEnv = (): PhaseEnvironment =>
   ({
@@ -36,7 +33,7 @@ const buildEnv = (): PhaseEnvironment =>
   }) satisfies PhaseEnvironment;
 
 const buildExecutionState = (overrides: {
-  intent: IntentResult;
+  intent: { intent: string };
   taskResults?: Record<string, unknown>;
   steps?: StepStatus[];
 }): ExecutionPhaseOutput => {
@@ -60,9 +57,7 @@ const buildExecutionState = (overrides: {
     context,
     violations: [],
     intent: overrides.intent,
-    precheck: { budget: { allowed: true } },
-    planning: { plans: [{ rank: 1, tasks: [], edges: [] }] },
-    graphCheck: { passed: true },
+    route: { tasks: [], edges: [] },
     steps: overrides.steps ?? [],
     taskResults: overrides.taskResults ?? {},
     taskErrors: {},
@@ -70,17 +65,17 @@ const buildExecutionState = (overrides: {
 };
 
 describe("runCandidateAnswerPhase", () => {
- test("direct-answer 路径产出 candidateAnswer 且 claims 为空", async () => {
+ test("无 tool-use / agent 结果时 candidateAnswer 退化为空内容(ADR-0006 C1:direct-answer 已删除)", async () => {
     const state = await runCandidateAnswerPhase(
       buildExecutionState({
-        intent: { complexity: "simple", intent: "hi", contextRelevance: "unrelated" },
-        taskResults: { "task-direct-answer": "你好" },
+        intent: { intent: "hi" },
+        taskResults: {},
       }),
       buildEnv(),
     );
-    expect(state.candidateAnswer.content).toBe("你好");
+    expect(state.candidateAnswer.content).toBe("");
     expect(state.candidateAnswer.claims).toHaveLength(0);
-    expect(state.candidateAnswer.producedBy).toBe("direct-answer");
+    expect(state.candidateAnswer.producedBy).toBe("execution");
   });
 
  test("matrix: 当 plan 含 write descriptor 时 collectEvidence 产出 file-changed claim（不依赖关键词匹配）", async () => {
@@ -127,7 +122,7 @@ describe("runCandidateAnswerPhase", () => {
     } as unknown as PhaseEnvironment["registry"];
 
     const baseState = buildExecutionState({
-      intent: { complexity: "complex", intent: "write a file", contextRelevance: "unrelated" },
+      intent: { intent: "write a file" },
       taskResults: {
         "task-tool-use": {
           kind: "tool-use-result",
@@ -142,16 +137,11 @@ describe("runCandidateAnswerPhase", () => {
     });
     const stateWithPlan = {
       ...baseState,
-      planning: {
-        plans: [
-          {
-            rank: 1,
-            tasks: [
-              { id: "t-write", type: "tool", ref: "write-file", input: {} },
-            ],
-            edges: [],
-          },
+      route: {
+        tasks: [
+          { id: "t-write", type: "tool", ref: "write-file", input: {} },
         ],
+        edges: [],
       },
     } as unknown as ExecutionPhaseOutput;
 
@@ -213,7 +203,7 @@ describe("runCandidateAnswerPhase", () => {
 
     const stateWithPlan = {
       ...buildExecutionState({
-        intent: { complexity: "complex", intent: "fetch online doc", contextRelevance: "unrelated" },
+        intent: { intent: "fetch online doc" },
         taskResults: {
           "task-tool-use": {
             kind: "tool-use-result",
@@ -231,16 +221,11 @@ describe("runCandidateAnswerPhase", () => {
         },
         steps: [{ name: "t-fetch", status: "completed" }],
       }),
-      planning: {
-        plans: [
-          {
-            rank: 1,
-            tasks: [
-              { id: "t-fetch", type: "tool", ref: "web-fetch", input: {} },
-            ],
-            edges: [],
-          },
+      route: {
+        tasks: [
+          { id: "t-fetch", type: "tool", ref: "web-fetch", input: {} },
         ],
+        edges: [],
       },
     } as unknown as ExecutionPhaseOutput;
 
@@ -260,7 +245,7 @@ describe("runCandidateAnswerPhase", () => {
     const env = buildEnv();
     const candidate = await runCandidateAnswerPhase(
       buildExecutionState({
-        intent: { complexity: "complex", intent: "delegate to agent", contextRelevance: "unrelated" },
+        intent: { intent: "delegate to agent" },
         taskResults: {
           "task-agent-1": {
             kind: "agent-run-result",
@@ -293,7 +278,7 @@ describe("runCandidateAnswerPhase", () => {
     const env = buildEnv();
     const candidate = await runCandidateAnswerPhase(
       buildExecutionState({
-        intent: { complexity: "simple", intent: "hi", contextRelevance: "unrelated" },
+        intent: { intent: "hi" },
         taskResults: {},
       }),
       env,
@@ -302,42 +287,31 @@ describe("runCandidateAnswerPhase", () => {
     expect(candidate.candidateAnswer.claims).toEqual([]);
   });
 
- test("tool-use 路径调用 final-answer LLM 并流式输出正文", async () => {
-    const streamed: string[] = [];
+ test("tool-use ready_for_output：terminalDraft 直接作为 candidateAnswer.content，不发起 LLM 调用（ADR-0006 D4/C3）", async () => {
     const adapter: ProviderAdapter = {
-      id: "scripted",
-      name: "scripted",
+      id: "must-not-be-called",
+      name: "must-not-be-called",
       async listAvailableModels() {
         return [];
       },
-      async chat() {
-        throw new Error("streaming final-answer path should use chatStream");
+      async chat(): Promise<never> {
+        throw new Error("candidate-answer must not call an LLM for the tool-use path");
       },
-      async *chatStream() {
-        yield { type: "text-delta", delta: "最终" };
-        yield { type: "text-delta", delta: "答案" };
-        yield {
-          type: "finish",
-          finishReason: "stop",
-          usage: { promptTokens: 2, completionTokens: 2, totalTokens: 4 },
-        };
+      async *chatStream(): AsyncGenerator<never> {
+        throw new Error("candidate-answer must not call an LLM for the tool-use path");
       },
     };
     const env = buildEnv();
     env.config = createDefaultEngineConfig();
-    env.config.runtime.streamingOutput = true;
-    env.providers = new Map([["scripted", adapter]]);
+    env.providers = new Map([["must-not-be-called", adapter]]);
     env.modelRouter = {
-      resolve: () => ({ provider: "scripted", model: "scripted-final" }),
+      resolve: () => ({ provider: "must-not-be-called", model: "n/a" }),
     } as never;
-    env.onFinalAnswerDelta = (text) => streamed.push(text);
 
     const state = await runCandidateAnswerPhase(
       buildExecutionState({
         intent: {
-          complexity: "complex",
           intent: "summarise searched result",
-          contextRelevance: "unrelated",
         },
         taskResults: {
           "task-tool-use": {
@@ -359,190 +333,16 @@ describe("runCandidateAnswerPhase", () => {
       env,
     );
 
-    expect(state.candidateAnswer.content).toBe("最终答案");
-    expect(streamed).toEqual(["最终", "答案"]);
+    expect(state.candidateAnswer.content).toBe("过程草稿");
+    expect(state.candidateAnswer.producedBy).toBe("tool-use");
     expect(state.candidateAnswer.claims.length).toBeGreaterThan(0);
     expect(state.evidence).toHaveLength(1);
   });
 
- test("tool-use final-answer system prompt inherits Active Skills when provided", async () => {
-    let capturedMessages: Message[] | undefined;
-    const adapter: ProviderAdapter = {
-      id: "scripted-skills",
-      name: "scripted-skills",
-      async listAvailableModels() {
-        return [];
-      },
-      async chat() {
-        throw new Error("streaming final-answer path should use chatStream");
-      },
-      async *chatStream(input) {
-        capturedMessages = input.messages;
-        yield { type: "text-delta", delta: "done" };
-        yield {
-          type: "finish",
-          finishReason: "stop",
-          usage: { promptTokens: 2, completionTokens: 1, totalTokens: 3 },
-        };
-      },
-    };
-    const mockSkill: SkillDescriptor = {
-      kind: "skill",
-      name: "mock-chart-output",
-      description: "chart contract",
-      instructions: "ECHARTS-FENCE-CONTRACT-XYZ",
-    };
-    const env = buildEnv();
-    env.config = createDefaultEngineConfig();
-    env.config.runtime.streamingOutput = true;
-    env.providers = new Map([["scripted-skills", adapter]]);
-    env.modelRouter = {
-      resolve: () => ({ provider: "scripted-skills", model: "scripted-skills-model" }),
-    } as never;
-    env.onFinalAnswerDelta = () => {};
-    env.finalAnswerActiveSkills = [mockSkill];
-
-    await runCandidateAnswerPhase(
+ test("tool-use ready_for_output 但 terminalDraft 为空 → candidateAnswer.content 为空（不捏造兜底文案）", async () => {
+    const state = await runCandidateAnswerPhase(
       buildExecutionState({
-        intent: {
-          complexity: "complex",
-          intent: "chart summary",
-          contextRelevance: "unrelated",
-        },
-        taskResults: {
-          "task-tool-use": {
-            kind: "tool-use-result",
-            status: "ready_for_output",
-            steps: [],
-            observations: [
-              {
-                source: "tool",
-                tool: "web-search",
-                callId: "call-1",
-                text: "market data",
-              },
-            ],
-          },
-        },
-      }),
-      env,
-    );
-
-    const systemContent =
-      typeof capturedMessages?.[0]?.content === "string"
-        ? capturedMessages[0].content
-        : "";
-    expect(systemContent).toContain("## Active Skills");
-    expect(systemContent).toContain("ECHARTS-FENCE-CONTRACT-XYZ");
-    expect(systemContent).toContain("### mock-chart-output");
-  });
-
- test("toolUse.finalAnswerSystemPromptBase 替换 final-answer system base", async () => {
-    let capturedMessages: Message[] | undefined;
-    const adapter: ProviderAdapter = {
-      id: "scripted-custom-final-base",
-      name: "scripted-custom-final-base",
-      async listAvailableModels() {
-        return [];
-      },
-      async chat() {
-        throw new Error("streaming final-answer path should use chatStream");
-      },
-      async *chatStream(input) {
-        capturedMessages = input.messages;
-        yield { type: "text-delta", delta: "ok" };
-        yield {
-          type: "finish",
-          finishReason: "stop",
-          usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
-        };
-      },
-    };
-    const env = buildEnv();
-    env.config = createDefaultEngineConfig();
-    env.config.runtime.streamingOutput = true;
-    env.config.toolUse = {
-      finalAnswerSystemPromptBase: "HOST-FINAL-ANSWER-BASE",
-    };
-    env.providers = new Map([["scripted-custom-final-base", adapter]]);
-    env.modelRouter = {
-      resolve: () => ({
-        provider: "scripted-custom-final-base",
-        model: "scripted-custom-final-base-model",
-      }),
-    } as never;
-    env.onFinalAnswerDelta = () => {};
-
-    await runCandidateAnswerPhase(
-      buildExecutionState({
-        intent: {
-          complexity: "complex",
-          intent: "summarize page",
-          contextRelevance: "unrelated",
-        },
-        taskResults: {
-          "task-tool-use": {
-            kind: "tool-use-result",
-            status: "ready_for_output",
-            steps: [],
-            observations: [
-              {
-                source: "tool",
-                tool: "web-fetch",
-                callId: "call-1",
-                text: "page content",
-              },
-            ],
-          },
-        },
-      }),
-      env,
-    );
-
-    const systemContent =
-      typeof capturedMessages?.[0]?.content === "string"
-        ? capturedMessages[0].content
-        : "";
-    expect(systemContent.startsWith("HOST-FINAL-ANSWER-BASE")).toBe(true);
-  });
-
- test("tool-use final-answer without active skills keeps legacy system prompt shape", async () => {
-    let capturedMessages: Message[] | undefined;
-    const adapter: ProviderAdapter = {
-      id: "scripted-no-skills",
-      name: "scripted-no-skills",
-      async listAvailableModels() {
-        return [];
-      },
-      async chat() {
-        throw new Error("streaming final-answer path should use chatStream");
-      },
-      async *chatStream(input) {
-        capturedMessages = input.messages;
-        yield { type: "text-delta", delta: "ok" };
-        yield {
-          type: "finish",
-          finishReason: "stop",
-          usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
-        };
-      },
-    };
-    const env = buildEnv();
-    env.config = createDefaultEngineConfig();
-    env.config.runtime.streamingOutput = true;
-    env.providers = new Map([["scripted-no-skills", adapter]]);
-    env.modelRouter = {
-      resolve: () => ({ provider: "scripted-no-skills", model: "scripted-no-skills-model" }),
-    } as never;
-    env.onFinalAnswerDelta = () => {};
-
-    await runCandidateAnswerPhase(
-      buildExecutionState({
-        intent: {
-          complexity: "complex",
-          intent: "summarise",
-          contextRelevance: "unrelated",
-        },
+        intent: { intent: "no draft" },
         taskResults: {
           "task-tool-use": {
             kind: "tool-use-result",
@@ -552,161 +352,55 @@ describe("runCandidateAnswerPhase", () => {
           },
         },
       }),
-      env,
+      buildEnv(),
     );
-
-    const systemContent =
-      typeof capturedMessages?.[0]?.content === "string"
-        ? capturedMessages[0].content
-        : "";
-    expect(systemContent).toContain("You are the final answer writer for a tool-assisted task.");
-    expect(systemContent).not.toContain("## Active Skills");
+    expect(state.candidateAnswer.content).toBe("");
+    expect(state.candidateAnswer.producedBy).toBe("tool-use");
   });
 
- test("output-format-only scope filters skills and warns when none match", () => {
-    const warnings: unknown[] = [];
-    const env = buildEnv();
-    env.config = createDefaultEngineConfig();
-    env.config.runtime.finalAnswerSkillScope = "output-format-only";
-    env.finalAnswerActiveSkills = [
-      {
-        kind: "skill",
-        name: "workflow-skill",
-        description: "workflow",
-        instructions: "do workflow things",
-      },
-    ];
-    env.observability = {
-      emit(event: { type: string; payload?: unknown }) {
-        if (event.type === "warning") {
-          warnings.push(event.payload);
-        }
-      },
-    } as never;
-
-    const resolved = resolveFinalAnswerSkills(
-      env,
+ test("tool-use status=partial → candidateAnswer.content 为空，不软性捏造叙述兜底（可恢复路由留给 turnStop seam）", async () => {
+    const state = await runCandidateAnswerPhase(
       buildExecutionState({
-        intent: { complexity: "complex", intent: "chart", contextRelevance: "unrelated" },
-      }),
-    );
-
-    expect(resolved).toEqual([]);
-    expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toMatchObject({
-      purpose: "final-answer",
-      scope: "output-format-only",
-      activeSkillCount: 1,
-    });
-  });
-
- test("output-format-only scope keeps tagged output-format skills", () => {
-    const env = buildEnv();
-    env.config = createDefaultEngineConfig();
-    env.config.runtime.finalAnswerSkillScope = "output-format-only";
-    env.finalAnswerActiveSkills = [
-      {
-        kind: "skill",
-        name: "chart-output",
-        description: "charts",
-        instructions: "use echarts fences",
-        tags: ["output-format"],
-      },
-      {
-        kind: "skill",
-        name: "other",
-        description: "other",
-        instructions: "ignored",
-      },
-    ];
-
-    const resolved = resolveFinalAnswerSkills(
-      env,
-      buildExecutionState({
-        intent: { complexity: "complex", intent: "chart", contextRelevance: "unrelated" },
-      }),
-    );
-
-    expect(resolved.map((skill) => skill.name)).toEqual(["chart-output"]);
-  });
-
- test("chart-output pin adds echarts hard rules and ignores python terminal draft", async () => {
-    let capturedMessages: Message[] | undefined;
-    const adapter: ProviderAdapter = {
-      id: "scripted-chart-output",
-      name: "scripted-chart-output",
-      async listAvailableModels() {
-        return [];
-      },
-      async chat() {
-        throw new Error("streaming final-answer path should use chatStream");
-      },
-      async *chatStream(input) {
-        capturedMessages = input.messages;
-        yield { type: "text-delta", delta: "ok" };
-        yield {
-          type: "finish",
-          finishReason: "stop",
-          usage: { promptTokens: 2, completionTokens: 1, totalTokens: 3 },
-        };
-      },
-    };
-    const chartSkill: SkillDescriptor = {
-      kind: "skill",
-      name: "chart-output",
-      description: "charts",
-      instructions: "use echarts fences",
-      tags: ["chart", "visualization"],
-    };
-    const env = buildEnv();
-    env.config = createDefaultEngineConfig();
-    env.config.runtime.streamingOutput = true;
-    env.providers = new Map([["scripted-chart-output", adapter]]);
-    env.modelRouter = {
-      resolve: () => ({ provider: "scripted-chart-output", model: "scripted-chart-output-model" }),
-    } as never;
-    env.onFinalAnswerDelta = () => {};
-    env.finalAnswerActiveSkills = [chartSkill];
-
-    await runCandidateAnswerPhase(
-      buildExecutionState({
-        intent: {
-          complexity: "complex",
-          intent: "用图表总结科技股",
-          contextRelevance: "unrelated",
-        },
+        intent: { intent: "partial fetch" },
         taskResults: {
           "task-tool-use": {
             kind: "tool-use-result",
-            status: "ready_for_output",
+            status: "partial",
             steps: [],
             observations: [
-              {
-                source: "tool",
-                tool: "mcp.web-search.web_search",
-                callId: "call-1",
-                text: "market data",
-              },
+              { source: "tool", tool: "web-fetch", callId: "f1", text: "partial content" },
             ],
-            terminalDraft: "```python\nimport matplotlib.pyplot as plt\nplt.plot([1,2,3])\n```",
+            error: { code: "TOOL_LOOP_EMPTY_TERMINAL_RESPONSE", message: "empty terminal", retryable: true },
           },
         },
       }),
-      env,
+      buildEnv(),
     );
+    expect(state.candidateAnswer.content).toBe("");
+    expect(state.candidateAnswer.content).not.toContain("partial content");
+    expect(state.candidateAnswer.producedBy).toBe("tool-use");
+ // evidence/claims 仍从 observations 派生，只是不合成叙述性正文。
+    expect(state.evidence).toHaveLength(1);
+  });
 
-    const systemContent =
-      typeof capturedMessages?.[0]?.content === "string"
-        ? capturedMessages[0].content
-        : "";
-    const userContent =
-      typeof capturedMessages?.[1]?.content === "string"
-        ? capturedMessages[1].content
-        : "";
-    expect(systemContent).toContain("Chart Output Requirements (mandatory)");
-    expect(systemContent).toContain("Do NOT output `python`");
-    expect(systemContent).toContain("### chart-output");
-    expect(userContent).toContain("ignore that draft");
-    expect(userContent).toContain("matplotlib");
+ test("tool-use status=exhausted → candidateAnswer.content 同样为空（诚实报错留给 Output fallback 模板）", async () => {
+    const state = await runCandidateAnswerPhase(
+      buildExecutionState({
+        intent: { intent: "long research" },
+        taskResults: {
+          "task-tool-use": {
+            kind: "tool-use-result",
+            status: "exhausted",
+            steps: [],
+            observations: [
+              { source: "tool", tool: "web-search", callId: "s1", text: "some findings" },
+            ],
+            error: { code: "TOOL_LOOP_STEPS_EXHAUSTED", message: "steps exhausted", retryable: false },
+          },
+        },
+      }),
+      buildEnv(),
+    );
+    expect(state.candidateAnswer.content).toBe("");
   });
 });

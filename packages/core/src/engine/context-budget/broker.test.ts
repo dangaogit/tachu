@@ -31,7 +31,7 @@ describe("DefaultContextBudgetBroker", () => {
     const broker = new DefaultContextBudgetBroker();
     const result = broker.decide({
       phase: "output",
-      scope: "tool-use-final-answer",
+      scope: "tool-use-loop",
       purpose: "summarize observations",
       model: "small-model",
       modelMaxContextTokens: 2_048,
@@ -77,16 +77,14 @@ describe("DefaultContextBudgetBroker", () => {
     expect(result.reason).toContain("exceeds");
   });
 
- // P2 β：10 个 ContextScope 全部必须返回非空、非默认的 trimOrder。
+ // P2 β：8 个 ContextScope 全部必须返回非空、非默认的 trimOrder。
  // 通过 trim 决策路径间接断言（envelope.trimOrder = trimOrderFor(scope)）。
- test("trimOrderFor exhaustively covers every ContextScope without falling back to default", () => {
+  test("trimOrderFor exhaustively covers every ContextScope without falling back to default", () => {
     const broker = new DefaultContextBudgetBroker();
     const scopes = [
       "intent",
       "main-agent",
-      "direct-answer",
       "tool-use-loop",
-      "tool-use-final-answer",
       "fallback-summary",
       "validation",
       "memory-compression",

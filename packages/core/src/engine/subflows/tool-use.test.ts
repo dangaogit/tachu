@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { ToolLoopError } from "../../errors";
 import { DefaultModelRouter } from "../../modules/model-router";
 import { DefaultObservabilityEmitter } from "../../modules/observability";
+import { DefaultHookRegistry } from "../../modules/hooks";
 import { InMemoryMemorySystem } from "../../modules/memory";
 import type {
   ChatRequest,
@@ -18,7 +19,15 @@ import type { MultimodalResolver } from "../../types/multimodal-resolver";
 import type { ResourceReference } from "../../types/resource";
 import { createDefaultEngineConfig } from "../../utils";
 import { InMemoryVectorStore } from "../../vector";
-import { executeToolUse, TOOL_USE_CONSTANTS, __testing as toolUseInternals, type ToolUseContext } from "./tool-use";
+import type { AgentDispatchFn } from "../agents";
+import {
+  AGENT_DISPATCH_TOOL_NAME,
+  executeToolUse,
+  TOOL_USE_CONSTANTS,
+  __testing as toolUseInternals,
+  type ToolUseContext,
+  type ToolUseInput,
+} from "./tool-use";
 
 /**
  * 脚手架：按顺序返回预设响应的 Provider，用于驱动 Agentic Loop。
@@ -197,6 +206,8 @@ const buildCtx = (args: {
   onToolLoopEvent?: ToolUseContext["onToolLoopEvent"];
   onToolCall?: ToolUseContext["onToolCall"];
   onAssistantDelta?: (text: string) => void;
+  onGeneratedImages?: ToolUseContext["onGeneratedImages"];
+  onGeneratedMedia?: ToolUseContext["onGeneratedMedia"];
   turnRetryCount?: number;
  /** P3 δ — 用于 sub-agent history-scope 隔离测试 */
   agentRunId?: string;
@@ -204,6 +215,11 @@ const buildCtx = (args: {
   observabilityOverride?: ToolUseContext["observability"];
   prebuiltMessages?: ToolUseContext["prebuiltPrompt"]["messages"];
   multimodalResolver?: ToolUseContext["multimodalResolver"];
+  hooks?: ToolUseContext["hooks"];
+ /** ADR-0006 D6 — 供 dispatch_agent 工具测试注册 agent 描述符。 */
+  agentSet?: Array<{ name: string; description?: string; maxDepth?: number }>;
+  dispatchAgent?: ToolUseContext["dispatchAgent"];
+  agentDispatchDepth?: ToolUseContext["agentDispatchDepth"];
 }): ToolUseContext => {
   const { config, provider, taskExecutor } = args;
   const providers = new Map([[provider.id, provider]]);
@@ -223,6 +239,19 @@ const buildCtx = (args: {
       timeout: tool.timeout ?? 5_000,
       inputSchema: { type: "object", properties: {}, additionalProperties: true },
       execute: "<test-stub>",
+    });
+  }
+  for (const agent of args.agentSet ?? []) {
+    void registry.register({
+      kind: "agent",
+      name: agent.name,
+      description: agent.description ?? `${agent.name} 测试用 agent`,
+      sideEffect: "readonly",
+      idempotent: true,
+      requiresApproval: false,
+      timeout: 60_000,
+      maxDepth: agent.maxDepth ?? 1,
+      instructions: `You are the "${agent.name}" test sub-agent.`,
     });
   }
   const tokenizer = createTiktokenTokenizer("gpt-4o-mini");
@@ -280,8 +309,15 @@ const buildCtx = (args: {
     ...(args.onToolLoopEvent ? { onToolLoopEvent: args.onToolLoopEvent } : {}),
     ...(args.onToolCall ? { onToolCall: args.onToolCall } : {}),
     ...(args.onAssistantDelta ? { onAssistantDelta: args.onAssistantDelta } : {}),
+    ...(args.onGeneratedImages ? { onGeneratedImages: args.onGeneratedImages } : {}),
+    ...(args.onGeneratedMedia ? { onGeneratedMedia: args.onGeneratedMedia } : {}),
     ...(args.turnRetryCount !== undefined ? { turnRetryCount: args.turnRetryCount } : {}),
     ...(args.agentRunId !== undefined ? { agentRunId: args.agentRunId } : {}),
+    ...(args.hooks !== undefined ? { hooks: args.hooks } : {}),
+    ...(args.dispatchAgent !== undefined ? { dispatchAgent: args.dispatchAgent } : {}),
+    ...(args.agentDispatchDepth !== undefined
+      ? { agentDispatchDepth: args.agentDispatchDepth }
+      : {}),
   };
 };
 
@@ -306,6 +342,66 @@ describe("executeToolUse ( Agentic Loop)", () => {
     expectTerminalDraft(result, "这是第一轮就给出的最终回复");
     expect(calls.length).toBe(1);
     expect(calls[0]?.toolsCount).toBe(3);
+  });
+
+ test("非流式响应携带 images/media → 透传给 onGeneratedImages/onGeneratedMedia(迁自 direct-answer.ts,ADR-0006 C1)", async () => {
+    const { adapter } = createScriptedProvider([
+      {
+        content: "已为你生成图片。",
+        finishReason: "stop",
+        usage: noopUsage,
+        images: [{ url: "https://example.com/a.png", index: 0, mimeType: "image/png" }],
+        media: [{ type: "audio", index: 0, mimeType: "audio/mpeg", url: "https://example.com/a.mp3" }],
+      },
+    ]);
+    const receivedImages: unknown[] = [];
+    const receivedMedia: unknown[] = [];
+    const ctx = buildCtx({
+      config: baseConfig(),
+      provider: adapter,
+      taskExecutor: async () => {
+        throw new Error("taskExecutor 不应被调用");
+      },
+      onGeneratedImages: (images) => receivedImages.push(...images),
+      onGeneratedMedia: (media) => receivedMedia.push(...media),
+    });
+    const result = await executeToolUse({ prompt: "帮我画一张图" }, ctx);
+    expectTerminalDraft(result, "已为你生成图片。");
+    expect(receivedImages).toEqual([
+      { url: "https://example.com/a.png", index: 0, mimeType: "image/png" },
+    ]);
+    expect(receivedMedia).toEqual([
+      { type: "audio", index: 0, mimeType: "audio/mpeg", url: "https://example.com/a.mp3" },
+    ]);
+  });
+
+ test("流式响应的 media chunk → 累积后透传给 onGeneratedMedia(迁自 direct-answer.ts,ADR-0006 C1)", async () => {
+    const { adapter } = createStreamingScriptedProvider([
+      [
+        { type: "text-delta", delta: "已为你生成语音。" },
+        {
+          type: "media",
+          media: { type: "audio", index: 0, mimeType: "audio/mpeg", url: "https://example.com/b.mp3" },
+        },
+        { type: "finish", finishReason: "stop", usage: noopUsage },
+      ],
+    ]);
+    const receivedMedia: unknown[] = [];
+    const ctx = buildCtx({
+      config: baseConfig(),
+      provider: adapter,
+      taskExecutor: async () => {
+        throw new Error("taskExecutor 不应被调用");
+      },
+      onToolLoopEvent: () => {},
+      onGeneratedMedia: (media) => receivedMedia.push(...media),
+    });
+    ctx.config.runtime.streamingOutput = true;
+    const result = await executeToolUse({ prompt: "帮我念一段文字" }, ctx);
+    expectTerminalDraft(result, "已为你生成语音。");
+    expect(receivedMedia).toEqual([
+      { type: "audio", index: 0, mimeType: "audio/mpeg", url: "https://example.com/b.mp3" },
+    ]);
   });
 
  test("toolNames 输入只向 Provider 暴露指定工具", async () => {
@@ -1962,6 +2058,515 @@ describe("executeToolUse ( Agentic Loop)", () => {
       (e) => (e.payload as { agentRunId?: string })?.agentRunId === "sub-agent-obs",
     );
     expect(tagged.length).toBeGreaterThan(0);
+  });
+});
+
+describe("dispatch_agent 内置 Task-style 工具 (ADR-0006 D6)", () => {
+  const noopTaskExecutor: ToolUseContext["taskExecutor"] = async () => {
+    throw new Error("taskExecutor 不应被调用");
+  };
+
+  test("未注入 ctx.dispatchAgent → 工具列表不含 dispatch_agent", () => {
+    const ctx = buildCtx({
+      config: baseConfig(),
+      provider: createScriptedProvider([]).adapter,
+      toolSet: [{ name: "list-dir" }],
+      agentSet: [{ name: "researcher" }],
+      taskExecutor: noopTaskExecutor,
+    });
+    const tools = toolUseInternals.resolveToolDefinitions({ prompt: "x" }, ctx);
+    expect(tools.some((t) => t.name === AGENT_DISPATCH_TOOL_NAME)).toBe(false);
+  });
+
+  test("registry 无任何 agent → 即便注入 dispatchAgent 也不暴露工具", () => {
+    const dispatchAgent: AgentDispatchFn = async () => {
+      throw new Error("不应被调用");
+    };
+    const ctx = buildCtx({
+      config: baseConfig(),
+      provider: createScriptedProvider([]).adapter,
+      toolSet: [{ name: "list-dir" }],
+      taskExecutor: noopTaskExecutor,
+      dispatchAgent,
+    });
+    const tools = toolUseInternals.resolveToolDefinitions({ prompt: "x" }, ctx);
+    expect(tools.some((t) => t.name === AGENT_DISPATCH_TOOL_NAME)).toBe(false);
+  });
+
+  test("已注入 dispatchAgent + 已注册 agent → 暴露 dispatch_agent，描述含 agent 名称与只读约束", () => {
+    const dispatchAgent: AgentDispatchFn = async () => {
+      throw new Error("不应被调用");
+    };
+    const ctx = buildCtx({
+      config: baseConfig(),
+      provider: createScriptedProvider([]).adapter,
+      toolSet: [{ name: "list-dir" }],
+      agentSet: [{ name: "researcher", description: "只读调研 agent" }],
+      taskExecutor: noopTaskExecutor,
+      dispatchAgent,
+      agentDispatchDepth: 0,
+    });
+    const tools = toolUseInternals.resolveToolDefinitions({ prompt: "x" }, ctx);
+    const dispatchTool = tools.find((t) => t.name === AGENT_DISPATCH_TOOL_NAME);
+    expect(dispatchTool).toBeDefined();
+    expect(dispatchTool?.description).toContain("researcher");
+    expect(dispatchTool?.description).toContain("只读调研 agent");
+    expect(dispatchTool?.description.toLowerCase()).toContain("single-writer");
+  });
+
+  test("深度已耗尽（agentDispatchDepth >= maxDepth 默认 1）→ 不暴露工具", () => {
+    const dispatchAgent: AgentDispatchFn = async () => {
+      throw new Error("不应被调用");
+    };
+    const ctx = buildCtx({
+      config: baseConfig(),
+      provider: createScriptedProvider([]).adapter,
+      toolSet: [{ name: "list-dir" }],
+      agentSet: [{ name: "researcher" }],
+      taskExecutor: noopTaskExecutor,
+      dispatchAgent,
+      agentDispatchDepth: 1,
+    });
+    const tools = toolUseInternals.resolveToolDefinitions({ prompt: "x" }, ctx);
+    expect(tools.some((t) => t.name === AGENT_DISPATCH_TOOL_NAME)).toBe(false);
+  });
+
+  test("显式配置 maxDepth=2 时，depth=1 仍暴露工具", () => {
+    const dispatchAgent: AgentDispatchFn = async () => {
+      throw new Error("不应被调用");
+    };
+    const config = baseConfig();
+    config.runtime.toolLoop = {
+      ...config.runtime.toolLoop,
+      subagentDispatch: { maxDepth: 2 },
+    };
+    const ctx = buildCtx({
+      config,
+      provider: createScriptedProvider([]).adapter,
+      toolSet: [{ name: "list-dir" }],
+      agentSet: [{ name: "researcher" }],
+      taskExecutor: noopTaskExecutor,
+      dispatchAgent,
+      agentDispatchDepth: 1,
+    });
+    const tools = toolUseInternals.resolveToolDefinitions({ prompt: "x" }, ctx);
+    expect(tools.some((t) => t.name === AGENT_DISPATCH_TOOL_NAME)).toBe(true);
+  });
+
+  test("subagentDispatch.enabled=false → 即便有 agent 与 dispatchAgent 也不暴露", () => {
+    const dispatchAgent: AgentDispatchFn = async () => {
+      throw new Error("不应被调用");
+    };
+    const config = baseConfig();
+    config.runtime.toolLoop = {
+      ...config.runtime.toolLoop,
+      subagentDispatch: { enabled: false },
+    };
+    const ctx = buildCtx({
+      config,
+      provider: createScriptedProvider([]).adapter,
+      toolSet: [{ name: "list-dir" }],
+      agentSet: [{ name: "researcher" }],
+      taskExecutor: noopTaskExecutor,
+      dispatchAgent,
+    });
+    const tools = toolUseInternals.resolveToolDefinitions({ prompt: "x" }, ctx);
+    expect(tools.some((t) => t.name === AGENT_DISPATCH_TOOL_NAME)).toBe(false);
+  });
+
+  test("LLM 调用 dispatch_agent 成功 → 摘要(output+evidence)进 tool message，不含子 loop 全 transcript", async () => {
+    const { adapter, calls } = createScriptedProvider([
+      {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [
+          {
+            id: "c-1",
+            name: AGENT_DISPATCH_TOOL_NAME,
+            arguments: { agent: "researcher", objective: "调查 foo 模块用法" },
+          },
+        ],
+        usage: noopUsage,
+      },
+      { content: "已根据 sub-agent 摘要给出答案。", finishReason: "stop", usage: noopUsage },
+    ]);
+    let capturedParams: Parameters<AgentDispatchFn>[0] | undefined;
+    const dispatchAgent: AgentDispatchFn = async (params) => {
+      capturedParams = params;
+      return {
+        agent: params.agentName,
+        status: "completed",
+        output: "foo 模块导出 bar() 与 baz()。",
+        evidence: [
+          {
+            source: "agent-run:sub-1",
+            content: { agent: params.agentName },
+            producedBy: "agent-runtime",
+            purpose: "execution-observation",
+          },
+        ],
+      };
+    };
+    const ctx = buildCtx({
+      config: baseConfig(),
+      provider: adapter,
+      toolSet: [{ name: "list-dir" }],
+      agentSet: [{ name: "researcher", description: "只读调研 agent" }],
+      taskExecutor: noopTaskExecutor,
+      dispatchAgent,
+    });
+
+    const result = await executeToolUse({ prompt: "x" }, ctx);
+    expectTerminalDraft(result, "已根据 sub-agent 摘要给出答案。");
+    expect(capturedParams).toEqual({ agentName: "researcher", objective: "调查 foo 模块用法" });
+    const toolMessage = calls[1]?.messages.find((m) => m.role === "tool");
+    expect(typeof toolMessage?.content === "string" && toolMessage.content).toContain(
+      "foo 模块导出 bar() 与 baz()",
+    );
+    expect(typeof toolMessage?.content === "string" && toolMessage.content).toContain(
+      "agent-run:sub-1",
+    );
+  });
+
+  test("dispatch_agent 缺少必填参数 → 合成错误 tool message，loop 不中断", async () => {
+    const { adapter, calls } = createScriptedProvider([
+      {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{ id: "c-1", name: AGENT_DISPATCH_TOOL_NAME, arguments: { agent: "" } }],
+        usage: noopUsage,
+      },
+      { content: "已改用其它方式回答。", finishReason: "stop", usage: noopUsage },
+    ]);
+    const dispatchAgent: AgentDispatchFn = async () => {
+      throw new Error("不应被调用：参数非法应在调用前短路");
+    };
+    const ctx = buildCtx({
+      config: baseConfig({ failureRecoveryRetries: 0 }),
+      provider: adapter,
+      toolSet: [{ name: "list-dir" }],
+      agentSet: [{ name: "researcher" }],
+      taskExecutor: noopTaskExecutor,
+      dispatchAgent,
+    });
+
+    const result = await executeToolUse({ prompt: "x" }, ctx);
+    expectTerminalDraft(result, "已改用其它方式回答。");
+    const toolMessage = calls[1]?.messages.find((m) => m.role === "tool");
+    expect(typeof toolMessage?.content === "string" && toolMessage.content).toContain(
+      "agent",
+    );
+  });
+
+  test("dispatchAgent 返回 failed → 错误信息进 tool message", async () => {
+    const { adapter, calls } = createScriptedProvider([
+      {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [
+          {
+            id: "c-1",
+            name: AGENT_DISPATCH_TOOL_NAME,
+            arguments: { agent: "missing-agent", objective: "do something" },
+          },
+        ],
+        usage: noopUsage,
+      },
+      { content: "sub-agent 不存在，已直接回答。", finishReason: "stop", usage: noopUsage },
+    ]);
+    const dispatchAgent: AgentDispatchFn = async (params) => ({
+      agent: params.agentName,
+      status: "failed",
+      error: {
+        code: "AGENT_DESCRIPTOR_NOT_FOUND",
+        message: `Agent descriptor not found: ${params.agentName}`,
+        retryable: false,
+      },
+    });
+    const ctx = buildCtx({
+      config: baseConfig({ failureRecoveryRetries: 0 }),
+      provider: adapter,
+      toolSet: [{ name: "list-dir" }],
+      agentSet: [{ name: "researcher" }],
+      taskExecutor: noopTaskExecutor,
+      dispatchAgent,
+    });
+
+    const result = await executeToolUse({ prompt: "x" }, ctx);
+    expectTerminalDraft(result, "sub-agent 不存在，已直接回答。");
+    const toolMessage = calls[1]?.messages.find((m) => m.role === "tool");
+    expect(typeof toolMessage?.content === "string" && toolMessage.content).toContain(
+      "Agent descriptor not found: missing-agent",
+    );
+  });
+
+  test("pin 指定 toolNames 不含 dispatch_agent → 工具列表不暴露（与内置工具一致的过滤语义）", () => {
+    const dispatchAgent: AgentDispatchFn = async () => {
+      throw new Error("不应被调用");
+    };
+    const ctx = buildCtx({
+      config: baseConfig(),
+      provider: createScriptedProvider([]).adapter,
+      toolSet: [{ name: "list-dir" }],
+      agentSet: [{ name: "researcher" }],
+      taskExecutor: noopTaskExecutor,
+      dispatchAgent,
+    });
+    const input: ToolUseInput = { prompt: "x", toolNames: ["list-dir"] };
+    const tools = toolUseInternals.resolveToolDefinitions(input, ctx);
+    expect(tools.some((t) => t.name === AGENT_DISPATCH_TOOL_NAME)).toBe(false);
+  });
+});
+
+describe("loop-lifecycle hooks (ADR-0006 D2)", () => {
+ test("preLLM: fires每 step 一次，并可用 modify 改写 conversation", async () => {
+    const { adapter, calls } = createScriptedProvider([
+      { content: "ok", finishReason: "stop", usage: noopUsage },
+    ]);
+    const hooks = new DefaultHookRegistry(new DefaultObservabilityEmitter());
+    const seenPoints: string[] = [];
+    hooks.register("preLLM", async (event) => {
+      seenPoints.push(event.point);
+      const data = event.data as { conversation: Message[] };
+      return {
+        type: "modify",
+        patch: [...data.conversation, { role: "system", content: "[preLLM injected]" }],
+      };
+    });
+    const ctx = buildCtx({
+      config: baseConfig(),
+      provider: adapter,
+      taskExecutor: async () => {
+        throw new Error("not used");
+      },
+      hooks,
+    });
+    const result = await executeToolUse({ prompt: "hi" }, ctx);
+    expectTerminalDraft(result, "ok");
+    expect(seenPoints).toEqual(["preLLM"]);
+    const sentMessages = calls[0]?.messages ?? [];
+    expect(sentMessages.some((m) => m.content === "[preLLM injected]")).toBe(true);
+  });
+
+ test("preLLM: deny → 中止 loop 且不调用 Provider", async () => {
+    const { adapter, calls } = createScriptedProvider([
+      { content: "should not be reached", finishReason: "stop", usage: noopUsage },
+    ]);
+    const hooks = new DefaultHookRegistry(new DefaultObservabilityEmitter());
+    hooks.register("preLLM", async () => ({ type: "deny", reason: "policy blocked" }));
+    const ctx = buildCtx({
+      config: baseConfig(),
+      provider: adapter,
+      taskExecutor: async () => {
+        throw new Error("not used");
+      },
+      hooks,
+    });
+    await expect(executeToolUse({ prompt: "hi" }, ctx)).rejects.toThrow();
+    expect(calls.length).toBe(0);
+  });
+
+ test("preLLM: mutation 形状非法(非 Message[])时被忽略，不影响正常调用", async () => {
+    const { adapter, calls } = createScriptedProvider([
+      { content: "ok", finishReason: "stop", usage: noopUsage },
+    ]);
+    const hooks = new DefaultHookRegistry(new DefaultObservabilityEmitter());
+    hooks.register("preLLM", async () => ({ type: "modify", patch: "not-an-array" }));
+    const ctx = buildCtx({
+      config: baseConfig(),
+      provider: adapter,
+      taskExecutor: async () => {
+        throw new Error("not used");
+      },
+      hooks,
+    });
+    const result = await executeToolUse({ prompt: "hi" }, ctx);
+    expectTerminalDraft(result, "ok");
+    expect(calls.length).toBe(1);
+  });
+
+ test("postLLM: fires 且 replace 改写的 content 会回灌进 conversation 历史", async () => {
+    const { adapter, calls } = createScriptedProvider([
+      {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{ id: "call-1", name: "list-dir", arguments: {} }],
+        usage: noopUsage,
+      },
+      { content: "第二轮回复", finishReason: "stop", usage: noopUsage },
+    ]);
+    const hooks = new DefaultHookRegistry(new DefaultObservabilityEmitter());
+    const seenPoints: string[] = [];
+    hooks.register("postLLM", async (event) => {
+      seenPoints.push(event.point);
+      const data = event.data as {
+        response: { content: string; usage: unknown; toolCalls?: unknown[] };
+      };
+      if (data.response.toolCalls) {
+        return { type: "continue" };
+      }
+      return { type: "replace", data: { ...data.response, content: "[postLLM redacted]" } };
+    });
+    const ctx = buildCtx({
+      config: baseConfig(),
+      provider: adapter,
+      toolSet: [{ name: "list-dir" }],
+      taskExecutor: async () => ok({ entries: [] }),
+      hooks,
+    });
+    const result = await executeToolUse({ prompt: "hi" }, ctx);
+    expect(seenPoints).toEqual(["postLLM", "postLLM"]);
+    expectTerminalDraft(result, "[postLLM redacted]");
+  });
+
+ test("postLLM: mutation 不允许篡改 usage(计费只认 Provider 真值)", async () => {
+    const usage = { promptTokens: 10, completionTokens: 5, totalTokens: 15 };
+    const { adapter } = createScriptedProvider([{ content: "ok", finishReason: "stop", usage }]);
+    const hooks = new DefaultHookRegistry(new DefaultObservabilityEmitter());
+    hooks.register("postLLM", async () => ({
+      type: "replace",
+      data: { content: "ok", usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 } },
+    }));
+    let observedUsage: unknown;
+    const ctx = buildCtx({
+      config: baseConfig(),
+      provider: adapter,
+      taskExecutor: async () => {
+        throw new Error("not used");
+      },
+      hooks,
+    });
+    ctx.onProviderUsage = (u) => {
+      observedUsage = u;
+    };
+    await executeToolUse({ prompt: "hi" }, ctx);
+    expect(observedUsage).toEqual(usage);
+  });
+
+ test("preToolUse: 每次工具调用前无条件 fire，deny 时跳过真实执行", async () => {
+    const { adapter } = createScriptedProvider([
+      {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{ id: "call-1", name: "list-dir", arguments: {} }],
+        usage: noopUsage,
+      },
+      { content: "done", finishReason: "stop", usage: noopUsage },
+    ]);
+    const hooks = new DefaultHookRegistry(new DefaultObservabilityEmitter());
+    const seenTools: string[] = [];
+    hooks.register("preToolUse", async (event) => {
+      const data = event.data as { tool: string };
+      seenTools.push(data.tool);
+      return { type: "deny", reason: "not allowed in test" };
+    });
+    let executed = false;
+    const ctx = buildCtx({
+      config: baseConfig(),
+      provider: adapter,
+      toolSet: [{ name: "list-dir" }],
+      taskExecutor: async () => {
+        executed = true;
+        return ok({ entries: [] });
+      },
+      hooks,
+    });
+    const result = await executeToolUse({ prompt: "hi" }, ctx);
+    expectTerminalDraft(result, "done");
+    expect(seenTools).toEqual(["list-dir"]);
+    expect(executed).toBe(false);
+  });
+
+ test("postToolUse: fires 且 modify 可改写 tool 输出内容(如脱敏)", async () => {
+    const { adapter } = createScriptedProvider([
+      {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{ id: "call-1", name: "list-dir", arguments: {} }],
+        usage: noopUsage,
+      },
+      { content: "done", finishReason: "stop", usage: noopUsage },
+    ]);
+    const hooks = new DefaultHookRegistry(new DefaultObservabilityEmitter());
+    const seenPoints: string[] = [];
+    hooks.register("postToolUse", async (event) => {
+      seenPoints.push(event.point);
+      return { type: "modify", patch: { content: "[REDACTED]" } };
+    });
+    const ctx = buildCtx({
+      config: baseConfig(),
+      provider: adapter,
+      toolSet: [{ name: "list-dir" }],
+      taskExecutor: async () => ok({ secret: "sk-live-xyz" }),
+      hooks,
+    });
+    const result = await executeToolUse({ prompt: "hi" }, ctx);
+    expectTerminalDraft(result, "done");
+    expect(seenPoints).toEqual(["postToolUse"]);
+    const toolMessage = result.observations.find((o) => o.text.includes("REDACTED"));
+    expect(toolMessage).toBeDefined();
+  });
+
+ test("preCompact: 上下文超阈值时 fire，host replace 生效则不套用默认压缩", async () => {
+    const { adapter } = createScriptedProvider([
+      { content: "ok", finishReason: "stop", usage: noopUsage },
+    ]);
+    const hooks = new DefaultHookRegistry(new DefaultObservabilityEmitter());
+    let fired = false;
+    hooks.register("preCompact", async (event) => {
+      fired = true;
+      const data = event.data as { conversation: Message[] };
+      return {
+        type: "replace",
+        data: [{ role: "system", content: "[compacted by host]" }, ...data.conversation.slice(-1)],
+      };
+    });
+    const config = baseConfig();
+    config.memory.maxContextTokens = 1;
+    const ctx = buildCtx({ config, provider: adapter, taskExecutor: async () => {
+      throw new Error("not used");
+    }, hooks });
+    const result = await executeToolUse({ prompt: "hi" }, ctx);
+    expectTerminalDraft(result, "ok");
+    expect(fired).toBe(true);
+  });
+
+ test("preCompact: 未注入 hooks 时使用保守默认压缩策略，不影响正常终止", async () => {
+    const { adapter } = createScriptedProvider([
+      {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [{ id: "call-1", name: "list-dir", arguments: {} }],
+        usage: noopUsage,
+      },
+      { content: "done", finishReason: "stop", usage: noopUsage },
+    ]);
+    const config = baseConfig();
+    config.memory.maxContextTokens = 1;
+    const ctx = buildCtx({
+      config,
+      provider: adapter,
+      toolSet: [{ name: "list-dir" }],
+      taskExecutor: async () => ok({ entries: [] }),
+    });
+    const result = await executeToolUse({ prompt: "hi" }, ctx);
+    expectTerminalDraft(result, "done");
+  });
+
+ test("未注入 hooks 时全部 loop-lifecycle 点均为 no-op(向后兼容)", async () => {
+    const { adapter } = createScriptedProvider([
+      { content: "backward compatible", finishReason: "stop", usage: noopUsage },
+    ]);
+    const ctx = buildCtx({
+      config: baseConfig(),
+      provider: adapter,
+      taskExecutor: async () => {
+        throw new Error("not used");
+      },
+    });
+    expect(ctx.hooks).toBeUndefined();
+    const result = await executeToolUse({ prompt: "hi" }, ctx);
+    expectTerminalDraft(result, "backward compatible");
   });
 });
 

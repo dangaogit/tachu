@@ -1,21 +1,14 @@
 import { BudgetExhaustedError } from "../errors";
-import type {
-  EngineConfig,
-  ExecutionCorrelation,
-  ExecutionSubject,
-  PlanningResult,
-  RankedPlan,
-} from "../types";
-import type { ObservabilityEmitter } from "../modules/observability";
+import type { EngineConfig } from "../types";
 
 /**
- * 编排控制面。
+ * Turn 级预算追踪器。
  *
- * 负责计划切换、预算追踪与重规划信号发射。
+ * 深单 loop（ADR-0006）下不再有多方案规划 / 计划切换 / 重规划信号：本类退化
+ * 为纯粹的 turn 级预算追踪与 tool-loop 计时，累计 token / tool-call /
+ * wall-time / tool-loop-active，并在越界时抛 `BudgetExhaustedError` 熔断。
  */
 export class ExecutionOrchestrator {
-  private plans: RankedPlan[] = [];
-  private activePlanIndex = 0;
   private readonly used = {
     promptTokens: 0,
     completionTokens: 0,
@@ -42,66 +35,7 @@ export class ExecutionOrchestrator {
  */
   private userBlockingDepth = 0;
 
-  constructor(
-    private readonly config: EngineConfig,
-    private readonly trace: {
-      correlation: ExecutionCorrelation;
-      subject?: ExecutionSubject | undefined;
-    },
-    private readonly emitter: ObservabilityEmitter,
-  ) {}
-
- /**
- * 设置并排序候选规划结果。
- *
- * @param planning 规划阶段输出
- */
-  setPlanningResult(planning: PlanningResult): void {
-    this.plans = [...planning.plans].sort((a, b) => a.rank - b.rank);
-    this.activePlanIndex = 0;
-  }
-
- /**
- * 获取当前活动计划。
- *
- * @returns 当前执行计划
- * @throws Error 当没有可用计划时抛出
- */
-  getActivePlan(): RankedPlan {
-    const plan = this.plans[this.activePlanIndex];
-    if (!plan) {
-      throw new Error("No active plan");
-    }
-    return plan;
-  }
-
- /**
- * 切换到下一个候选计划。
- *
- * @param reason 切换原因
- * @returns 新计划；若已无可切换计划则返回 null
- */
-  switchToNextPlan(reason: string): RankedPlan | null {
-    if (this.activePlanIndex + 1 >= this.plans.length) {
-      return null;
-    }
-    this.activePlanIndex += 1;
-    const plan = this.plans[this.activePlanIndex] ?? null;
-    if (plan) {
-      this.emitter.emit({
-        timestamp: Date.now(),
-        correlation: this.trace.correlation,
-        ...(this.trace.subject !== undefined ? { subject: this.trace.subject } : {}),
-        phase: "orchestrator",
-        type: "plan_switched",
-        payload: {
-          reason,
-          activePlanIndex: this.activePlanIndex,
-        },
-      });
-    }
-    return plan;
-  }
+  constructor(private readonly config: EngineConfig) {}
 
  /**
  * 记录一次模型调用 token 消耗并执行预算校验。
@@ -129,25 +63,6 @@ export class ExecutionOrchestrator {
   recordToolCall(): void {
     this.used.toolCalls += 1;
     this.assertBudget();
-  }
-
- /**
- * 发射重规划请求事件。
- *
- * @param reason 触发重规划的原因
- */
-  markReplanRequest(reason: string): void {
-    this.emitter.emit({
-      timestamp: Date.now(),
-      correlation: this.trace.correlation,
-      ...(this.trace.subject !== undefined ? { subject: this.trace.subject } : {}),
-      phase: "orchestrator",
-      type: "warning",
-      payload: {
-        replan: true,
-        reason,
-      },
-    });
   }
 
  /**

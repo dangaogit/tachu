@@ -1,8 +1,10 @@
 # Agentic Engine 概要设计文档
 
-> 状态：Release Candidate 基线 最后更新：2026-06-01
+> 状态：Release Candidate 基线 最后更新：2026-07-02（ADR-0006 落地）
 >
 > **职责边界**：概念架构与主干流程。类型规格与配置 Schema 见 [详细设计](./detailed-design.md)；工程落地见 [技术设计](./technical-design.md)。
+>
+> **执行模型架构说明**：§七「主干流程」已随 ADR-0006（Harness 挂载面：多阶段流水线 → 深单 loop + loop-lifecycle 守卫面）落地改写为当前实现（`0.2.0`，深单 agentic loop + loop-lifecycle 守卫面）；历史 9 阶段流水线版本见 tachu-docs 仓库 `adr/decisions/0001-direct-answer-as-builtin-subflow.md`、`0002-agentic-loop-builtin-subflow.md` 原文。
 
 **版本术语**：Tachu 当前产品线为 **Tachu v1**；`1.0.0-rc.0` 是 `1.0.0` 的稳定化候选版本，不是新的框架代际。详见 [详细设计 · 版本与发布术语](./detailed-design.md#版本与发布术语必读)。
 
@@ -25,7 +27,7 @@ Harness）。引擎自身不包含过多实际功能，只负责定义和约束�
 ```mermaid
 graph TD
     subgraph "业务层"
-        A[业务规则 / 业务工具 / 自定义 Adapter / 领域技能 / Agent / 预定义 Plan 模板]
+        A[业务规则 / 业务工具 / 自定义 Adapter / 领域技能 / Agent]
     end
     subgraph "引擎扩展库 (官方)"
         B[通用 Provider Adapter / 常用 Tools / 执行后端封装 / 通用规则 / 向量数据库 Adapter / 输入转换器等]
@@ -39,8 +41,7 @@ graph TD
 
 ```
 ┌─ 业务层 ──────────────────────────────────────────────────┐
-│  业务规则、业务工具、自定义 Adapter、领域技能、Agent、        │
-│  预定义 Plan 模板                                             │
+│  业务规则、业务工具、自定义 Adapter、领域技能、Agent          │
 ├─ 引擎扩展库（官方）──────────────────────────────────────────┤
 │  通用 Provider Adapter、常用 Tools、执行后端封装、            │
 │  通用规则、向量数据库 Adapter、输入转换器等                   │
@@ -115,7 +116,7 @@ Tool 的执行闸门是全局统一的——无论 Tool 被直接调用还是被
 > - **方式 A（推荐）**：通过 `SafetyModule.registerPolicy({ scope: 'execution', check })` 注入业务侧的执行闸门策略，覆盖审批、scopes、白名单等关注点；
 > - **方式 B**：自建 TaskExecutor，在调用任意 Tool 前显式做权限/审批校验，再委托执行。
 >
-> 引擎仅保证 `direct-answer` 等内置 Sub-flow 走 `InternalSubflowRegistry` 独立通道，不会绕开生产侧自建的闸门；其它 Tool/Agent 的执行强度完全由方式 A/B 决定。`@tachu/extensions` 提供 `withDefaultGate(executor, { policies })` 默认闸门组合器供业务侧按需包裹，但不会强制注入到 core，以保持引擎的"Harness"定位。
+> 引擎仅保证 `tool-use` 等内置 Sub-flow 走 `InternalSubflowRegistry` 独立通道，不会绕开生产侧自建的闸门；其它 Tool/Agent 的执行强度完全由方式 A/B 决定。`@tachu/extensions` 提供 `withDefaultGate(executor, { policies })` 默认闸门组合器供业务侧按需包裹，但不会强制注入到 core，以保持引擎的"Harness"定位。
 
 - **激活方式**：
   - 输入中显式指定 → 精确激活
@@ -238,7 +239,7 @@ input → process → output
 
 - 输入转换器（Adapter 模式）：引擎扩展库提供通用转换器，业务可自定义
 - 原则：**能直传就直传，不做多余转换**
-- **资源引用池**：图片/文件等重内容在入口被装配为正文中的占位 token `[[ref:<kind>:<key>]]` + 旁路 Resource Pool；意图分析等无需重内容的阶段只看占位 token（渲染为 `[Image #N]`，零物化），仅在 **Provider 边界**按需物化（保真为默认；能力不匹配或解析失败时按 D6 三级降级）。
+- **资源引用池**：图片/文件等重内容在入口被装配为正文中的占位 token `[[ref:<kind>:<key>]]` + 旁路 Resource Pool；`tool-routing` 等无需重内容的确定性阶段只看占位 token（渲染为 `[Image #N]`，零物化），仅在 **Provider 边界**按需物化（保真为默认；能力不匹配或解析失败时按 D6 三级降级）。
 
 ### 输出层
 
@@ -275,32 +276,36 @@ input → process → output
 
 ## 七、主干流程
 
-> **流水线同构原则**：所有请求，无论复杂度如何，都必须依次经过 Phase 1–9；意图分析**不产生最终答复**，仅负责分类与上下文门卫判定。最终答复全部由 Phase 7 内置的两类 Sub-flow 兑现：
+> **流水线同构原则（ADR-0006 塌陷版）**：一个**深单 agentic loop 是唯一主干 spine**。所有请求：`turnStart` 前置守卫 → 确定性预处理（`tool-routing`）→ 进入同一个 `tool-use` loop；loop 内 LLM 自主决定调用工具、派发子代理，还是直接给出终答。「无工具的纯回答」由 loop step-1 无 `tool_call` 自然承接，不再有独立的 `direct-answer` 子流程或独立的 `intent`/`planning` 分类 phase。
 >
-> - `direct-answer`：一次性的 LLM 对话回复，负责 simple 意图与 complex-未匹配兜底。
-> - `tool-use`：多轮的 Agentic 工具循环，负责 complex-已匹配意图，动态决定调用哪些工具、调几次、按什么顺序。
->
-> 该设计保证预算记账、安全策略、Hook 挂载点、可观测事件在所有请求上具备一致覆盖；Phase 5 只负责路由到正确的 Sub-flow，不再静态编排多步 Tool 序列。
+> 横切能力（Rules / Hooks / Guardrail / 预算 / 可观测性）不再挂在 phase 名前后，而是统一挂在 **loop-lifecycle 事件**上；这保证了它们在所有请求上具备一致覆盖，且不再有"定义了却从不触发"的死挂载面。
 
 ```mermaid
 graph TD
     Start[业务请求] --> Session[会话管理]
     Session --> Safety[最小安全准入]
-    Safety --> Intent[意图分析 LLM（纯分类）]
-    Intent --> PreCheck[前置校验]
-    PreCheck --> Split[任务拆分]
-    Split -- simple 意图 --> DirectPlan[单步 Plan：direct-answer]
-    Split -- complex 且匹配工具 --> ToolUsePlan[单步 Plan：tool-use（Agentic Loop）]
-    Split -- complex 且无匹配 --> FallbackPlan[兜底单步 Plan：direct-answer（warn）]
-    Split -- Plan 模式 --> PlanLoop[规划循环]
-    DirectPlan --> GraphCheck[依赖图校验]
-    ToolUsePlan --> GraphCheck
-    FallbackPlan --> GraphCheck
-    PlanLoop --> GraphCheck
-    GraphCheck --> Execute[子任务执行]
-    Execute --> Validate[结果验证]
-    Validate --> Summary[执行总结]
-    Summary --> Output[输出规范]
+    Safety --> TurnStart{turnStart 守卫}
+    TurnStart -- block --> Abort[中止整轮]
+    TurnStart -- pass / degrade / annotate --> ToolRouting[tool-routing 确定性预处理]
+    ToolRouting --> PreLLM
+    subgraph Loop[execution：tool-use 深单 Agentic Loop]
+        direction TB
+        PreLLM[preLLM] --> LLMDecide[LLM 决策：终答 / 调工具 / 派子代理]
+        LLMDecide --> ToolCall{有 tool_call？}
+        ToolCall -- 是 --> PreToolUse[preToolUse 审批]
+        PreToolUse --> ExecTools[并行执行工具 / dispatch_agent]
+        ExecTools --> PostToolUse[postToolUse]
+        PostToolUse --> CompactCheck{上下文超阈值？}
+        CompactCheck -- 是 --> PreCompact[preCompact 自动压缩]
+        PreCompact --> PreLLM
+        CompactCheck -- 否 --> PreLLM
+        ToolCall -- 否 --> PostLLM[postLLM]
+        PostLLM --> Terminal[terminalDraft 即候选答案]
+    end
+    Terminal --> Validate[结果验证]
+    Validate --> TurnStop{turnStop 守卫}
+    TurnStop -- block --> Reject[拒绝交付]
+    TurnStop -- pass / degrade / annotate --> Output[输出规范]
     Output --> End[结果输出]
 ```
 
@@ -317,130 +322,155 @@ graph TD
   ├── 基础权限校验（基于执行上下文中的 scopes）
   └── 业务前置安全挂载点（可选，业务可通过 Hooks 挂载轻量级安全策略）
   ↓
-意图分析（LLM，纯分类层）
-  ├── 理解用户意图并产生 ≤200 字符的 intent 摘要
-  ├── 上下文门卫：判断本轮与历史是否相关
-  │   ├── 相关 → 携带相关上下文向下传递
-  │   └── 无关 → 仅本轮输入向下（历史仅意图分析层可见）
-  └── 判断复杂度（complexity）
-       ├── simple：LLM 单次响应即可回答的请求（问候、写代码、写教案、翻译……）
-       └── complex：必须调用真实工具 / 读写文件 / 联网查询 / 多步协作才能完成
-       ※ 意图分析不再产出最终答复，交由 Phase 7 的 direct-answer Sub-flow 兑现
+turnStart（pre-guard，恒 fail-closed，见「loop-lifecycle 挂载面」）
+  ├── 内置默认 guard：SafetyModule baseline（前置安全检查产出的 violations → annotate/degrade/block）
+  ├── 业务可通过 EngineDependencies.guardrails.turnStart 追加 guard（合规 / 内容策略 / 自定义门禁）
+  ├── block → 中止整轮
+  └── pass / degrade / annotate → 携带说明前缀继续
   ↓
-前置校验（所有路径必经，不再因 simple 跳过）
-  ├── 资源可用性（Tools/Agents 是否可用、Provider 是否连通）
-  ├── 深度安全校验（业务注入的安全策略，如 Prompt 注入检测）
-  └── 业务自定义校验（通过 Rules 或 Hooks 注册模式追加）
+tool-routing（确定性预处理，取代原 intent 分类 / precheck / planning / graph-check 四个 phase）
+  ├── turnPolicy 规范化（只消费显式 scope / 已 pre-seed 的 metadata，不做模型猜测）
+  ├── 工具集通过 ToolActivator.visibleTools 确定性收窄
+  ├── 显式 @agent 提及 → agent-batch 快路径（与主干 loop 并行的独立确定性能力）
+  └── 其余情况 → 构造单个 tool-use 任务，交给唯一主干 loop（零匹配工具时 loop 仍会执行，
+        LLM 在无 tool_call 情况下自然产出纯文本答复）
   ↓
-任务拆分（必须产出 tasks.length ≥ 1 的 Plan；"兜底契约"）
-  ├── simple 意图 → 单步 Plan：{ ref: "direct-answer", input: { prompt } }
-  │                 （由内置 Sub-flow 一次 LLM 调用产出自然语言答复）
-  ├── complex 意图 + Registry 存在 ≥1 个可见 Tool
-  │     → 单步 Plan：{ ref: "tool-use", input: { prompt } }
-  │       （由内置 Agentic Loop Sub-flow 动态决定调用哪些工具、调用几次；
-  │        工具序列不再由 Phase 5 静态编排）
-  └── complex 意图 + Registry 为空 / 意图与现有工具不相关
-        → 兜底单步 Plan：{ ref: "direct-answer", input: { prompt, warn: true } }
-          （由内置 Sub-flow 产出带"未匹配工具"提示的自然语言答复）
+execution：tool-use 深单 Agentic Loop（唯一主干 spine）
+  ├── 每个 step：preLLM → LLM 决策 → 有 tool_call？
+  │     ├── 是 → preToolUse 审批 → 并行执行工具 / dispatch_agent → postToolUse → 结果回灌 → 下一 step
+  │     │        （上下文超阈值时先过 preCompact 自动压缩再回灌）
+  │     └── 否 → postLLM → terminalDraft（在完整 prebuiltPrompt 下写就，即候选答案正文）
+  ├── 「无工具的纯回答」由 step-1 无 tool_call 自然承接（subsumes 已删除的 direct-answer）
+  └── 达到 maxSteps 上限 / 预算耗尽 / 收到取消信号 → 循环退出并按可恢复性分流
   ↓
-依赖图校验（引擎确定性校验）
-  ├── 环检测：不允许循环依赖
-  ├── 节点完整性：引用的 Tool/Agent/Sub-flow 是否存在且可用
-  │                （direct-answer、tool-use 作为内置 Sub-flow 由引擎启动时强制注册，始终可用）
-  ├── 校验通过 → 进入执行
-  └── 校验失败 → 触发重规划或降级
+结果验证（Result Validation，默认开启，可配置关闭）
+  ├── 通过 → 进入 turnStop
+  └── 不通过 → 诊断 → 重试（回到 tool-routing 重新执行，上限可配置，默认 3 次）
+               → 仍失败 → Output 阶段的本地确定性兜底模板
   ↓
-执行排名最高的方案
+turnStop（post-guard，恒最后跑、fail-closed，见「loop-lifecycle 挂载面」）
+  ├── 内置默认 guard：Result Validation（evidence/claims → deliver/retry/degrade）
+  ├── 业务可通过 EngineDependencies.guardrails.turnStop 追加 guard
+  ├── block → 拒绝交付
+  └── pass / degrade / annotate → 携带说明前缀继续
   ↓
-  ┌──────────────────────────────────────────────────────────┐
-  │  子任务执行（统一执行规格：input → process → output）       │
-  │  类型：Tool / Agent / Sub-flow                             │
-  │  内置 Sub-flow 有两类：direct-answer（兜底契约）与            │
-  │  tool-use（Agentic 工具循环）；都由 InternalSubflowRegistry   │
-  │  独立于业务 Registry 维护                                   │
-  │  编排控制面按"需要知道"原则裁剪上下文分发给各子任务         │
-  │  依赖调度器根据依赖关系自动编排串行/并行                    │
-  └──────────────────────────────────────────────────────────┘
-  ↓
-结果验证（默认开启，可配置关闭）
-  ├── 当前实现：确定性失败扫描（任意子任务 `failed` → `execution_issue`）；无语义 judge、无 Engine 自动重试/重规划
-  ├── 通过 → 执行总结 → 输出规范 → 结果输出
-  └── 不通过 → 脱敏诊断写入 `ValidationResult` → 输出规范走诚实回退文案
-  └── 后续路线图：语义验证、任务级重试/重规划、降级
+输出规范 → 结果输出
 ```
 
 ### Plan（规划模式）
 
-Plan 不是核心抽象，而是任务拆分阶段的**可选规划模式**：
+Plan 不是核心抽象；ADR-0006 塌陷深单 loop 后也**不再有「规划循环 / 多方案迭代审阅」**。`tool-routing` 确定性阶段恒产出**单步 `ExecutionRoute`**（`tasks.length >= 1`），不做 LLM 拆分。仅保留一个轻量**预览模式**：
 
-- 上层业务可显式指定进入 Plan 模式
-- 引擎生成或加载预定义 Plan → 返回给上层审阅
-- 上层可修正 Plan → 引擎再调整（迭代循环）
-- Plan 确认后进入执行阶段，由 Agent/Tool 完成执行
-- 预定义 Plan 模板可注册、可复用，作为规划循环的输入
+- `runtime.planMode === true` 时，流在 `tool-routing` 产出单步 route 并通过最小图校验后发出 `plan-preview`，随即以 `done` 结束、**不进入** `execution` 阶段（供上层「先看要做什么、再决定是否执行」）
+- `planMode === false`（默认）时，单步 route 直接交给唯一主干 `tool-use` loop 执行
+- 已删除：「上层修正 Plan → 引擎再调整」的迭代循环，以及作为「规划循环输入」的预定义 Plan 模板
 
 ### 编排控制面
 
-编排控制面是主干流程中的显式角色，负责：
+编排控制面**不再是「多方案规划 / 计划切换」角色**（`planning` phase 已随 ADR-0006 删除），退化为承载 `tool-routing` 单步输出的确定性管道，负责：
 
-- **规划输出管理**：接收并校验 LLM 产出的任务拆分方案
-- **依赖图校验**：对 LLM 产出的依赖关系进行确定性校验（环检测、节点完整性）
-- **方案排名与切换**：管理多方案的优先级和切换决策
+- **单步 route 承载**：持有并校验 `tool-routing` 产出的单一 `ExecutionRoute`（恒 `tasks.length >= 1`）
+- **最小图校验**：对单步 route 做确定性校验（节点完整性 + 拓扑排序），由 `tool-routing` 内联完成（`validateRoute`，取代原独立 graph-check phase）
 - **预算管控**：追踪全局预算消耗，达到上限时触发熔断
-- **降级决策**：当重试耗尽或预算不足时，决定硬降级路径
+- **降级决策**：当 turn 级重试耗尽时，交由 `turnStop` 守卫与 Output 阶段的确定性兜底模板收口
+
+### loop-lifecycle 挂载面
+
+多阶段流水线塌陷为深单 loop 后（ADR-0006），横切能力从"挂在 phase 名前后"归位到"挂在 loop 生命周期事件上"，覆盖面不减反增——9 个 `HookPoint` 均有真实 fire 位（不再有旧版 14 个点里 13 个从未触发的死点）。
+
+**对称守卫 seam（Guardrail）**：一个通用 `Guardrail` 契约同时承载 pre-guard（`turnStart`）与 post-guard（`turnStop`）；单个 guard 是做合规检查、内容策略还是质量校验由宿主消费方决定，core 只区分挂载点、不区分语义。处置结果恒 **fail-closed**，四态：
+
+- `pass`：放行，无附加处置
+- `block`：拒付——`turnStart` 场景中止整轮；`turnStop` 场景拒绝交付候选答案
+- `degrade`：放行但降级说明，`userVisibleReason` 前缀拼进最终 `candidateAnswer.content`
+- `annotate`：放行但附加简短前缀说明，不改写正文其余部分
+
+刻意不提供"静默重排版"语义——想改格式是显式 transform，不是 guard 的职责。内置默认 guard：`turnStart` = `SafetyModule` baseline（前置安全检查产出的 violations 映射为 annotate/degrade/block）+ 业务通过 `EngineDependencies.guardrails.turnStart` 追加的策略；`turnStop` = Result Validation（evidence/claims → deliver/retry/degrade）。
+
+**RuleScope 复用 loop-lifecycle 词汇**：`RuleScope` 从 7 个 phase 名塌陷为 `{ turnStart, preLLM, turnStop, "*" }`，与 `HookPoint` 共用同一套词汇表。映射关系：原 `safety`/`intent`/`precheck` → `turnStart`；原 `planning`/`execution` → `preLLM`（输出格式类规则从这里直接塑形 `terminalDraft`，从根上治理格式漂移）；原 `validation`/`output` → `turnStop`（只做 check/block/annotate，不 reformat）。
+
+**subagent 派发（Single-Writer Rule）**：loop 内 LLM 可通过内置 Task-style 工具 `dispatch_agent` 自决派发只读子代理，复用既有 Agent runtime（`agentRunId` history-scope 隔离、`decideSubAgentBudget`、同一 `toolUseExecutor`），零新增架构面：
+
+- **Single-Writer Rule**：`Engine.filterReadonlyToolNames` 确定性过滤掉非 `readonly` 工具（registry 查不到的工具名 fail-closed 排除），写操作留给主 loop
+- **summary-only 契约**：子代理只回 `output` + `evidence` 摘要，不回子 loop 完整 transcript
+- **maxDepth 默认 1**（`DEFAULT_SUBAGENT_DISPATCH_MAX_DEPTH`）：禁止嵌套 spawn，可通过 `runtime.toolLoop.subagentDispatch.maxDepth` 配置放宽
+- `preSubagent` / `postSubagent` 在「显式 `@agent` 提及」与「loop 内 `dispatch_agent` 调用」两条路径下均一致触发
+
+**tool-use loop 吸收的能力**（原 `direct-answer` 独有能力，随其删除一并并入唯一主干）：
+
+- **chat-response 产图 / media passthrough**：`response.images` / `response.media` 经 `onGeneratedImages` / `onGeneratedMedia` 回调透传，最终出现在 `OutputMetadata.generatedImages` / `generatedMedia`
+- **no-empty-promise 护栏**：写入 base 元 system prompt 的强制条款（而非动态 rule），要求模型不得输出"我将稍后查一下"之类的空承诺
+- **cheap route（`shortTaskRoute`）**：命中"单工具调用 + 简短 prompt"阈值时，确定性把能力路由从 `high-reasoning` 降级到 `fast-cheap` 等廉价能力标签
+
+**工具暴露收窄**：loop 默认工具集 = `ToolActivator.visibleTools`（相关性收窄后的结果），而非全量 registry，同时控制 trivial 请求的工具列表膨胀与弱模型幻觉调用。
+
+**取消传播 / 预算熔断 / 可观测性**（既有能力保留，挂载点由「phase 前后」改为「loop 生命周期事件」）：
+
+- 同一 session 新消息到达时 last-message-wins，自动停止当前执行
+- 硬预算（token / time / tool 累计）熔断保持 turn 级累计；context-window 决策（trim/compress/degrade）改为 per-step 复检 + 超阈值自动 compact（`preCompact`）
+- observability 的 `phase_enter`/`phase_exit` 保留，但语义从"14 个 phase 各自的进入/退出"收窄为仅标记 6 个 `EnginePhase` 的宏观边界；`tool-use` loop 内部不再重新发明子阶段事件，改用扁平 per-step 事件（`tool_loop_step_*` / `tool_call_*` / `llm_call_*` / `hook_fired`）+ `parentStepId` 关联
 
 ### 关键流程特性
 
-- **流水线同构**：所有请求统一走完整的 Phase 1–9；意图分析仅负责分类与上下文门卫判定，不产出最终答复
-- **兜底契约**：Phase 5（任务拆分）必须产出至少 1 个可执行任务；simple 意图或 complex-未匹配工具的意图统一兜底到内置 Sub-flow `direct-answer`；complex 意图 + 已注册工具则路由到内置 Sub-flow `tool-use`；详见 §七「兜底契约」
-- **全路径安全准入**：最小安全检查前置于所有路径，simple 请求同样经过前置校验、依赖图校验、结果验证
-- **上下文门卫**：意图分析阶段判断本轮工作与历史是否相关，决定历史上下文是否向下传递
-- **规划循环**：上层可显式进入 Plan 模式，支持迭代式规划确认
-- **多方案竞选**：任务拆分阶段产出多个方案，按排名依次尝试
-- **依赖图校验**：LLM 产出的依赖图经引擎确定性校验后才进入执行
-- **事不过三**：重试有兜底上限，可配置
+- **深单 loop 主干**：所有请求统一经 `turnStart` 守卫 → 确定性 `tool-routing` 预处理 → 进入同一个 `tool-use` Agentic Loop；不再有 simple/complex 分类，不再有独立 `intent`/`planning` phase
+- **无工具纯回答由 loop 承接**：零工具调用的纯文本答复由 loop step-1 无 `tool_call` 自然产出（`terminalDraft`），不再有独立的 `direct-answer` 子流程
+- **terminalDraft 即终答**：loop 终止消息在完整 `prebuiltPrompt`（persona + rules + active skills + memory + tools）下写就，直接作为候选答案正文，不再有独立的 final-answer 写手 LLM 重写它
+- **对称守卫 fail-closed**：`turnStart`/`turnStop` 两处 guardrail 恒 `pass/block/degrade/annotate`，`turnStop` 恒最后跑
+- **loop-lifecycle 覆盖面**：Rules（`turnStart`/`preLLM`/`turnStop`/`*`）、Hooks（9 个 `HookPoint`）、预算、可观测性对所有请求等效覆盖，无死挂载面
+- **确定性工具路由**：`tool-routing` 用显式 @agent/@tool 名称匹配 + `ToolActivator.visibleTools` 收窄一次性替代原 intent 分类 + precheck + planning + graph-check 四个 phase
+- **subagent 安全阀**：loop 内可自决派发只读子代理（`dispatch_agent`），Single-Writer Rule + summary-only 契约 + maxDepth 默认 1
+- **per-step 上下文管理**：超阈值时 `preCompact` 自动压缩，长 loop 不再溢出 context window
+- **事不过三**：turn 级重试有上限，可配置（回到 `tool-routing` 重新执行）
 - **步骤级状态输出**：全部失败时，输出各步骤的完成状态而非笼统的"可靠部分"
-- **依赖调度**：引擎根据校验后的依赖图自动编排串行/并行
-- **取消传播**：同一 session
-  新消息到达时，自动停止当前执行（last-message-wins），在已有上下文基础上处理新输入
-- **complex 分支的路由形态**：当 Phase 5 判定 `complexity === "complex"` 时，只要 Registry 中存在至少一个可见 Tool 描述符，Phase 5 就会产出一个指向内置 Sub-flow `tool-use` 的单步计划；真正的"调哪些工具、调几次、按什么顺序"完全由 Phase 7 内部的 Agentic Loop 与 LLM 协商决定，引擎不再在 Phase 5 静态编排多步 Tool 序列。若 complex 意图匹配不到任何工具，则回退到 `direct-answer` 并附带 `warn=true` 标记，Phase 9 的 Output 会以提示性文案兜底
+- **取消传播**：同一 session 新消息到达时，自动停止当前执行（last-message-wins），在已有上下文基础上处理新输入
+- **弱模型鲁棒性靠提示词而非框架硬解**：no-empty-promise 护栏、failureRecovery 护栏、确定性工具收窄，而非固定内置 LLM 判定
 
-### 内置 Sub-flow：direct-answer 与 tool-use
+### 内置 Sub-flow：tool-use（唯一主干）
 
-引擎把"直接回答"与"Agentic 工具循环"统一下沉为内置 Sub-flow，它们**不是**四类核心抽象（Rules/Skills/Tools/Agents）中的任何一种：
+> `0.1.x` 曾有 `direct-answer` 与 `tool-use` 两类内置 Sub-flow；ADR-0006 起 `direct-answer` 已删除、`tool-use` 升为引擎唯一主干 spine。
 
-- `direct-answer`：Phase 5 对 simple 意图或 complex-未匹配意图产出的单步计划目标；调用 `AssembledPrompt` + Provider.chat 一次完成自然语言回复。
-- `tool-use`：Phase 5 对 complex-已匹配意图产出的单步计划目标；在 Phase 7 内部驱动一个有上限的 Agentic Loop：**LLM 规划 → Function Call → Registry+TaskExecutor 真实执行 → 结果回灌对话 → ...**，直到模型给出最终自然语言回复或触发上限/超时/取消。
+`tool-use` 是引擎当前**唯一**的内置 Sub-flow：所有请求统一路由到它，由 loop 内的 LLM 自主决定调用工具、派发子代理，还是直接产出自然语言答复。它仍然**不是**四类核心抽象（Rules/Skills/Tools/Agents）中的任何一种：
 
-两者的共同约束：
-
-- 引擎在启动期通过 `Registry` 的 `reservedNames` 机制把 `direct-answer`、`tool-use` 锁定为引擎保留名；业务端任何 `register('xxx', { name: 'direct-answer' | 'tool-use', ... })` 都会抛 `RegistryError.reservedName`
-- 两者的执行函数都由独立的 `InternalSubflowRegistry`（`packages/core/src/engine/subflows/registry.ts`）维护，**不进入** `DescriptorRegistry` 的四类 descriptor 表
-- Phase 7 通过 `buildLayeredTaskExecutor` 优先匹配 `task.type === "sub-flow" && InternalSubflowRegistry.has(task.ref)`，命中即走内部通道；未命中再回落到业务/默认 TaskExecutor
+- 引擎在启动期通过 `Registry` 的 `reservedNames` 机制把 `tool-use` 锁定为引擎保留名；业务端任何 `register('xxx', { name: 'tool-use', ... })` 都会抛 `RegistryError.reservedName`
+- 执行函数由独立的 `InternalSubflowRegistry`（`packages/core/src/engine/subflows/registry.ts`）维护，**不进入** `DescriptorRegistry` 的四类 descriptor 表
+- `tool-routing` 之后，主干通过 `buildLayeredTaskExecutor` 优先匹配 `task.type === "sub-flow" && InternalSubflowRegistry.has(task.ref)`，命中即走内部通道；未命中再回落到业务/默认 TaskExecutor
 
 `tool-use` Sub-flow 的核心运行契约（详见 detailed-design §7.12）：
 
-- **循环上限**：`runtime.toolLoop.maxSteps`（默认 8）与 `parallelism`（默认 4）；全局 `requireApprovalGlobal` 可强制每次工具调用都先触发审批
-- **审批协议**：当工具描述符 `requiresApproval: true` 或全局开关打开时，引擎在真正执行工具前调用可注入的 `onBeforeToolCall(request)` 回调；回调返回 `{ type: "deny", reason }` 时合成 tool 消息告知 LLM 并继续循环，不会中断整条 Agentic Loop
+- **循环上限**：`runtime.toolLoop.maxSteps`（默认 25）与 `parallelism`（默认 4）；全局 `requireApprovalGlobal` 可强制每次工具调用都先触发审批
+- **审批协议**：当工具描述符 `requiresApproval: true` 或全局开关打开时，引擎在真正执行工具前触发 `preToolUse` hook；回调返回 `deny` 时合成 tool 消息告知 LLM 并继续循环，不会中断整条 loop
+- **失败恢复护栏**：`failureRecoveryRetries`（默认 1）——某步 terminal（模型停止且无 `toolCalls`）但本轮"有工具失败且零成功结果"时，注入一条纠错 system 提示并强制再走一步，防止弱模型首次工具失败即放弃或编造
 - **观测事件**：每一轮思考 / 每一次工具调用 / 整个循环结束都会产出结构化流式事件（`tool-loop-step` / `tool-call-start` / `tool-call-end` / `tool-loop-final`），供 CLI 与 SDK 渲染进度
-- **预算与取消**：循环内每次 Provider.chat 与每次 Tool 执行都透传主干的 `AbortSignal` 与 `ExecutionContext.budget`；任意一次调用耗尽预算或收到取消都会让循环立即退出并以相应错误上报
+- **预算与取消**：循环内每次 Provider.chat 与每次工具执行都透传主干的 `AbortSignal` 与 `ExecutionContext.budget`；任意一次调用耗尽预算或收到取消都会让循环立即退出并以相应错误上报
+- **subagent 派发**：内置 Task-style 工具 `dispatch_agent`（`AGENT_DISPATCH_TOOL_NAME`），Single-Writer Rule + summary-only 契约 + maxDepth 默认 1（详见上文「loop-lifecycle 挂载面」）
+- **chat-response 产图 / media passthrough**：`onGeneratedImages` / `onGeneratedMedia` 回调接在 loop step 内
+- **no-empty-promise 护栏**：写入 base 元 system prompt 的强制条款
+- **cheap route**：`shortTaskRoute` 命中简单任务阈值时确定性降级到低价模型能力标签
 
 ### 生命周期钩子（Hooks）
 
-引擎在主干流程各阶段的前后暴露钩子挂载点：
+多阶段流水线塌陷为深单 loop 后，14 个 phase 命名的 `HookPoint`（旧版仅 `afterPlanning` 真正被 fire，其余 13 个是从未触发的死点）被替换为 9 个 loop-lifecycle 事件，每个点都有真实 fire 位 + 精确 action 语义 + 专项测试：
 
 ```
-beforeSafetyCheck    → 最小安全准入 → afterSafetyCheck
-beforeIntentAnalysis → 意图分析     → afterIntentAnalysis
-beforePreCheck       → 前置校验     → afterPreCheck
-beforePlanning       → 任务拆分     → afterPlanning
-beforeExecution      → 任务执行     → afterExecution
-beforeValidation     → 结果验证     → afterValidation
-beforeOutput         → 输出规范     → afterOutput
+turnStart · preLLM · postLLM · preToolUse · postToolUse · turnStop · preSubagent · postSubagent · preCompact
 ```
 
-- **订阅模式（推荐）**：只读，观察各阶段发生了什么
-- **注册模式（支持）**：可写，在钩子点注入逻辑
+| HookPoint | 语义 | Fire 位 |
+| --- | --- | --- |
+| `turnStart` | pre-guard：一轮开始前，承载 `SafetyModule` baseline + 业务策略 | `engine.ts` |
+| `preLLM` / `postLLM` | free-mutation：loop 每个 step 调用 LLM 前后，host 可改写 messages/response | `tool-use.ts` |
+| `preToolUse` / `postToolUse` | 工具调用审批（approve/deny）与结果事件 | `tool-use.ts` |
+| `turnStop` | post-guard：一轮结束前，承载 Result Validation，恒 fail-closed 最后跑 | `engine.ts` |
+| `preSubagent` / `postSubagent` | 子代理派发前后 | `engine.ts` |
+| `preCompact` | loop per-step 上下文超阈值、即将自动压缩前 | `tool-use.ts` |
+
+两类语义边界：
+
+- **free-mutation**（`preLLM`/`postLLM`）：host 拥有全权改写能力，但引擎守两条底线（**Engine Seatbelt**）——① 每次 mutation 后跑结构化 normalize/re-validate，拒绝 dangling tool_call / role 顺序错误 / provider 协议非法，绝不把畸形对话喂给 Provider；② 所有 mutation 记入 observability 审计
+- **guardrail**（`turnStart`/`turnStop`）：对称守卫 seam，处置结果限定为 `pass/block/degrade/annotate` 四态，恒 fail-closed，不提供"静默重排版"能力（见上文「loop-lifecycle 挂载面」）
+
+- **订阅模式（推荐）**：只读，观察各事件发生了什么
+- **注册模式（支持）**：可写，在事件点注入逻辑（`HookAction`：`continue`/`abort`/`modify`/`approve`/`deny`/`replace`/`enrich`）
 - 订阅 Hook 是可观测性实时进度流的数据源之一
 - 运行约束详见 §九.8 Hooks
 
@@ -448,16 +478,16 @@ beforeOutput         → 输出规范     → afterOutput
 
 ## 八、错误处理与状态流转
 
-> **当前实现范围（Tachu v1 rc.0）**：Engine 的 Phase 8 已接入确定性规则、turn 级 retry、degrade / handoff 出口；Provider 级重试尚未形成统一 ExecutionPolicy。本节状态机描述当前行为与后续配置契约。
+> **当前实现范围（`0.2.0`，ADR-0006 落地后）**：`tool-routing` 现恒产出**单个** `ExecutionRoute`（单步 route，不再生成多候选方案排名列表）。原「切换下一方案」的多方案竞选机制已随 ADR-0006 彻底移除（`ExecutionOrchestrator` 退化为纯预算 / 计时追踪器，不再持有 plan、不再有 `switchToNextPlan`）。任务级重试因而收敛为 **turn 级重试**：`turnStop` guardrail（Result Validation）判定不通过时，Engine 主循环 `continue` 整个 turn，把上一轮失败摘要（`PreviousTurnAttempt`）注入下一轮 `tool-routing`，重新构造单步 route 并重新进入 loop。Provider 级重试尚未形成统一 ExecutionPolicy。
 
 ### 两套独立重试体系
 
-|              | 任务级重试                                                  | 系统级重试                             |
+|              | turn 级重试                                                  | 系统级重试                             |
 | ------------ | ----------------------------------------------------------- | -------------------------------------- |
-| **触发**     | 结果验证不通过                                              | API 超时 / 报错 / 崩溃                 |
+| **触发**     | `turnStop` guardrail（Result Validation）判定不通过          | API 超时 / 报错 / 崩溃                 |
 | **默认上限** | 3 次                                                        | 2 次                                   |
-| **策略**     | 诊断后重新执行或切换下一方案                                | 同 Provider 重试 → 降级到备用 Provider |
-| **兜底**     | 降级到内置 Sub-flow `direct-answer`；仍失败则输出步骤级状态 | 透传错误给业务方                       |
+| **策略**     | `decideTurnRetry` 判定可重试 → 重新执行 `tool-routing → loop` 整个 turn | 同 Provider 重试 → 降级到备用 Provider |
+| **兜底**     | 仍失败则输出步骤级完成状态（`output` 阶段确定性兜底模板）    | 透传错误给业务方                       |
 
 ### 状态流转示意
 
@@ -472,16 +502,13 @@ stateDiagram-v2
     Provider降级 --> [*]: 无备用 (透传错误)
     
     执行中 --> 执行完成
-    执行完成 --> 结果验证
-    结果验证 --> [*]: 通过
-    结果验证 --> 诊断问题: 不通过
-    诊断问题 --> 任务级重试: 执行问题
-    任务级重试 --> 执行中: (上限3次)
-    诊断问题 --> 切换下一方案: 拆分问题
-    切换下一方案 --> 执行中: 有下一方案
-    切换下一方案 --> 兜底DirectAnswer: 无更多方案
-    兜底DirectAnswer --> [*]: 兜底成功 (降级答复)
-    兜底DirectAnswer --> [*]: 兜底失败 (输出步骤状态)
+    执行完成 --> turnStop守卫
+    turnStop守卫 --> [*]: 通过
+    turnStop守卫 --> 诊断问题: 不通过
+    诊断问题 --> turn级重试: decideTurnRetry 判定可重试
+    turn级重试 --> 执行中: (上限3次，重新走 tool-routing)
+    诊断问题 --> 本地兜底模板: 重试耗尽
+    本地兜底模板 --> [*]: 输出步骤级完成状态
 ```
 
 ```
@@ -495,15 +522,12 @@ stateDiagram-v2
   │                   ├── 有备用 → 切换 Provider，当前计划继续执行
   │                   └── 无备用 → 透传错误
   │
-  └── 执行完成 → 结果验证
+  └── 执行完成 → turnStop 守卫（Result Validation）
                   ├── 通过 → 完成
-                  └── 不通过 → 诊断问题类型
-                       ├── 执行问题 → 任务级重试（重新执行当前方案）
-                       └── 拆分问题 → 切换下一方案
-                            ├── 有下一方案 → 从任务拆分后继续
-                            └── 无更多方案 → 降级到内置 Sub-flow `direct-answer`
-                                              ├── 兜底成功 → 输出降级答复
-                                              └── 兜底失败 → 输出步骤级完成状态
+                  └── 不通过 → 诊断问题
+                       └── decideTurnRetry 判定可重试 → turn 级重试
+                            ├── 未耗尽（上限 3 次）→ 携 PreviousTurnAttempt 重新走 tool-routing → loop
+                            └── 已耗尽 → 输出步骤级完成状态（output 阶段确定性兜底模板）
 
   ⚠ 全局预算贯穿所有机制 → 任意时刻预算耗尽即熔断终止
 ```
@@ -528,7 +552,7 @@ stateDiagram-v2
 
 - 引擎 / SDK / CLI 三层都有脱敏防线：
   1. **L1 源头**：所有 `EngineError` 自带 `userMessage`（见 technical-design §12.1.1）
-  2. **L2 聚合**：Phase 9 的 `ensureFallbackText()` 先尝试 LLM best-effort summary（5s 超时），失败降级到本地模板，统一 ≥ 30 字
+  2. **L2 聚合**：`output` 阶段的 `ensureFallbackText()` 始终返回本地确定性模板（不调用 LLM，ADR-0006 落地后：不可恢复错误走诚实报错文案，不再有旧版的 LLM best-effort summary 路径），统一 ≥ 30 字
   3. **L3 最终屏蔽**：CLI `StreamRenderer` 对 `text / markdown` 输出与 `error` chunk 再做一次正则过滤
 - 验收门槛：`packages/core/src/engine/phases/fallback-contract.test.ts` 对契约做硬验证（55 断言，CI 红灯 block）
 - 详细实现见 technical-design §12.4
@@ -551,7 +575,7 @@ stateDiagram-v2
 会话管理与记忆系统的边界：**会话管理负责"哪个
 session、什么时机"，记忆系统负责"存什么、怎么存"**。
 
-跨 session 上下文关联属于意图分析 + 记忆系统的职责。
+跨 session 上下文关联属于记忆系统的职责；ADR-0006 塌陷主干后，原「意图分析」阶段的上下文相关性判定（`contextRelevance`）已随该 phase 一并删除，不再有独立的历史相关性判定环节——会话上下文的取舍统一由记忆系统的窗口管理 / 压缩策略承担。
 
 ### 9.2 记忆系统
 
@@ -815,10 +839,10 @@ MCP（Model Context Protocol）工具通过 **McpToolAdapter**
 
 | 配置项            | 默认值 | 说明                                |
 | ----------------- | ------ | ----------------------------------- |
-| 任务重试上限      | 3      | 结果验证不通过时的最大重试轮数      |
+| turn 级重试上限   | 3      | `turnStop` guardrail（Result Validation）判定不通过时的最大重试轮数 |
 | 系统重试上限      | 2      | 系统级异常的最大重试次数            |
 | Provider 降级顺序 | —      | `providerFallbackOrder`：启动注册 + CLI 默认 target；runtime 切换 **v1.x+** |
-| 方案数量          | 1      | 任务拆分生成的候选方案数            |
+| 方案数量          | 1      | `tool-routing` 确定性生成的 Plan 数（恒为 1，见 §八）|
 | 结果验证开关      | 开启   | 是否启用结果验证环节                |
 | Agent 嵌套深度    | 1      | 默认只支持主 Agent → sub-agent 一级 |
 | 上下文上限        | —      | 会话上下文的 Token / 条数限制       |
@@ -832,15 +856,14 @@ MCP（Model Context Protocol）工具通过 **McpToolAdapter**
 
 ### 规则作用域
 
-| 阶段         | 引擎内置 | 业务可控 |
-| ------------ | -------- | -------- |
-| 最小安全准入 | ✓        | ✓        |
-| 意图分析     | ✓        | ✓        |
-| 前置校验     | ✓        | ✓        |
-| 任务拆分     | ✓        | ✓        |
-| 任务执行     | ✓        | ✓        |
-| 结果验证     | ✓        | ✓        |
-| 输出规范     | ✓        | ✓        |
+> **ADR-0006**：`RuleScope` 由 7 个 phase 名收敛为 4 个 loop-lifecycle 词汇，与 `HookPoint` 共用同一套词。
+
+| `RuleScope` | 原对应 phase | 引擎内置 | 业务可控 |
+| ------------ | -------- | -------- | -------- |
+| `turnStart`  | 最小安全准入 / 意图分析 / 前置校验 | ✓        | ✓        |
+| `preLLM`     | 任务拆分 / 任务执行（输出格式塑形）| ✓        | ✓        |
+| `turnStop`   | 结果验证 / 输出规范                | ✓        | ✓        |
+| `*`          | 全部生命周期事件                   | ✓        | ✓        |
 
 ### Descriptor 协议扩展契约（MUST）
 

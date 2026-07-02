@@ -1,4 +1,4 @@
-import type { RankedPlan, ValidationFinding } from "../../../types";
+import type { ExecutionRoute, ValidationFinding } from "../../../types";
 import type { DescriptorRegistry } from "../../../registry";
 import type { ExecutionPhaseOutput } from "../execution";
 import type { CandidateAnswer, EvidenceEntry } from "../../../types/evidence";
@@ -18,8 +18,8 @@ import type { CandidateAnswer, EvidenceEntry } from "../../../types/evidence";
  */
 export interface ValidationRuleContext {
   state: ExecutionPhaseOutput;
- /** 当前轮被执行的 Plan（state.planning.plans[0]）。 */
-  plan: RankedPlan;
+ /** 当前轮被执行的执行路由（state.route）。 */
+  route: ExecutionRoute;
  /** 描述符注册表，供 rule 查询任务 sideEffect / requiresApproval 等元数据。 */
   registry: DescriptorRegistry;
  /** Host / candidate-answer phase 规范化后的 evidence。 */

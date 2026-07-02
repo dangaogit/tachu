@@ -4,7 +4,7 @@
  * 场景：脚本化 MockProviderAdapter 驱动 Engine.runStream 跑一轮 tool-use，
  * StreamRenderer 接收事件流。验收点：
  * 1. stdout 中出现工具调用进展相关提示（"调用工具"、工具名、"✓"、"ms"）
- * 2. 最终 EngineOutput.content 来自 scripted 第 3 轮的终止文本
+ * 2. 最终 EngineOutput.content 来自 scripted 第 2 轮的终止文本
  * 3. EngineOutput.metadata.toolCalls 包含 echo-tool 的记录
  * 4. 无错误 chunk
  *
@@ -115,11 +115,6 @@ describe("CLI integration: StreamRenderer × Agentic Loop", () => {
     const provider = new MockProviderAdapter({
       replies: [
         {
-          content:
-            '{"intent":"调用 echo 工具","complexity":"complex","contextRelevance":"related"}',
-          finishReason: "stop",
-        },
-        {
           content: "",
           toolCalls: [
             { id: "call-1", name: "echo-tool", arguments: { text: "world" } },
@@ -177,6 +172,10 @@ describe("CLI integration: StreamRenderer × Agentic Loop", () => {
         chunks.push(chunk);
         renderer.render(chunk);
       }
+      const done = chunks.find((c) => c.type === "done");
+      if (done && done.type === "done") {
+        renderer.finalize(done.output, "text");
+      }
     } finally {
       process.stdout.write = origWrite;
       await engine.dispose();
@@ -193,6 +192,8 @@ describe("CLI integration: StreamRenderer × Agentic Loop", () => {
     expect(stdout).toContain("✓"); // 工具调用成功标记
  // 验证时长单位出现
     expect(stdout).toMatch(/\d+ms/);
+    expect(stdout).toContain("已完成：echoed:world。");
+    expect(stdout.match(/已完成：echoed:world。/g)?.length ?? 0).toBe(1);
 
  // 2. Stream chunk 里确实触发了新事件
     expect(chunks.some((c) => c.type === "tool-loop-step")).toBe(true);

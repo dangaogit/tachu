@@ -23,6 +23,10 @@ import { stripTrailingCurrentTurn } from "../../prompt/turn-tail";
 import type {
   EngineConfig,
   ExecutionContext,
+  GeneratedImage,
+  GeneratedMedia,
+  HookAction,
+  HookPoint,
   Message,
   StreamChunk,
   TaskNode,
@@ -51,6 +55,8 @@ import {
   type LlmUsageTracker,
 } from "../llm-usage-telemetry";
 import { engineEventFromContext, withStreamEnvelope } from "../turn-outcome";
+import type { HookRegistry } from "../../modules/hooks";
+import { DEFAULT_SUBAGENT_DISPATCH_MAX_DEPTH, type AgentDispatchFn } from "../agents";
 import {
   chatWithResolvedMessages,
   streamChatWithResolvedMessages,
@@ -62,7 +68,7 @@ import {
 /**
  * `tool-use` 内置 Sub-flow 运行时上下文（
  *
- * 与 `DirectAnswerContext` 的差异：
+ * 相比其它更简单的 Sub-flow 上下文形状：
  * - 需要 `registry` 做 `ToolCallRequest.name → ToolDescriptor` 映射与白名单校验
  * - 需要 `taskExecutor` 真正执行工具（复用主干 TaskExecutor，统一安全闸门与审批）
  * - 需要 `executionContext` 以便在执行工具时把预算/权限/trace 信息透传下去
@@ -100,6 +106,16 @@ export interface ToolUseContext {
  * 上下文回灌。
  */
   onAssistantReasoningDelta?: (text: string) => void;
+ /**
+ * 文生图响应的结构化图片回传(与 {@link OutputMetadata.generatedImages} 对齐)。
+ *
+ * 由 Engine 注入;当某个 loop step 的 Provider 响应携带 `images` 非空时调用一次
+ * (迁自已删除的 `direct-answer.ts`,ADR-0006 C1:塌陷为深单 loop 后 tool-use
+ * 是唯一路径,必须原样吸收该能力，否则文生图场景会静默丢失产物回传)。
+ */
+  onGeneratedImages?: (images: GeneratedImage[]) => void;
+ /** 通用多模态产物回传(图片 / 音频 / 视频 / 文件);同上,迁自 direct-answer.ts。 */
+  onGeneratedMedia?: (media: GeneratedMedia[]) => void;
   onToolLoopEvent?: (chunk: StreamChunk) => void;
   onToolCall?: (record: ToolCallRecord) => void;
   onToolLoopActiveStart?: () => void;
@@ -141,8 +157,37 @@ export interface ToolUseContext {
  * 同时确保 sub-agent 的 tool history 不串到父调度的 history 桶。
  */
   agentRunId?: string | undefined;
- /** Normalized turn policy for soft tail constraints. */
+ /**
+ * loop 内 LLM 自决派发只读 sub-agent 的执行入口(ADR-0006 D6)。
+ *
+ * 由 Engine 注入;未注入(undefined)时 `dispatch_agent` 工具不会出现在
+ * `resolveToolDefinitions` 结果中(零新增架构面：无该字段即完全等价旧行为)。
+ * 复用现有 Agent runtime(`agentRunId` history-scope 隔离、`decideSubAgentBudget`、
+ * 同一 `toolUseExecutor`)；Single-Writer Rule(allowedTools 确定性过滤掉写工具)
+ * 与 summary-only 契约(只回 output+evidence，不回子 loop 全 transcript)均由
+ * 闭包内部（`Engine.runSubAgent`）保证，本文件只负责工具形状与调用编排。
+ */
+  dispatchAgent?: AgentDispatchFn | undefined;
+ /**
+ * 当前 loop 相对主 loop 的 sub-agent 派发深度。主 loop 恒为 `0`；某次
+ * `dispatch_agent` 派发出的 sub-agent 自身跑 tool-use 时，其 ctx 会带上
+ * `派发它时的 currentDepth` 值。`resolveToolDefinitions` 据此与
+ * `config.runtime.toolLoop.subagentDispatch.maxDepth`（默认 `1`）比较，
+ * 深度已耗尽时直接不暴露该工具（而非暴露后等运行时报错），对齐 Claude Code
+ * 「Task 工具不可在子 agent 内再次调用」的默认策略。
+ */
+  agentDispatchDepth?: number | undefined;
+  /** Normalized turn policy for soft tail constraints. */
   turnPolicy?: TurnPolicy;
+  /**
+   * loop-lifecycle Hook 注册中心(ADR-0006 D2)。
+   *
+   * 驱动本子流程内的真实 fire 位:每个 loop step 调 LLM 前后
+   * (`preLLM`/`postLLM`)、每次工具调用前后(`preToolUse`/`postToolUse`)、
+   * per-step 上下文超阈值即将自动 compact 前(`preCompact`)。未注入时
+   * 全部 no-op(向后兼容既有测试与调用方)。
+   */
+  hooks?: HookRegistry;
 }
 
 /**
@@ -212,6 +257,11 @@ const TOOL_USE_SYSTEM_PROMPT_BASE = `You are the agentic tool-loop sub-flow of t
 - A single turn may request multiple tools, but avoid pointless repeats (e.g. listing the same directory twice).
 - When several tools run in parallel, completion order can differ from start order or from log line order; that is normal. Prefer fewer parallel calls when one result is enough.
 - On tool error: fix the arguments and retry once, switch to a different tool, or honestly state the failure based on what you already know. Do not retry indefinitely.
+
+### Absolutely forbidden (in the final reply)
+- **No empty promises**. Never write "I'll fetch …", "let me check …", "please hold on while I look this up", "我将…请稍等", "稍等我去查一下". This turn has no next turn, no \`await\` — saying "hold on" is the same as saying nothing. If you need information, call a tool now; if no tool can get it, say so plainly.
+- **No pretending you executed an action**. Do not write "I fetched the page and here is the content …", "based on the file I just opened …" unless a real tool call for that action actually appears earlier in this conversation. Do not turn things you did not do into past-tense facts.
+- If the request needs a live fetch / local read / command / realtime data but no matching tool is available (empty tool list, or none fits): tell the user plainly that no matching tool was available this turn, answer from your prior knowledge as best you can, and **explicitly label** the answer as based on general knowledge rather than live/local data.
 
 ### Termination
 - The system caps the number of loop steps; exceeding it raises an error. Stop calling tools as soon as you are ready to answer.
@@ -661,6 +711,102 @@ const toObservation = (item: ExecutedToolRecord): ToolUseObservation => ({
 });
 
 /**
+ * 校验失败时回给 LLM 的提示文案，说明 `dispatch_agent` 的必填参数。
+ */
+const AGENT_DISPATCH_INVALID_ARGS_MESSAGE =
+  'dispatch_agent 调用参数不合法：需要非空字符串 "agent" 与 "objective"；"input" 若提供须为对象。请修正后重试。';
+
+/**
+ * 执行 `dispatch_agent` 内置 Task-style 工具调用(ADR-0006 D6)。
+ *
+ * 与业务/内置工具分支平级但独立处理，因为它不经过 `registry`/`taskExecutor`，
+ * 而是转交 `ctx.dispatchAgent` 闭包(由 Engine 注入，内部复用 Agent runtime、
+ * `decideSubAgentBudget`、`agentRunId` history-scope)。返回契约与其它工具
+ * 分支保持一致：无论成败都恰好 emit 一次 `tool-call-end` 并回填 `ExecutedToolRecord`。
+ */
+const executeAgentDispatchCall = async (
+  call: ToolCallRequest,
+  ctx: ToolUseContext,
+  parentStepId: string,
+  startedAt: number,
+  emitToolCallEnd: (payload: {
+    success: boolean;
+    durationMs: number;
+    output?: unknown;
+    error?: { code: string; message: string; retryable: boolean };
+  }) => void,
+): Promise<ExecutedToolRecord> => {
+  const fail = (code: string, message: string, retryable: boolean): ExecutedToolRecord => {
+    const durationMs = Date.now() - startedAt;
+    emitToolCallEnd({ success: false, durationMs, error: { code, message, retryable } });
+    ctx.onToolCall?.({
+      callId: call.id,
+      tool: call.name,
+      parentStepId,
+      durationMs,
+      success: false,
+      source: "tool",
+      error: { code, message, retryable },
+    });
+    return { call, content: message, success: false, durationMs, error: { code, message, retryable } };
+  };
+
+  if (!ctx.dispatchAgent) {
+    return fail(
+      "TOOL_LOOP_INTERNAL_TOOL_MISCONFIG",
+      `内置工具 "${AGENT_DISPATCH_TOOL_NAME}" 需要 dispatchAgent，但主干未注入。`,
+      false,
+    );
+  }
+
+  const agentName = typeof call.arguments.agent === "string" ? call.arguments.agent.trim() : "";
+  const objective =
+    typeof call.arguments.objective === "string" ? call.arguments.objective.trim() : "";
+  if (!agentName || !objective) {
+    return fail("TOOL_LOOP_TOOL_EXECUTION_FAILED", AGENT_DISPATCH_INVALID_ARGS_MESSAGE, true);
+  }
+  const rawInput = call.arguments.input;
+  const dispatchInput =
+    rawInput && typeof rawInput === "object" && !Array.isArray(rawInput)
+      ? (rawInput as Record<string, unknown>)
+      : undefined;
+
+  const dispatchSignal = buildToolExecutionSignal(ctx.signal, TOOL_USE_TOOL_TIMEOUT_MS);
+  try {
+    const outcome = await ctx.dispatchAgent(
+      { agentName, objective, ...(dispatchInput !== undefined ? { input: dispatchInput } : {}) },
+      dispatchSignal,
+    );
+    const durationMs = Date.now() - startedAt;
+    if (outcome.status === "completed") {
+      const output = {
+        agent: outcome.agent,
+        output: outcome.output,
+        evidence: outcome.evidence ?? [],
+      };
+      const content = serializeToolOutput(output, call.name);
+      emitToolCallEnd({ success: true, durationMs, output });
+      ctx.onToolCall?.({
+        callId: call.id,
+        tool: call.name,
+        parentStepId,
+        durationMs,
+        success: true,
+        source: "tool",
+      });
+      return { call, content, output, success: true, durationMs };
+    }
+    if (outcome.status === "cancelled") {
+      return fail("AGENT_CANCELLED", outcome.reason, true);
+    }
+    return fail(outcome.error.code, outcome.error.message, outcome.error.retryable);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return fail("TOOL_LOOP_TOOL_EXECUTION_FAILED", `sub-agent 派发失败："${message}"`, false);
+  }
+};
+
+/**
  * 执行单个工具调用。
  *
  * 语义：
@@ -673,7 +819,7 @@ const toObservation = (item: ExecutedToolRecord): ToolUseObservation => ({
  * 协议：一旦成功发出 `tool-call-start`，本函数保证在返回前至多发出一次对偶的
  * `tool-call-end`（含宿主回调抛错、或 await 链异常中断等路径）。
  */
-const executeSingleToolCall = async (
+const executeSingleToolCallInner = async (
   call: ToolCallRequest,
   ctx: ToolUseContext,
   parentStepId: string,
@@ -750,6 +896,10 @@ const executeSingleToolCall = async (
     toolCallStartDelivered = true;
 
     const startedAt = Date.now();
+
+    if (call.name === AGENT_DISPATCH_TOOL_NAME) {
+      return executeAgentDispatchCall(call, ctx, parentStepId, startedAt, emitToolCallEnd);
+    }
 
     const isInternalCall =
       isInternalToolName(call.name) || call.name === "search_skills";
@@ -1207,6 +1357,75 @@ const executeSingleToolCall = async (
 };
 
 /**
+ * `executeSingleToolCallInner` 的 loop-lifecycle 包装(ADR-0006 D2)。
+ *
+ * - `preToolUse`:每次工具调用前无条件 fire(与既有 `onBeforeToolCall` 的
+ *   条件审批语义并存,互不替代);返回 `deny`/`abort` 时跳过真实执行,合成
+ *   一条拒绝态 `ExecutedToolRecord`,与 `onBeforeToolCall` 拒绝路径同构。
+ * - `postToolUse`:工具执行后(无论成败)fire,允许 `modify`/`replace` 改写
+ *   `content`/`output`(如脱敏),但不允许 mutation 翻转 `success`——那属于
+ *   审批语义,不是 postToolUse 的职责。
+ */
+const executeSingleToolCall = async (
+  call: ToolCallRequest,
+  ctx: ToolUseContext,
+  parentStepId: string,
+): Promise<ExecutedToolRecord> => {
+  const preAction = await fireHook(ctx, "preToolUse", {
+    tool: call.name,
+    callId: call.id,
+    arguments: call.arguments,
+    parentStepId,
+  });
+  if (preAction?.type === "deny" || preAction?.type === "abort") {
+    const reason =
+      (preAction.type === "deny" || preAction.type === "abort" ? preAction.reason : undefined) ??
+      "preToolUse hook 拒绝了该工具调用。";
+    return {
+      call,
+      content: `工具调用已被 preToolUse hook 拒绝："${reason}"。请改用其它工具或直接回答用户。`,
+      success: false,
+      durationMs: 0,
+      error: {
+        code: "TOOL_LOOP_PRE_TOOL_USE_DENIED",
+        message: reason,
+        retryable: false,
+      },
+    };
+  }
+  const record = await executeSingleToolCallInner(call, ctx, parentStepId);
+  const postAction = await fireHook(ctx, "postToolUse", {
+    tool: call.name,
+    callId: call.id,
+    parentStepId,
+    result: record,
+  });
+  if (postAction?.type === "modify" || postAction?.type === "replace") {
+    const candidate = postAction.type === "modify" ? postAction.patch : postAction.data;
+    if (
+      typeof candidate === "object" &&
+      candidate !== null &&
+      typeof (candidate as { content?: unknown }).content === "string"
+    ) {
+      return { ...record, content: (candidate as { content: string }).content };
+    }
+    ctx.observability.emit(
+      engineEventFromContext(ctx.executionContext, {
+        timestamp: Date.now(),
+        phase: "tool-use",
+        type: "warning",
+        payload: {
+          reason: "hook-mutation-rejected",
+          point: "postToolUse",
+          message: "postToolUse handler 返回的 mutation 不含合法 content 字段,已忽略。",
+        },
+      }),
+    );
+  }
+  return record;
+};
+
+/**
  * 按并发度 `parallelism` 执行一批工具调用。
  *
  * 保序：返回的 `ExecutedToolRecord[]` 与输入 `calls` 一一对应（即便内部分批并发）。
@@ -1275,6 +1494,10 @@ interface ToolUseStepResponse {
   usage: ChatUsage;
   reasoningContent?: string | undefined;
   providerMetadata?: Record<string, unknown> | undefined;
+ /** 本 step 内 Provider 直接返回的文生图 / 图像编辑产物(非流式一次性，流式已逐条累积)。 */
+  images?: GeneratedImage[] | undefined;
+ /** 本 step 内 Provider 直接返回的通用多模态产物(图片/音频/视频/文件)。 */
+  media?: GeneratedMedia[] | undefined;
 }
 
 interface PartialStreamToolCall {
@@ -1384,6 +1607,7 @@ const collectStreamedToolUseStep = async (args: {
   let finishReason: ChatFinishReason | undefined;
   let usage: ChatUsage = EMPTY_USAGE;
   let providerMetadata: Record<string, unknown> | undefined;
+  const media: GeneratedMedia[] = [];
 
   for await (const part of streamChatWithResolvedMessages(
     adapter,
@@ -1444,6 +1668,8 @@ const collectStreamedToolUseStep = async (args: {
         usage = part.usage;
       }
       providerMetadata = part.providerMetadata;
+    } else if (part.type === "media") {
+      media.push(part.media);
     }
   }
 
@@ -1455,6 +1681,7 @@ const collectStreamedToolUseStep = async (args: {
     ...(finishReason !== undefined ? { finishReason } : {}),
     usage,
     ...(providerMetadata !== undefined ? { providerMetadata } : {}),
+    ...(media.length > 0 ? { media } : {}),
   };
 };
 
@@ -1482,18 +1709,265 @@ const filterToolDefinitions = (
   return tools.filter((tool) => allowed.has(tool.name));
 };
 
+/**
+ * 内置 Task-style 工具名(ADR-0006 D6)。
+ *
+ * 命名对齐现有内置工具的 snake_case 惯例(`load_skill`/`read_skill_resource`/
+ * `search_skills`),避免与业务工具撞名的同时也不引入新的命名风格。
+ */
+export const AGENT_DISPATCH_TOOL_NAME = "dispatch_agent";
+
+const resolveAgentDispatchMaxDepth = (ctx: ToolUseContext): number => {
+  const configured = ctx.config.runtime.toolLoop?.subagentDispatch?.maxDepth;
+  return typeof configured === "number" && configured >= 0
+    ? configured
+    : DEFAULT_SUBAGENT_DISPATCH_MAX_DEPTH;
+};
+
+const buildAgentDispatchToolDefinition = (
+  agents: ReadonlyArray<{ name: string; description: string }>,
+): ToolDefinition => ({
+  name: AGENT_DISPATCH_TOOL_NAME,
+  description: [
+    "Delegate a scoped, read-only, decomposable sub-task to a specialized sub-agent. The sub-agent runs its own tool-use loop with a read-only toolset and reports back only a summary (output + evidence), never its full transcript.",
+    "Use this to parallelize research/investigation work that another agent is better scoped for. Do NOT use it for anything that needs to write or modify state — perform writes yourself in this loop (Single-Writer Rule).",
+    "Available agents:",
+    ...agents.map((agent) => `- ${agent.name}: ${agent.description}`),
+  ].join("\n"),
+  inputSchema: {
+    type: "object",
+    properties: {
+      agent: {
+        type: "string",
+        enum: agents.map((agent) => agent.name),
+        description: "Registered agent name to dispatch.",
+      },
+      objective: {
+        type: "string",
+        description: "Clear, self-contained objective for the sub-agent to accomplish.",
+      },
+      input: {
+        type: "object",
+        description: "Optional structured input payload passed through to the sub-agent.",
+        additionalProperties: true,
+      },
+    },
+    required: ["agent", "objective"],
+  },
+});
+
+/**
+ * 若已注入 `ctx.dispatchAgent` 且深度未耗尽、registry 存在已注册 agent，
+ * 则在给定工具列表末尾追加 `dispatch_agent`(幂等：已存在同名工具则不重复追加，
+ * 业务自定义同名工具优先)。
+ */
+const appendAgentDispatchTool = (
+  tools: ToolDefinition[],
+  ctx: ToolUseContext,
+): ToolDefinition[] => {
+  if (!ctx.dispatchAgent) {
+    return tools;
+  }
+  if (ctx.config.runtime.toolLoop?.subagentDispatch?.enabled === false) {
+    return tools;
+  }
+  const depth = ctx.agentDispatchDepth ?? 0;
+  if (depth >= resolveAgentDispatchMaxDepth(ctx)) {
+    return tools;
+  }
+  if (tools.some((tool) => tool.name === AGENT_DISPATCH_TOOL_NAME)) {
+    return tools;
+  }
+  const agents = ctx.registry
+    .list("agent")
+    .map((agent) => ({ name: agent.name, description: agent.description }));
+  if (agents.length === 0) {
+    return tools;
+  }
+  return [...tools, buildAgentDispatchToolDefinition(agents)];
+};
+
 const resolveToolDefinitions = (input: ToolUseInput, ctx: ToolUseContext): ToolDefinition[] => {
   const prebuilt = filterToolDefinitions(
-    mergeInternalToolDefinitions(ctx.prebuiltPrompt.tools),
+    appendAgentDispatchTool(mergeInternalToolDefinitions(ctx.prebuiltPrompt.tools), ctx),
     input.toolNames,
   );
   if (prebuilt.length > 0) {
     return prebuilt;
   }
   return filterToolDefinitions(
-    mergeInternalToolDefinitions(registryToolDefinitions(ctx)),
+    appendAgentDispatchTool(mergeInternalToolDefinitions(registryToolDefinitions(ctx)), ctx),
     input.toolNames,
   );
+};
+
+/**
+ * 触发一个 loop-lifecycle Hook 点(ADR-0006 D2)。
+ *
+ * `ctx.hooks` 未注入时整体 no-op(向后兼容);注入时把 correlation/subject
+ * 从 `ctx.executionContext` 透传给 `HookEvent`,保证下游 handler 能做审计关联。
+ */
+const fireHook = (
+  ctx: ToolUseContext,
+  point: HookPoint,
+  data: unknown,
+): Promise<HookAction | undefined> => {
+  if (!ctx.hooks) {
+    return Promise.resolve(undefined);
+  }
+  return ctx.hooks.fire(point, {
+    point,
+    timestamp: Date.now(),
+    correlation: ctx.executionContext.correlation,
+    ...(ctx.executionContext.subject !== undefined
+      ? { subject: ctx.executionContext.subject }
+      : {}),
+    data,
+  });
+};
+
+/**
+ * Engine Seatbelt(ADR-0006 D3):校验 `preLLM`/`postLLM` mutation 后的
+ * conversation 是否仍是合法的 Message[]。
+ *
+ * 只做结构化最小校验(非空数组、每条消息 role 合法、content 类型合法),
+ * 不做协议级 tool_call/tool 配对深校验(那属于 Provider Adapter 职责)。
+ * 校验失败时调用方应丢弃这次 mutation 并继续用 mutation 前的值,绝不能把
+ * 畸形数据喂给 Provider。
+ */
+const isValidConversationMutation = (value: unknown): value is Message[] =>
+  Array.isArray(value) &&
+  value.length > 0 &&
+  value.every(
+    (item): item is Message =>
+      typeof item === "object" &&
+      item !== null &&
+      typeof (item as Message).role === "string" &&
+      ["system", "user", "assistant", "tool"].includes((item as Message).role) &&
+      (typeof (item as Message).content === "string" || Array.isArray((item as Message).content)),
+  );
+
+/**
+ * 应用 `preLLM`/`postLLM` handler 返回的 `modify`/`replace` action。
+ *
+ * 未命中合法 mutation 形状时原样返回 `current`,并通过 observability 发一条
+ * `warning`,而不是让引擎崩溃或喂给 Provider 畸形数据。
+ */
+const applyConversationMutation = (
+  ctx: ToolUseContext,
+  action: HookAction | undefined,
+  current: Message[],
+  point: HookPoint,
+): Message[] => {
+  if (!action) {
+    return current;
+  }
+  const candidate =
+    action.type === "modify" ? action.patch : action.type === "replace" ? action.data : undefined;
+  if (candidate === undefined) {
+    return current;
+  }
+  if (isValidConversationMutation(candidate)) {
+    return candidate;
+  }
+  ctx.observability.emit(
+    engineEventFromContext(ctx.executionContext, {
+      timestamp: Date.now(),
+      phase: "tool-use",
+      type: "warning",
+      payload: {
+        reason: "hook-mutation-rejected",
+        point,
+        message: `${point} handler 返回的 mutation 不是合法的 Message[],已忽略。`,
+      },
+    }),
+  );
+  return current;
+};
+
+/**
+ * Engine Seatbelt:校验 `postLLM` mutation 后的 response 是否仍是合法形状
+ * (必须保留 `content: string`;`usage` 字段禁止被 mutation 覆盖,usage 统计
+ * 只认 Provider 真值)。
+ */
+const isValidResponseMutation = (value: unknown): value is ToolUseStepResponse =>
+  typeof value === "object" &&
+  value !== null &&
+  typeof (value as ToolUseStepResponse).content === "string";
+
+/**
+ * 应用 `postLLM` handler 返回的 `modify`/`replace` action 到 `response`。
+ *
+ * `usage` 恒以 mutation 前的 Provider 真值为准,防止 host mutation 污染计费/预算。
+ */
+const applyResponseMutation = (
+  ctx: ToolUseContext,
+  action: HookAction | undefined,
+  current: ToolUseStepResponse,
+): ToolUseStepResponse => {
+  if (!action) {
+    return current;
+  }
+  const candidate =
+    action.type === "modify" ? action.patch : action.type === "replace" ? action.data : undefined;
+  if (candidate === undefined) {
+    return current;
+  }
+  if (isValidResponseMutation(candidate)) {
+    return { ...current, ...candidate, usage: current.usage };
+  }
+  ctx.observability.emit(
+    engineEventFromContext(ctx.executionContext, {
+      timestamp: Date.now(),
+      phase: "tool-use",
+      type: "warning",
+      payload: {
+        reason: "hook-mutation-rejected",
+        point: "postLLM",
+        message: "postLLM handler 返回的 mutation 不含合法 content 字段,已忽略。",
+      },
+    }),
+  );
+  return current;
+};
+
+/**
+ * per-step 上下文超阈值时的默认压缩策略(ADR-0006 D5,对齐 Claude Code 的
+ * per-iteration `maybe_auto_compact`)。
+ *
+ * 只在 loop 自身追加的尾部(`seedLength` 之后)寻找**最老的一个完整**
+ * assistant(带 toolCalls)+ 对应 tool 消息轮次并整体丢弃,替换为一条摘要
+ * `system` 消息;每次最多丢一轮,避免一次性大幅改写对话、也给下一步
+ * `preCompact` 复检的机会。找不到可丢的完整轮次时原样返回(不做半截截断,
+ * 避免破坏 tool_call/tool 配对)。
+ */
+const compactConversationDefault = (conversation: Message[], seedLength: number): Message[] => {
+  const tail = conversation.slice(seedLength);
+  let dropStart = -1;
+  let dropEnd = -1;
+  for (let i = 0; i < tail.length; i += 1) {
+    const msg = tail[i];
+    if (msg && msg.role === "assistant" && (msg.toolCalls?.length ?? 0) > 0) {
+      let end = i + 1;
+      while (end < tail.length && tail[end]?.role === "tool") {
+        end += 1;
+      }
+      dropStart = i;
+      dropEnd = end;
+      break;
+    }
+  }
+  if (dropStart === -1) {
+    return conversation;
+  }
+  const droppedCount = dropEnd - dropStart;
+  const summary: Message = {
+    role: "system",
+    content: `[context compacted]:已省略 ${droppedCount} 条较早的工具调用往返记录以控制上下文长度,结论已体现在后续消息中。`,
+  };
+  const head = conversation.slice(0, seedLength);
+  const newTail = [...tail.slice(0, dropStart), summary, ...tail.slice(dropEnd)];
+  return [...head, ...newTail];
 };
 
 /**
@@ -1532,10 +2006,15 @@ export const executeToolUse = async (
   const candidateToolDescriptors = ctx.registry
     .list("tool")
     .filter((d): d is ToolDescriptor => d.kind === "tool" && toolNameSet.has(d.name));
-  const conversation: Message[] =
+  let conversation: Message[] =
     ctx.prebuiltPrompt.messages.length > 0
       ? buildInitialMessages(input, ctx)
       : await buildFallbackMessages(input, ctx);
+  const seedLength = conversation.length;
+  const maxContextTokensForCompact =
+    ctx.config.memory.maxContextTokens !== undefined && ctx.config.memory.maxContextTokens > 0
+      ? ctx.config.memory.maxContextTokens
+      : 128_000;
 
   ctx.observability.emit(
     engineEventFromContext(ctx.executionContext, {
@@ -1699,6 +2178,79 @@ export const executeToolUse = async (
         }),
       );
 
+// preCompact(ADR-0006 D5):per-step 复检上下文体量,超阈值时先给 host 一次
+// `replace` mutation 的机会,host 未处理或 mutation 不合法时套用保守默认
+// 压缩(丢最老一轮完整 assistant+tool 往返)。每 step 至多压一轮,压完仍超
+// 阈值会在下一 step 再次触发,直到收敛或自然终止。
+      const preCompactEstimatedTokens = await estimateMessagesTokens(
+        adapter,
+        conversation,
+        route.model,
+      );
+      const preCompactThreshold = Math.floor(maxContextTokensForCompact * 0.85);
+      if (preCompactEstimatedTokens > preCompactThreshold) {
+        const compactAction = await fireHook(ctx, "preCompact", {
+          conversation,
+          step,
+          stepId,
+          estimatedTokens: preCompactEstimatedTokens,
+          maxContextTokens: maxContextTokensForCompact,
+          threshold: preCompactThreshold,
+        });
+        const beforeMutation = conversation;
+        conversation = applyConversationMutation(ctx, compactAction, conversation, "preCompact");
+        if (conversation === beforeMutation) {
+          conversation = compactConversationDefault(conversation, seedLength);
+        }
+        ctx.observability.emit(
+          engineEventFromContext(ctx.executionContext, {
+            timestamp: Date.now(),
+            phase: "tool-use",
+            type: "warning",
+            payload: {
+              reason: "context-auto-compact",
+              step,
+              stepId,
+              estimatedTokensBefore: preCompactEstimatedTokens,
+              messageCountBefore: beforeMutation.length,
+              messageCountAfter: conversation.length,
+            },
+          }),
+        );
+      }
+
+// preLLM(ADR-0006 D2):free-mutation,受 Engine Seatbelt(D3)约束——mutation
+// 后跑结构化 normalize,拒绝畸形数据流入 Provider。
+      const preLlmAction = await fireHook(ctx, "preLLM", {
+        conversation,
+        step,
+        stepId,
+      });
+      if (preLlmAction?.type === "deny" || preLlmAction?.type === "abort") {
+        const reason =
+          preLlmAction.type === "deny" || preLlmAction.type === "abort"
+            ? preLlmAction.reason
+            : undefined;
+        emitStepEnd({
+          step,
+          stepId,
+          success: false,
+          reason: "preLLM-denied",
+          failureReason: reason ?? "preLLM hook 拒绝了本次 LLM 调用",
+        });
+        emitFinal({ steps: step, stepId, success: false });
+        const resultError = {
+          code: "TOOL_LOOP_PRE_LLM_DENIED",
+          message: reason ?? "preLLM hook 拒绝了本次 LLM 调用",
+          retryable: false,
+        };
+        if (observations.length > 0) {
+          return buildPartialResult(resultError);
+        }
+        throw EngineError.fromUnknown(new Error(resultError.message), "HOOK_EXECUTION_FAILED");
+      }
+      conversation = applyConversationMutation(ctx, preLlmAction, conversation, "preLLM");
+
       const llmTimeouts = resolveLlmTimeouts(ctx.config, "tool-use");
       const llmStartedAt = Date.now();
       const useStream =
@@ -1793,26 +2345,6 @@ export const executeToolUse = async (
             "tool-use",
             chatResult.degradations,
           );
-          if (typeof response.content === "string" && response.content.length > 0) {
-            usageTracker.addOutputDelta(response.content);
-            ctx.onToolLoopEvent?.(
-              withStreamEnvelope(
-                {
-                  type: "tool-loop-delta",
-                  step,
-                  stepId,
-                  content: response.content,
-                },
-                ctx.executionContext,
-              ),
-            );
-          }
-          if (
-            typeof response.reasoningContent === "string" &&
-            response.reasoningContent.length > 0
-          ) {
-            usageTracker.addOutputDelta(response.reasoningContent);
-          }
         }
       } catch (error) {
         usageTracker.terminal(ctx.signal.aborted ? "cancelled" : "failed");
@@ -1856,10 +2388,52 @@ export const executeToolUse = async (
         }
         throw effectiveError;
       }
+// postLLM(ADR-0006 D2):free-mutation,受 Engine Seatbelt 约束——`usage` 恒以
+// Provider 真值为准,不可被 mutation 篡改(计费/预算不能被 host 绕过)。
+// 流式路径的正文已在 collectStreamedToolUseStep 内实时透传给用户,mutation
+// 在此时机已无法“撤回”已展示内容,只影响回灌进 conversation 的历史与后续
+// step 的上下文(仍有真实价值,例如脱敏)。
+      const postLlmAction = await fireHook(ctx, "postLLM", { response, step, stepId });
+      response = applyResponseMutation(ctx, postLlmAction, response);
+
       if (response.usage.totalTokens > 0) {
         usageTracker.final(response.usage);
       }
       ctx.onProviderUsage?.(response.usage);
+// 文生图 / 通用多模态产物结构化透传(迁自已删除的 direct-answer.ts，ADR-0006
+// C1)。流式路径的 media chunk 已在 collectStreamedToolUseStep 内累积进
+// response.media(不逐条实时 fire，统一在 postLLM hook mutation 之后、本 step
+// 收尾时一次性透传，确保 host mutation 有机会先行处理再交付)；非流式路径的
+// images/media 则由 ChatResponse 直接携带。
+      if (response.images && response.images.length > 0) {
+        ctx.onGeneratedImages?.(response.images);
+      }
+      if (response.media && response.media.length > 0) {
+        ctx.onGeneratedMedia?.(response.media);
+      }
+
+      if (!useStream) {
+        if (typeof response.content === "string" && response.content.length > 0) {
+          usageTracker.addOutputDelta(response.content);
+          ctx.onToolLoopEvent?.(
+            withStreamEnvelope(
+              {
+                type: "tool-loop-delta",
+                step,
+                stepId,
+                content: response.content,
+              },
+              ctx.executionContext,
+            ),
+          );
+        }
+        if (
+          typeof response.reasoningContent === "string" &&
+          response.reasoningContent.length > 0
+        ) {
+          usageTracker.addOutputDelta(response.reasoningContent);
+        }
+      }
 
  // 非流式模型 reasoning_content（若有）一次性透传到顶层 SSE 通道；流式路径
  // 已在 collectStreamedToolUseStep 中按 reasoning-delta 增量透传。
@@ -1997,11 +2571,14 @@ export const executeToolUse = async (
         toolCalls: stepToolCalls,
       });
       for (const item of batch) {
- // 失败恢复统计：approval-denied 是用户主动决定，不算「标识符未知」类失败，
- // 不应触发「去调发现工具」的强制恢复。
+// 失败恢复统计：approval-denied / preToolUse-denied 都是用户或宿主主动决定，
+// 不算「标识符未知」类失败，不应触发「去调发现工具」的强制恢复。
         if (item.success) {
           hadToolSuccess = true;
-        } else if (item.error?.code !== "TOOL_LOOP_APPROVAL_DENIED") {
+        } else if (
+          item.error?.code !== "TOOL_LOOP_APPROVAL_DENIED" &&
+          item.error?.code !== "TOOL_LOOP_PRE_TOOL_USE_DENIED"
+        ) {
           hadToolFailure = true;
           failedToolNames.push(item.call.name);
         }
@@ -2061,4 +2638,5 @@ export const TOOL_USE_CONSTANTS = {
 
 export const __testing = {
   buildToolUseSystemPrompt,
+  resolveToolDefinitions,
 };

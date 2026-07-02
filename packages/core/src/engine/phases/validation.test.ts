@@ -4,10 +4,8 @@ import { InMemoryRuntimeState } from "../../modules/runtime-state";
 import type {
   EngineConfig,
   ExecutionContext,
+  ExecutionRoute,
   InputEnvelope,
-  IntentResult,
-  PlanningResult,
-  RankedPlan,
 } from "../../types";
 import { DEFAULT_ADAPTER_CALL_CONTEXT } from "../../types/context";
 import type { ExecutionPhaseOutput } from "./execution";
@@ -49,19 +47,12 @@ const input: InputEnvelope = {
   metadata: { modality: "text", size: 17 },
 };
 
-const intent: IntentResult = {
-  complexity: "complex",
-  intent: "run checks",
-  contextRelevance: "unrelated",
-};
+const intent = { intent: "run checks" };
 
-const plan: RankedPlan = {
-  rank: 1,
+const route: ExecutionRoute = {
   tasks: [{ id: "task-a", type: "tool", ref: "run-tests", input: {} }],
   edges: [],
 };
-
-const planning: PlanningResult = { plans: [plan] };
 
 const buildState = (
   overrides: Partial<ExecutionPhaseOutput>,
@@ -71,9 +62,7 @@ const buildState = (
     context,
     violations: [],
     intent,
-    precheck: { budget: { allowed: true } },
-    planning,
-    graphCheck: { passed: true },
+    route,
     steps: [],
     taskResults: {},
     taskErrors: {},
@@ -123,7 +112,7 @@ describe("runValidationPhase", () => {
     expect(result.validation.diagnosis?.failedTaskIds).toEqual(["task-a"]);
     expect(result.validation.outcome).toMatchObject({
       kind: "retry",
-      target: "next-plan",
+      target: "retry-turn",
     });
     expect(result.validation.findings?.[0]).toMatchObject({
       code: "execution_failed",
@@ -179,14 +168,9 @@ describe("runValidationPhase", () => {
     };
     const result = await runValidationPhase(
       buildState({
-        planning: {
-          plans: [
-            {
-              rank: 1,
-              tasks: [{ id: "edit-step", type: "tool", ref: "edit-readonly", input: {} }],
-              edges: [],
-            },
-          ],
+        route: {
+          tasks: [{ id: "edit-step", type: "tool", ref: "edit-readonly", input: {} }],
+          edges: [],
         },
         steps: [{ name: "edit-step", status: "completed" }],
         taskResults: { "edit-step": "ok" },
@@ -208,14 +192,9 @@ describe("runValidationPhase", () => {
     };
     const result = await runValidationPhase(
       buildState({
-        planning: {
-          plans: [
-            {
-              rank: 1,
-              tasks: [{ id: "innocuous-name", type: "tool", ref: "writer", input: {} }],
-              edges: [],
-            },
-          ],
+        route: {
+          tasks: [{ id: "innocuous-name", type: "tool", ref: "writer", input: {} }],
+          edges: [],
         },
         steps: [{ name: "innocuous-name", status: "completed" }],
         taskResults: { "innocuous-name": "ok" },

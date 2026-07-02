@@ -19,10 +19,8 @@ import type { Registry } from "../../registry";
 import type { StickyManager } from "../skill-activation/sticky";
 import type { EmitLlmUsageTelemetry } from "../llm-usage-telemetry";
 import type { TaskExecutor } from "../scheduler";
-import {
-  executeDirectAnswer,
-  type DirectAnswerInput,
-} from "./direct-answer";
+import type { HookRegistry } from "../../modules/hooks";
+import type { AgentDispatchFn } from "../agents";
 import {
   executeToolUse,
   type ToolApprovalDecision,
@@ -34,19 +32,23 @@ import {
  * 内置 Sub-flow 名称的只读集合。
  *
  * Registry 会以此集合拦截业务注册，防止与引擎内置 Sub-flow 同名冲突。
+ *
+ * `direct-answer` 已在 ADR-0006 C1(塌陷为深单 loop)物理删除:`tool-routing`
+ * phase 不再产出 `direct-answer` 任务引用，零工具调用的纯文本答复由
+ * `tool-use` loop step-1 自然承接。
  */
-export const INTERNAL_SUBFLOW_NAMES = ["direct-answer", "tool-use"] as const;
+export const INTERNAL_SUBFLOW_NAMES = ["tool-use"] as const;
 
 export type InternalSubflowName = (typeof INTERNAL_SUBFLOW_NAMES)[number];
 
 /**
  * 内置 Sub-flow 执行上下文。
  *
- * 与 `DirectAnswerContext` 的差异：
+ * 设计约束：
  * - Registry 层对上下文一无所知，传入的 context 必须是**已装配**好的值对象；
  * - 每次 `execute` 调用构造一个新的上下文，避免跨会话泄漏。
  *
- * 扩展字段（仅 `tool-use` 使用，其它内置 Sub-flow 可忽略）：
+ * 扩展字段（`tool-use` sub-flow 专用）：
  * - `registry`：用于 `ToolCallRequest.name → ToolDescriptor` 的白名单校验
  * - `taskExecutor`：交由主干 TaskExecutor 执行工具，保证审批/安全闸门一致
  * - `executionContext`：下发给 `taskExecutor` 的上下文（预算、权限、trace）
@@ -71,8 +73,8 @@ export interface InternalSubflowContext {
  /**
  * 由主干阶段（`Engine.runStream` Phase 6 预热阶段）预先组装好的 Prompt。
  *
- * 当内置 Sub-flow 选择"直接用预组装 Prompt 调 Provider.chat"（例如 direct-answer）
- * 时使用；为空表示子流程需自行组装上下文。
+ * `tool-use` 依赖该字段获取 PromptAssembler 已装配的 messages/tools；为空
+ * 表示子流程需自行组装上下文(理论上不应发生,`tool-use` handler 会显式抛错)。
  */
   prebuiltPrompt?: AssembledPrompt;
  /**
@@ -111,7 +113,12 @@ export interface InternalSubflowContext {
   onUserBlockingStart?: () => void;
   onUserBlockingEnd?: () => void;
  /**
- * `direct-answer` 流式正文分片（需 `runtime.streamingOutput` 与 Provider `chatStream`）。
+ * 顶层流式正文分片回调（需 `runtime.streamingOutput` 与 Provider `chatStream`）。
+ *
+ * ADR-0006 C1 塌陷为深单 loop 后，内置 Sub-flow 均未消费此字段——`tool-use`
+ * 走的是更细粒度的 `onToolLoopEvent`(`tool-loop-delta` chunk)。保留字段与
+ * `StreamChunk.delta` 类型是为了不破坏 host 侧已声明的公共流式契约，若未来
+ * 新增子流程需要顶层 `delta` 语义可直接复用。
  */
   onAssistantDelta?: (text: string) => void;
  /**
@@ -121,8 +128,8 @@ export interface InternalSubflowContext {
  /**
  * 文生图 / 图像编辑产物回流。
  *
- * 由 Engine 注入：主干维护 traceId 级 sink，内置 `direct-answer` 子流程在从
- * Provider.chat 拿到 `ChatResponse.images` 时调用一次，把结构化列表合并到该 sink，
+ * 由 Engine 注入：主干维护 traceId 级 sink，`tool-use` 子流程在某个 loop step
+ * 的 Provider 响应携带 `images` 非空时调用一次，把结构化列表合并到该 sink，
  * 最终由 `output` 阶段写入 `EngineOutput.metadata.generatedImages`。
  */
   onGeneratedImages?: (images: GeneratedImage[]) => void;
@@ -143,8 +150,23 @@ export interface InternalSubflowContext {
   searchSkills?: (query: string, topK?: number) => Promise<
     Array<{ name: string; score: number; description: string }>
   >;
- /** normalized turn policy for tool-use tail constraints. */
+  /** normalized turn policy for tool-use tail constraints. */
   turnPolicy?: TurnPolicy;
+  /**
+   * loop-lifecycle Hook 注册中心(ADR-0006 D2)。仅 `tool-use` 消费,驱动
+   * `preLLM`/`postLLM`/`preToolUse`/`postToolUse`/`preCompact` 的真实 fire 位。
+   */
+  hooks?: HookRegistry;
+  /**
+   * `dispatch_agent` 内置 Task-style 工具的执行入口(ADR-0006 D6)，仅 `tool-use` 消费。
+   * 未注入时该工具不会出现在工具列表中。
+   */
+  dispatchAgent?: AgentDispatchFn;
+  /**
+   * 当前 loop 相对主 loop 的 sub-agent 派发深度；主 loop 恒为 `0`。仅 `tool-use` 消费，
+   * 与 `config.runtime.toolLoop.subagentDispatch.maxDepth` 比较决定是否暴露 `dispatch_agent`。
+   */
+  agentDispatchDepth?: number;
 }
 
 /**
@@ -170,55 +192,6 @@ export class InternalSubflowRegistry {
   private readonly handlers = new Map<string, InternalSubflowHandler>();
 
   constructor() {
-    this.handlers.set(
-      "direct-answer",
-      async (input, ctx) => {
- // 鸭子类型校验：内置 Sub-flow 对输入 shape 负有完全责任。
- // 不做 `as DirectAnswerInput` 强转，避免 TS 的 Record<string, unknown> 兼容性报错。
-        const payload = input as unknown as DirectAnswerInput;
-        return executeDirectAnswer(payload, {
-          config: ctx.config,
-          providers: ctx.providers,
-          modelRouter: ctx.modelRouter,
-          memorySystem: ctx.memorySystem,
-          observability: ctx.observability,
-          signal: ctx.signal,
-          adapterContext: ctx.adapterContext,
-          ...(ctx.multimodalResolver !== undefined
-            ? { multimodalResolver: ctx.multimodalResolver }
-            : {}),
-          ...(ctx.resourceDemandRouter !== undefined
-            ? { resourceDemandRouter: ctx.resourceDemandRouter }
-            : {}),
-          ...(ctx.prebuiltPrompt !== undefined
-            ? { prebuiltPrompt: ctx.prebuiltPrompt }
-            : {}),
-          ...(ctx.onProviderUsage !== undefined
-            ? { onProviderUsage: ctx.onProviderUsage }
-            : {}),
-          ...(ctx.emitUsageTelemetry !== undefined
-            ? { emitUsageTelemetry: ctx.emitUsageTelemetry }
-            : {}),
-          ...(ctx.currentPhaseStepId !== undefined
-            ? { currentPhaseStepId: ctx.currentPhaseStepId }
-            : {}),
-          ...(ctx.nextStreamId !== undefined ? { nextStreamId: ctx.nextStreamId } : {}),
-          ...(ctx.onAssistantDelta !== undefined
-            ? { onAssistantDelta: ctx.onAssistantDelta }
-            : {}),
-          ...(ctx.onAssistantReasoningDelta !== undefined
-            ? { onAssistantReasoningDelta: ctx.onAssistantReasoningDelta }
-            : {}),
-          ...(ctx.onGeneratedImages !== undefined
-            ? { onGeneratedImages: ctx.onGeneratedImages }
-            : {}),
-          ...(ctx.onGeneratedMedia !== undefined
-            ? { onGeneratedMedia: ctx.onGeneratedMedia }
-            : {}),
-        });
-      },
-    );
-
     this.handlers.set("tool-use", async (input, ctx) => {
       const payload = input as unknown as ToolUseInput;
       if (!ctx.prebuiltPrompt) {
@@ -268,6 +241,12 @@ export class InternalSubflowRegistry {
         ...(ctx.onAssistantReasoningDelta !== undefined
           ? { onAssistantReasoningDelta: ctx.onAssistantReasoningDelta }
           : {}),
+        ...(ctx.onGeneratedImages !== undefined
+          ? { onGeneratedImages: ctx.onGeneratedImages }
+          : {}),
+        ...(ctx.onGeneratedMedia !== undefined
+          ? { onGeneratedMedia: ctx.onGeneratedMedia }
+          : {}),
         ...(ctx.onToolLoopActiveStart !== undefined
           ? { onToolLoopActiveStart: ctx.onToolLoopActiveStart }
           : {}),
@@ -289,6 +268,11 @@ export class InternalSubflowRegistry {
         ...(ctx.stickyManager !== undefined ? { stickyManager: ctx.stickyManager } : {}),
         ...(ctx.searchSkills !== undefined ? { searchSkills: ctx.searchSkills } : {}),
         ...(ctx.turnPolicy !== undefined ? { turnPolicy: ctx.turnPolicy } : {}),
+        ...(ctx.hooks !== undefined ? { hooks: ctx.hooks } : {}),
+        ...(ctx.dispatchAgent !== undefined ? { dispatchAgent: ctx.dispatchAgent } : {}),
+        ...(ctx.agentDispatchDepth !== undefined
+          ? { agentDispatchDepth: ctx.agentDispatchDepth }
+          : {}),
       });
     });
   }

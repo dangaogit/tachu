@@ -6,7 +6,6 @@ import type {
   EngineConfig,
   ExecutionContext,
   InputEnvelope,
-  IntentResult,
   OutputMetadata,
   StepStatus,
   ValidationResult,
@@ -40,37 +39,25 @@ const buildEnv = (): PhaseEnvironment =>
     adapterContext: DEFAULT_ADAPTER_CALL_CONTEXT,
   }) satisfies PhaseEnvironment;
 
+/**
+ * ADR-0006 C1 塌陷为深单 loop 后，`candidateAnswer` 唯一由
+ * `runCandidateAnswerPhase` 派生(不再有 direct-answer taskResult 特判)；
+ * 本文件只测 `runOutputPhase` 的 content 选取逻辑，未显式传入
+ * `candidateAnswer` 时默认视为空候选（走结构化 JSON / fallback 分支）。
+ */
 const deriveCandidateAnswer = (overrides: {
-  taskResults?: Record<string, unknown>;
   evidence?: EvidenceEntry[];
   candidateAnswer?: CandidateAnswer;
-}): CandidateAnswer => {
-  if (overrides.candidateAnswer !== undefined) {
-    return overrides.candidateAnswer;
-  }
-  const raw = overrides.taskResults?.["task-direct-answer"];
-  if (raw !== undefined) {
-    const text =
-      (typeof raw === "string" ? raw : JSON.stringify(raw))
-        .replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, "")
-        .trim();
-    return {
-      content: text,
-      producedBy: "direct-answer",
-      claims: [],
-      evidence: overrides.evidence ?? [],
-    };
-  }
-  return {
+}): CandidateAnswer =>
+  overrides.candidateAnswer ?? {
     content: "",
     producedBy: "execution",
     claims: [],
     evidence: overrides.evidence ?? [],
   };
-};
 
 const buildState = (overrides: {
-  intent: IntentResult;
+  intent: { intent: string };
   validation: ValidationResult;
   taskResults?: Record<string, unknown>;
   steps?: StepStatus[];
@@ -97,9 +84,7 @@ const buildState = (overrides: {
     context,
     violations: [],
     intent: overrides.intent,
-    precheck: { budget: { allowed: true } },
-    planning: { plans: [{ rank: 1, tasks: [], edges: [] }] },
-    graphCheck: { passed: true },
+    route: { tasks: [], edges: [] },
     steps: overrides.steps ?? [],
     taskResults: overrides.taskResults ?? {},
     validation: overrides.validation,
@@ -115,21 +100,17 @@ const metadata: OutputMetadata = {
   tokenUsage: { input: 0, output: 0, total: 0 },
 };
 
-describe("runOutputPhase (Phase 9 — Output Assembly, direct-answer contract)", () => {
+describe("runOutputPhase (输出装配：output.ts content 选取优先级)", () => {
  test("simple：validation 通过时使用 candidateAnswer 内容", async () => {
     const out = await runOutputPhase(
       buildState({
-        intent: {
-          complexity: "simple",
-          intent: "greeting",
-          contextRelevance: "unrelated",
-        },
+        intent: {          intent: "greeting",        },
         validation: { passed: true },
-        taskResults: { "task-direct-answer": "你好！有什么我可以帮到你的？" },
-        steps: [{ name: "task-direct-answer", status: "completed" }],
+        taskResults: { "task-tool-use": "你好！有什么我可以帮到你的？" },
+        steps: [{ name: "task-tool-use", status: "completed" }],
         candidateAnswer: {
           content: "你好！有什么我可以帮到你的？",
-          producedBy: "direct-answer",
+          producedBy: "tool-use",
           claims: [],
           evidence: [],
         },
@@ -142,14 +123,10 @@ describe("runOutputPhase (Phase 9 — Output Assembly, direct-answer contract)",
     expect(out.metadata.outcome).toBe("completed");
   });
 
- test("complex + 有匹配工具：无 direct-answer 时，保留结构化 JSON（intent + taskResults）", async () => {
+ test("complex + candidateAnswer 为空时，保留结构化 JSON（intent + taskResults）", async () => {
     const out = await runOutputPhase(
       buildState({
-        intent: {
-          complexity: "complex",
-          intent: "fetch-and-summarize",
-          contextRelevance: "unrelated",
-        },
+        intent: {          intent: "fetch-and-summarize",        },
         validation: { passed: true },
         taskResults: { "task-1": { ok: true } },
         steps: [{ name: "task-1", status: "completed" }],
@@ -166,43 +143,13 @@ describe("runOutputPhase (Phase 9 — Output Assembly, direct-answer contract)",
     expect(out.metadata.outcome).toBe("completed");
   });
 
- test("complex + direct-answer 兜底成功：优先使用 direct-answer 文本（不再输出结构化 JSON）", async () => {
- // 对应 Phase 5 的"complex 无匹配工具 → direct-answer 兜底"分支。
- // direct-answer 跑通时，Phase 9 应以它为 content，而不是 stringify taskResults。
-    const out = await runOutputPhase(
-      buildState({
-        intent: {
-          complexity: "complex",
-          intent: "convert ts to go and open a PR",
-          contextRelevance: "unrelated",
-        },
-        validation: { passed: true },
-        taskResults: {
-          "task-direct-answer":
-            "目前没有匹配到可用工具，以下是基于通用知识的迁移思路：...",
-        },
-        steps: [{ name: "task-direct-answer", status: "completed" }],
-      }),
-      buildEnv(),
-      metadata,
-    );
-
-    expect(out.content).toBe("目前没有匹配到可用工具，以下是基于通用知识的迁移思路：...");
-    expect((out.content as string).startsWith("{")).toBe(false);
-  });
-
- test("complex + 验证失败（无 direct-answer 结果）：走 ensureFallbackText 模板，严禁泄漏内部术语", async () => {
- // 极端兜底：direct-answer 执行也失败了才会走到这里。
- // ：验证失败后 Output Phase 不再向 LLM 发起任何调用，全路径走本地模板
+ test("complex + 验证失败（无候选答案）：走 ensureFallbackText 模板，严禁泄漏内部术语", async () => {
+ // 验证失败后 Output Phase 不再向 LLM 发起任何调用，全路径走本地模板
  // + sanitizeInternalTerms（即使 env 里挂着可用 provider 也不应被调用，见
  // "validation 失败后不得发起 LLM 调用" 用例）。
     const out = await runOutputPhase(
       buildState({
-        intent: {
-          complexity: "complex",
-          intent: "create a TDD lesson plan for a Mars rover using TypeScript",
-          contextRelevance: "unrelated",
-        },
+        intent: {          intent: "create a TDD lesson plan for a Mars rover using TypeScript",        },
         validation: {
           passed: false,
           diagnosis: {
@@ -231,9 +178,7 @@ describe("runOutputPhase (Phase 9 — Output Assembly, direct-answer contract)",
 
  // 硬约束（patch-01-fallback）：严禁出现内部术语
     expect(content).not.toMatch(/task-tool-\d+/);
-    expect(content).not.toMatch(/task-direct-answer/);
     expect(content).not.toMatch(/\bPhase\s*\d+/);
-    expect(content).not.toContain("direct-answer 子流程");
     expect(content).not.toContain("capability 路由");
     expect(content).not.toContain("Tool / Agent 描述符");
 
@@ -277,11 +222,7 @@ describe("runOutputPhase (Phase 9 — Output Assembly, direct-answer contract)",
 
     const out = await runOutputPhase(
       buildState({
-        intent: {
-          complexity: "complex",
-          intent: "anything that fails validation",
-          contextRelevance: "unrelated",
-        },
+        intent: {          intent: "anything that fails validation",        },
         validation: {
           passed: false,
           diagnosis: {
@@ -308,11 +249,7 @@ describe("runOutputPhase (Phase 9 — Output Assembly, direct-answer contract)",
  test("complex + 验证失败且无 diagnosis 也不会异常 / 不泄漏", async () => {
     const out = await runOutputPhase(
       buildState({
-        intent: {
-          complexity: "complex",
-          intent: "some complex request",
-          contextRelevance: "unrelated",
-        },
+        intent: {          intent: "some complex request",        },
         validation: { passed: false },
       }),
       buildEnv(),
@@ -324,37 +261,34 @@ describe("runOutputPhase (Phase 9 — Output Assembly, direct-answer contract)",
     expect(content.length).toBeGreaterThanOrEqual(30);
     expect(content).not.toMatch(/task-tool-\d+/);
     expect(content).not.toMatch(/\bPhase\s*\d+/);
-    expect(content).not.toContain("direct-answer 子流程");
   });
 
- test("direct-answer 产出空字符串时自动回落到下一优先级（结构化 JSON 或 honest fallback）", async () => {
+ test("candidateAnswer 为空字符串时自动回落到下一优先级（结构化 JSON）", async () => {
     const out = await runOutputPhase(
       buildState({
-        intent: {
-          complexity: "simple",
-          intent: "hi",
-          contextRelevance: "unrelated",
-        },
+        intent: {          intent: "hi",        },
         validation: { passed: true },
-        taskResults: { "task-direct-answer": "" }, // 空字符串
+        taskResults: { "task-tool-use": "" },
+        candidateAnswer: {
+          content: "",
+          producedBy: "tool-use",
+          claims: [],
+          evidence: [],
+        },
       }),
       buildEnv(),
       metadata,
     );
- // simple + 空 direct-answer + validation 通过 → 走结构化 JSON 分支
+ // simple + 空 candidateAnswer + validation 通过 → 走结构化 JSON 分支
     const parsed = JSON.parse(out.content as string);
     expect(parsed.intent).toBe("hi");
-    expect(parsed.taskResults).toEqual({ "task-direct-answer": "" });
+    expect(parsed.taskResults).toEqual({ "task-tool-use": "" });
   });
 
  test("tool-use validation 通过时渲染已验证 candidateAnswer", async () => {
     const out = await runOutputPhase(
       buildState({
-        intent: {
-          complexity: "complex",
-          intent: "summarise searched result",
-          contextRelevance: "unrelated",
-        },
+        intent: {          intent: "summarise searched result",        },
         validation: { passed: true },
         taskResults: {
           "task-tool-use": {
@@ -386,14 +320,10 @@ describe("runOutputPhase (Phase 9 — Output Assembly, direct-answer contract)",
     expect(out.content).toBe("最终答案");
   });
 
- test("validation 失败但带 tool-use partial observations 时使用本地保底模板", async () => {
+ test("validation 失败 + tool-use partial → 确定性 fallback 模板（软兜底 buildToolUseLocalFallbackText 已随 ADR-0006 删除）", async () => {
     const out = await runOutputPhase(
       buildState({
-        intent: {
-          complexity: "complex",
-          intent: "获取最新股票走势数据",
-          contextRelevance: "unrelated",
-        },
+        intent: {          intent: "获取最新股票走势数据",        },
         validation: {
           passed: false,
           diagnosis: {
@@ -434,8 +364,10 @@ describe("runOutputPhase (Phase 9 — Output Assembly, direct-answer contract)",
       metadata,
     );
 
-    expect(out.content).toContain("部分结果");
+    // ADR-0006：软兜底已删，validation 失败统一走确定性 ensureFallbackText 模板，
+    // 不再基于 observations 捏造"部分结果"叙述，也不回退到 candidateAnswer.content。
     expect(out.content).not.toBe("基于部分搜索结果：A 股主要指数小幅调整。");
+    expect(out.content).toMatch(/下一步|可以尝试|建议/);
   });
 });
 
@@ -451,7 +383,7 @@ describe("runOutputPhase (P1 δ — consume outcome.kind, deprecate validation.p
  test("outcome.kind === 'pass' 时进入 pass 分支，即使 passed 字段为 false", async () => {
     const out = await runOutputPhase(
       buildState({
-        intent: { complexity: "simple", intent: "ping", contextRelevance: "unrelated" },
+        intent: { intent: "ping" },
         validation: {
           passed: false,
           outcome: { kind: "pass" },
@@ -460,7 +392,7 @@ describe("runOutputPhase (P1 δ — consume outcome.kind, deprecate validation.p
       buildEnv(),
       metadata,
     );
- // pass 分支 + 无 direct-answer / tool-use → 结构化 JSON 输出
+ // pass 分支 + candidateAnswer 为空 → 结构化 JSON 输出
     const parsed = JSON.parse(out.content as string);
     expect(parsed.intent).toBe("ping");
   });
@@ -468,7 +400,7 @@ describe("runOutputPhase (P1 δ — consume outcome.kind, deprecate validation.p
  test("outcome.kind === 'degrade' 时走 fallback，即使 passed 字段为 true", async () => {
     const out = await runOutputPhase(
       buildState({
-        intent: { complexity: "complex", intent: "some request", contextRelevance: "unrelated" },
+        intent: { intent: "some request" },
         validation: {
           passed: true,
           outcome: { kind: "degrade", reason: "test", userVisibleReason: "降级" },
@@ -486,7 +418,7 @@ describe("runOutputPhase (P1 δ — consume outcome.kind, deprecate validation.p
  test("outcome 未注入时按 passed 兼容回退（P1 δ 后向兼容）", async () => {
     const out = await runOutputPhase(
       buildState({
-        intent: { complexity: "simple", intent: "legacy", contextRelevance: "unrelated" },
+        intent: { intent: "legacy" },
         validation: { passed: true },
       }),
       buildEnv(),

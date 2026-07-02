@@ -152,9 +152,18 @@ export class DefaultHookRegistry implements HookRegistry {
 
  /**
  * @inheritdoc
+ *
+ * 每次调用无条件发一条 `hook_fired` observability 事件(ADR-0006 D2 纪律:
+ * 每个挂载点必须有真实 fire 位,即使当前无人订阅/注册,也要留下可观测痕迹,
+ * 防止"定义了却查不出是否真被触发"的死面问题重演)。
  */
   async fire(point: HookPoint, event: HookEvent): Promise<HookAction | undefined> {
     const subscribers = [...(this.subscribers.get(point) ?? [])];
+    const registrars = [...(this.registrars.get(point) ?? [])].sort(
+      (a, b) => a.priority - b.priority,
+    );
+    let resultAction: HookAction | undefined;
+
     for (const { id, handler } of subscribers) {
       try {
         await handler(event);
@@ -167,9 +176,6 @@ export class DefaultHookRegistry implements HookRegistry {
       }
     }
 
-    const registrars = [...(this.registrars.get(point) ?? [])].sort(
-      (a, b) => a.priority - b.priority,
-    );
     for (const item of registrars) {
       try {
         const action = await Promise.race([
@@ -179,7 +185,8 @@ export class DefaultHookRegistry implements HookRegistry {
           }),
         ]);
         if (action && action.type !== "continue") {
-          return action;
+          resultAction = action;
+          break;
         }
       } catch (error) {
         this.handleHookError(point, event, {
@@ -189,7 +196,21 @@ export class DefaultHookRegistry implements HookRegistry {
         });
       }
     }
-    return undefined;
+
+    this.observability.emit({
+      timestamp: Date.now(),
+      correlation: event.correlation,
+      ...(event.subject !== undefined ? { subject: event.subject } : {}),
+      phase: point,
+      type: "hook_fired",
+      payload: {
+        point,
+        subscriberCount: subscribers.length,
+        registrarCount: registrars.length,
+        ...(resultAction !== undefined ? { action: resultAction.type } : {}),
+      },
+    });
+    return resultAction;
   }
 
  /**

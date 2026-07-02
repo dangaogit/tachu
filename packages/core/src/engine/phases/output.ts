@@ -1,19 +1,10 @@
 import type {
   EngineOutput,
   OutputMetadata,
-  ToolUseResult,
 } from "../../types";
 import type { ValidationPhaseOutput } from "./validation";
 import { isValidationPassing } from "./validation";
 import type { PhaseEnvironment } from "./index";
-
-/**
- * `task-direct-answer` 是 Phase 5 为兜底路径分配的固定任务 ID。
- * `task-tool-use` 是 Phase 5 为 Agentic Loop 分配的固定任务 ID（
- * Phase 9 据此从 taskResults 中提取最终答复内容。
- */
-const DIRECT_ANSWER_TASK_ID = "task-direct-answer";
-const TOOL_USE_TASK_ID = "task-tool-use";
 
 /**
  * 兜底答复的最短可接受长度（沿用旧契约，方便外部调用方做断言）。
@@ -33,9 +24,7 @@ const FALLBACK_MIN_LENGTH = 30;
 const INTERNAL_TERMS_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\btask-tool-\d+\b/gi, "某个内部步骤"],
   [/\btask-tool-use\b/gi, "工具循环"],
-  [/\btask-direct-answer\b/gi, "兜底回答"],
   [/\bPhase\s*\d+\b/gi, "执行阶段"],
-  [/direct-answer\s*子流程/gi, "兜底回答"],
   [/tool-use\s*子流程/gi, "工具循环"],
   [/capability\s*路由/gi, "能力路由"],
   [/Tool\s*\/\s*Agent\s*描述符/gi, "工具描述"],
@@ -58,8 +47,9 @@ export const sanitizeInternalTerms = (text: string): string => {
 /**
  * 把 taskResult 转成可展示的字符串内容。
  *
- * direct-answer Sub-flow 执行成功时，Scheduler 记录的 `taskResult` 直接就是 LLM 返回的字符串。
- * 其它类型任务的 output 形状未定（占位实现是 `{ ref, input, output }`），此时 JSON.stringify 兜底。
+ * 目前仅服务于 `buildAgentSynthesisText` 的 agent-runtime 汇总路径：单个
+ * agent 分派任务的 `output` 形状未定（占位实现是 `{ ref, input, output }`），
+ * 此时 JSON.stringify 兜底；若本身已是字符串则原样返回。
  */
 const stringifyTaskResult = (value: unknown): string => {
   if (typeof value === "string") return value;
@@ -69,11 +59,6 @@ const stringifyTaskResult = (value: unknown): string => {
   } catch {
     return String(value);
   }
-};
-
-const isToolUseResult = (value: unknown): value is ToolUseResult => {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  return (value as { kind?: unknown }).kind === "tool-use-result";
 };
 
 interface AgentRunOutput {
@@ -98,35 +83,11 @@ const buildAgentSynthesisText = (results: AgentRunOutput[]): string => {
   return sanitizeInternalTerms(lines.join("\n").trim());
 };
 
-const buildToolUseLocalFallbackText = (
-  state: ValidationPhaseOutput,
-  toolUseResult: ToolUseResult,
-): string => {
-  const intent =
-    typeof state.intent.intent === "string" && state.intent.intent.trim().length > 0
-      ? state.intent.intent.trim()
-      : "当前请求";
-  const previews = toolUseResult.observations.slice(0, 3).map((item) => {
-    const text =
-      item.text.length <= 600 ? item.text.trim() : `${item.text.slice(0, 600)}...`;
-    return `- ${item.tool}: ${text || "工具返回为空"}`;
-  });
-  const lines = [
-    `本次${intent}没有完成完整的最终整理，但工具步骤已经返回了部分结果。`,
-    "",
-    ...(previews.length > 0 ? previews : ["- 没有可展示的工具结果。"]),
-  ];
-  if (toolUseResult.error) {
-    lines.push("", `后续生成答案时遇到问题：${toolUseResult.error.message}`);
-  }
-  return sanitizeInternalTerms(lines.join("\n"));
-};
-
 /**
  * 本地模板兜底 —— 不调任何外部依赖，保证 100% 可用。
  *
  * 文案只用用户侧可读词：
- * - 不含 `Phase \d+` / `task-tool-*` / `task-tool-use` / `direct-answer 子流程` / `tool-use 子流程` / `capability 路由` / `Tool / Agent 描述符`
+ * - 不含 `Phase \d+` / `task-tool-*` / `task-tool-use` / `tool-use 子流程` / `capability 路由` / `Tool / Agent 描述符`
  * - 不使用 code 字段
  * - 结构：一句承认 + 可能原因 + 下一步建议
  */
@@ -188,15 +149,16 @@ export const ensureFallbackText = async (
 };
 
 /**
- * 阶段 9：输出装配。
+ * 阶段 6（output）：输出装配。
  *
  * `content` 选取策略（按优先级）：
- * 1. `taskResults` 中存在 `task-direct-answer` 或 `task-tool-use`（
- * 的非空内容 → 直接使用（simple / Agentic Loop / complex-fallback 路径的常态）
- * 2. validation 通过（`outcome.kind === "pass"` 优先、`passed === true` 兜底）→
+ * 1. `candidateAnswer.content` 非空 ∧ validation 通过 → 直接使用
+ *    (ADR-0006 塌陷为深单 loop 后，`task-tool-use` 是唯一产出路径)
+ * 2. validation 通过但 candidateAnswer 为空、有 agent 分派结果 → agent 汇总文案
+ * 3. validation 通过（`outcome.kind === "pass"` 优先、`passed === true` 兜底）→
  * 结构化 JSON 输出（保留给无内置自然语言子流程的路径）
- * 3. validation 未通过 → `ensureFallbackText()` 产出的用户友好兜底文案
- * （先 LLM best-effort，失败降级到本地模板；保证 ≥ 30 字 ∧ 无内部术语）
+ * 4. validation 未通过 → `ensureFallbackText()` 产出的用户友好兜底文案
+ * （本地确定性模板，保证 ≥ 30 字 ∧ 无内部术语）
  *
  * 本阶段不再直接读 `state.validation.passed`，统一走
  * `isValidationPassing()` helper，以便 host 注入的 `outcome.kind` 立即生效；
@@ -207,10 +169,6 @@ export const runOutputPhase = async (
   env: PhaseEnvironment,
   metadata: OutputMetadata,
 ): Promise<EngineOutput> => {
-  const toolUseResultRaw = state.taskResults[TOOL_USE_TASK_ID];
-  const toolUseResult = isToolUseResult(toolUseResultRaw)
-    ? toolUseResultRaw
-    : null;
   const agentResults = Object.values(state.taskResults).filter(isAgentRunOutput);
   const validationPassing = isValidationPassing(state.validation);
   const candidateContent = state.candidateAnswer?.content?.trim() ?? "";
@@ -232,8 +190,6 @@ export const runOutputPhase = async (
       null,
       2,
     );
-  } else if (toolUseResult !== null && candidateContent.length > 0) {
-    content = buildToolUseLocalFallbackText(state, toolUseResult);
   } else {
     content = await ensureFallbackText(state, env);
   }

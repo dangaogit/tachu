@@ -244,12 +244,12 @@ describe("DefaultSafetyModule", () => {
  test("policy scope filters by phase", async () => {
     const safety = new DefaultSafetyModule(config);
     safety.registerPolicy({
-      id: "intent-only",
-      scope: ["intent"],
+      id: "execution-only",
+      scope: ["execution"],
       check: async () => ({
         passed: false,
         violations: [
-          { policyId: "intent-only", severity: "warning", message: "intent-only" },
+          { policyId: "execution-only", severity: "warning", message: "execution-only" },
         ],
       }),
     });
@@ -269,7 +269,7 @@ describe("DefaultSafetyModule", () => {
       "safety",
     );
     expect(safetyResult.violations.length).toBe(0);
-    const intentResult = await safety.checkBusiness(
+    const executionResult = await safety.checkBusiness(
       { content: "hi", metadata: { size: 2 } },
       {
         correlation: {
@@ -282,8 +282,8 @@ describe("DefaultSafetyModule", () => {
         budget: {},
         scopes: ["*"],
       },
-      "intent",
+      "execution",
     );
-    expect(intentResult.violations.length).toBe(1);
+    expect(executionResult.violations.length).toBe(1);
   });
 });

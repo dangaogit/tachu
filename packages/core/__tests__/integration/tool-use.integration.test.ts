@@ -137,10 +137,11 @@ class ScriptedMockProvider implements ProviderAdapter {
  * Stage 2 集成测试：Engine.runStream → Agentic Loop → 最终文本。
  *
  * 本测试不经过 CLI 入口，直接驱动 @tachu/core 的 `Engine.runStream`，
- * 用 `MockProviderAdapter` 的 scripted 脚本逐阶段伺候 LLM 返回：
- * 1. intent 阶段：返回 `{intent, complexity: "complex"}` 的分类 JSON
- * 2. tool-use 第 1 轮：请求调用已注册的 `echo-tool`（finishReason=tool_calls）
- * 3. tool-use 第 2 轮：收到工具结果后给出终止文本（finishReason=stop）
+ * 用 `MockProviderAdapter` 的 scripted 脚本逐阶段伺候 LLM 返回（ADR-0006 塌陷为
+ * 深单 loop 后，不再有独立的 intent 分类 LLM 调用，`tool-use` loop 的第 1 轮
+ * 就是整个 turn 的第 1 次 LLM 调用）：
+ * 1. tool-use 第 1 轮：请求调用已注册的 `echo-tool`（finishReason=tool_calls）
+ * 2. tool-use 第 2 轮：收到工具结果后给出终止文本（finishReason=stop）
  *
  * 注入的 fallback TaskExecutor 负责实际执行 `echo-tool`，模拟真实工具输出。
  *
@@ -257,11 +258,6 @@ const assertToolCallStreamChunksWellFormed = (chunks: StreamChunk[]): void => {
 describe("engine integration: tool-use agentic loop", () => {
  test("complex intent + 已注册工具 → tool-use 子流程跑完多轮后返回终止文本", async () => {
     const provider = new ScriptedMockProvider([
-      {
-        content:
-          '{"intent":"调用 echo 工具回显 hello","complexity":"complex","contextRelevance":"related"}',
-        finishReason: "stop",
-      },
       {
         content: "",
         toolCalls: [
@@ -382,11 +378,6 @@ describe("engine integration: tool-use agentic loop", () => {
 
  test("工具执行失败但模型给出兜底文本 → stream 暴露失败 chunk 且 turn 标记 degraded", async () => {
     const provider = new ScriptedMockProvider([
-      {
-        content:
-          '{"intent":"调用不稳定工具","complexity":"complex","contextRelevance":"related"}',
-        finishReason: "stop",
-      },
       {
         content: "",
         toolCalls: [
@@ -578,11 +569,6 @@ describe("engine integration: tool-use agentic loop", () => {
  test("同一轮 LLM 内两次工具调用（同名不同 callId）→ 每个 callId 在 execution phase-exit 与 done 前均有对偶 end", async () => {
     const provider = new ScriptedMockProvider([
       {
-        content:
-          '{"intent":"连续两次 echo","complexity":"complex","contextRelevance":"related"}',
-        finishReason: "stop",
-      },
-      {
         content: "",
         toolCalls: [
           {
@@ -681,13 +667,8 @@ describe("engine integration: tool-use agentic loop", () => {
     await engine.dispose();
   });
 
- test("complex intent 但 registry 无工具 → 降级到 direct-answer", async () => {
+ test("registry 无工具 → 深单 loop 零 tool_call 直接产出终止文本(ADR-0006 D1:subsumes 原 direct-answer)", async () => {
     const provider = new ScriptedMockProvider([
-      {
-        content:
-          '{"intent":"写一段短诗","complexity":"complex","contextRelevance":"related"}',
-        finishReason: "stop",
-      },
       {
         content: "这里是一首短诗：海天相接处，风起千帆动。",
         finishReason: "stop",
@@ -709,11 +690,6 @@ describe("engine integration: tool-use agentic loop", () => {
     const chunks: StreamChunk[] = [];
     for await (const chunk of engine.runStream(
       {
- // 用一个**不命中** intent fast-path 任一分支的输入：
- // - 不以 STRONG_SIMPLE_MARKERS 的中文白名单（写/编写/生成/列出/翻译/解释/介绍/...）开头
- // - 不含 STRONG_COMPLEX_MARKERS 的 URL / 路径 / 命令 / 时效信号
- // 这样 intent 必然走 mock provider，第一条响应被消费为 IntentResult，
- // 第二条响应留给 direct-answer 子流程使用。
         content: "构思一首关于海天相接的短诗",
         metadata: { modality: "text", size: 32 },
       },
@@ -737,11 +713,11 @@ describe("engine integration: tool-use agentic loop", () => {
     expect(done).toBeDefined();
     if (!done || done.type !== "done") throw new Error("expected done");
 
- // 无工具路径，tool-loop-* 事件应当为空
-    expect(chunks.some((c) => c.type === "tool-loop-step")).toBe(false);
+ // 深单 loop 恒经过 tool-use 子流程(即便零工具可见)：仍会 emit tool-loop-step，
+ // 但因模型第 1 轮就直接给出终止文本，不会有任何 tool-call-*。
+    expect(chunks.some((c) => c.type === "tool-loop-step")).toBe(true);
     expect(chunks.some((c) => c.type === "tool-call-start")).toBe(false);
 
- // 最终文本应来自 direct-answer
     expect(typeof done.output.content).toBe("string");
     expect(done.output.content).toContain("海天相接处");
 

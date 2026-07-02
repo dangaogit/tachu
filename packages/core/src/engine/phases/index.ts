@@ -1,7 +1,6 @@
 import type {
   EngineConfig,
   SessionScope,
-  SkillDescriptor,
   TokenUsageTriplet,
   UsageAccuracy,
   UsageAttribution,
@@ -69,22 +68,13 @@ export interface PhaseEnvironment {
   }) => void;
  /** Stable public id of the currently active top-level phase step. */
   currentPhaseStepId?: string | undefined;
- /** Host/run-scoped stable id factory. */
+  /** Host/run-scoped stable id factory. */
   nextStreamId?: (() => string) | undefined;
- /**
- * Phase 9 final-answer 正文分片。仅输出阶段调用；tool-use 过程文本不得写入该通道。
- */
-  onFinalAnswerDelta?: (text: string) => void;
- /** Tool candidate activator for planning phase. */
+  /** Tool candidate activator for tool-routing phase. */
   toolActivator?: ToolActivator;
- /** Policy-aware semantic retrieval. */
+  /** Policy-aware semantic retrieval. */
   semanticRetrieval?: SemanticRetrievalFacade;
- /**
- * Active skills for the current turn, injected at candidate-answer boundary.
- * Sourced from `AssembledPrompt.activeSkills` by the engine.
- */
-  finalAnswerActiveSkills?: SkillDescriptor[];
- /** Session-level scope for per-run dynamic config. */
+  /** Session-level scope for per-run dynamic config. */
   scope?: SessionScope;
  /** Host resource ref → Provider 载体物化 seam. */
   multimodalResolver?: MultimodalResolver;
@@ -94,8 +84,8 @@ export interface PhaseEnvironment {
  * Turn-level retry context。
  *
  * 仅当 Engine 的 do-while 重试循环触发 `continue` 时被注入；首次执行时为 undefined。
- * PlanningPhase 在 attempt > 0 时会 emit `previous-attempt-injected` 事件，
- * 并把该结构透传给可选的 planner 候选评分逻辑，以避免重复犯同一错。
+ * `runToolRoutingPhase` 在 attempt > 0 时会 emit `previous-attempt-injected` 事件，
+ * 供观测/审计使用(路由本身是确定性的，不会据此改变任务构造)。
  */
   previousAttempt?: PreviousTurnAttempt;
 }
@@ -104,14 +94,14 @@ export interface PhaseEnvironment {
  * 上一轮 turn 的失败摘要。
  *
  * 由 Engine 在 `decideTurnRetry` 决定 `continue` 后填入 `PhaseEnvironment.previousAttempt`，
- * PlanningPhase 据此调整候选评分 / 排除重复任务结构。
+ * `runToolRoutingPhase` 据此 emit 观测事件，避免重试诊断信号随死 phase 一并消失。
  */
 export interface PreviousTurnAttempt {
  /** 已完成的重试次数，等价于即将进入的 attempt index（第 N 次重试，N 从 1 起）。 */
   retryCount: number;
  /** 上一轮 ValidationOutcome.kind（`retry` / 已观察到的最终态）。 */
   lastOutcomeKind: string;
- /** 上一轮 outcome 的 `target`（`same-plan` / `next-plan` / `tool-loop-finalize`），用于决定 planner 是否换策略。 */
+ /** 上一轮 outcome 的 `target`（`retry-turn` / `tool-loop-finalize`），供观测 / 审计。 */
   target?: string | undefined;
  /** 上一轮 outcome.reason；planner 与观测都用得上。 */
   reason?: string | undefined;
@@ -121,11 +111,8 @@ export interface PreviousTurnAttempt {
 
 export * from "./candidate-answer";
 export * from "./execution";
-export * from "./graph-check";
-export * from "./intent";
 export * from "./output";
-export * from "./planning";
-export * from "./precheck";
 export * from "./safety";
 export * from "./session";
+export * from "./tool-routing";
 export * from "./validation";

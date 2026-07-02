@@ -8,6 +8,8 @@ import {
   InMemoryRuntimeState,
   InMemorySessionManager,
   NoopProvider,
+  createSafetyViolationsGuardrail,
+  runGuardrails,
   type HookRegistry,
   type MemoryEntry,
   type MemorySystem,
@@ -18,6 +20,7 @@ import {
   type SafetyModule,
   type SessionManager,
 } from "../modules";
+import type { Guardrail } from "../types/guardrail";
 import {
   DefaultPromptAssembler,
   NeedToKnowContextDistributor,
@@ -77,8 +80,17 @@ import {
 import type { SemanticRetrievalFacade } from "../semantic-retrieval";
 import { DefaultToolActivator, createDefaultToolCandidateStrategies } from "./tool-activation";
 import type { ToolActivator, ToolCandidateStrategy } from "./tool-activation";
-import { DefaultAgentRuntimeAdapter, type AgentRuntimeAdapter } from "./agents";
-import type { AgentStructuredContext } from "./agents";
+import {
+  DefaultAgentRuntimeAdapter,
+  DEFAULT_SUBAGENT_DISPATCH_MAX_DEPTH,
+  type AgentRuntimeAdapter,
+} from "./agents";
+import type {
+  AgentDispatchFn,
+  AgentInvocation,
+  AgentRunResult,
+  AgentStructuredContext,
+} from "./agents";
 import type { EvidenceEntry } from "../types/evidence";
 import { DefaultToolUseExecutor, type ToolUseExecutor } from "./tool-use";
 import { readTurnPolicy } from "./turn-policy";
@@ -94,14 +106,12 @@ import {
   mergeInternalToolDefinitions,
   type ToolApprovalDecision,
   type ToolApprovalRequest,
+  type ToolUseContext,
 } from "./subflows";
 import {
   runExecutionPhase,
-  runGraphCheckPhase,
-  runIntentPhase,
+  runToolRoutingPhase,
   runOutputPhase,
-  runPlanningPhase,
-  runPrecheckPhase,
   runSafetyPhase,
   runSessionPhase,
   runCandidateAnswerPhase,
@@ -271,19 +281,31 @@ export interface EngineDependencies {
  /**
  * Host 注入的 token 级资源需求路由。
  *
- * core 在 direct-answer / tool-use / candidate-answer 三处 Provider 边界 seam 调用前
- * 各调用一次，得到高层 `ResourceDemandSelector`，展开为底层 key-only `ResourceDemand`
- * 后传入 seam。**缺省不注入即行为不变（全保真 `{ mode: "all" }`）**；任何裁剪须经此
- * 钩子显式 opt-in。
+ * core 在 `tool-use` 唯一的 Provider 边界 seam 调用前调用一次，得到高层
+ * `ResourceDemandSelector`，展开为底层 key-only `ResourceDemand` 后传入 seam。
+ * **缺省不注入即行为不变（全保真 `{ mode: "all" }`）**；任何裁剪须经此钩子显式
+ * opt-in。
  */
   resourceDemandRouter?: import("./resolve-provider-messages").ResourceDemandRouter;
+ /**
+ * 对称守卫 seam(ADR-0006 D4):挂 `turnStart`/`turnStop` 的宿主自定义 guardrail。
+ *
+ * 与 `hooks.register("turnStart"/"turnStop", ...)` 的差异:guardrail 契约提供
+ * `pass/block/degrade/annotate` 更贴合"合规/内容策略/质量校验"语义的判别联合,
+ * 而不是通用的 `HookAction`。两者共存:引擎内置的 `builtin.safety-violations`
+ * guard 恒跑在 `turnStart`;这里注入的列表在其后追加执行。
+ */
+  guardrails?: {
+    turnStart?: Guardrail[];
+    turnStop?: Guardrail[];
+  };
 }
 
 /**
  * Tachu 核心引擎。
  *
- * 该类负责组装运行时依赖并串联 9 阶段主干流程，支持流式与非流式执行、
- * 会话级取消传播、Hook 扩展以及资源释放。
+ * 该类负责组装运行时依赖并串联 6 阶段主干流程（深单 agentic loop，ADR-0006），
+ * 支持流式与非流式执行、会话级取消传播、Hook 扩展以及资源释放。
  */
 export class Engine {
   readonly config: EngineConfig;
@@ -301,6 +323,7 @@ export class Engine {
   private readonly safetyModule: SafetyModule;
   private readonly observability: ObservabilityEmitter;
   private readonly hooks: HookRegistry;
+  private readonly guardrails: { turnStart: Guardrail[]; turnStop: Guardrail[] };
   private readonly scheduler: TaskScheduler;
   private readonly taskExecutor: TaskExecutor;
   private readonly internalSubflows: InternalSubflowRegistry;
@@ -309,7 +332,7 @@ export class Engine {
  * 活跃 runStream 的预组装 Prompt 缓存，按 `traceId` 索引。
  *
  * 由 `runStream` 在 Phase 6 预热阶段写入、在 `finally` 里清理；`buildLayeredTaskExecutor`
- * 读取它并作为 `prebuiltPrompt` 传递给内置 Sub-flow（典型即 direct-answer）。
+ * 读取它并作为 `prebuiltPrompt` 传递给内置 Sub-flow（`tool-use`）。
  *
  * 以 `traceId` 为键而非 `sessionId`：同一 session 可能有并发取消后的重试，
  * 用 traceId 区分每一次具体执行，避免旧 trace 污染新 trace 的 prompt。
@@ -321,7 +344,7 @@ export class Engine {
  * 活跃 runStream 的 usage 回流回调缓存，按 `traceId` 索引。
  *
  * 与 `activeRunPrompts` 同生命周期：`runStream` 创建 orchestrator 后写入，
- * `finally` 清理；内置 Sub-flow（direct-answer 等）据此把真实 usage 汇回主干。
+ * `finally` 清理；内置 Sub-flow（`tool-use`）据此把真实 usage 汇回主干。
  */
   private readonly activeRunUsageSinks = new Map<
     string,
@@ -370,7 +393,10 @@ export class Engine {
   private readonly activeRunToolCallSinks = new Map<string, ToolCallRecord[]>();
 
  /**
- * 活跃 runStream 的 direct-answer 正文 delta 队列（`runtime.streamingOutput`）。
+ * 活跃 runStream 的顶层正文 delta 队列（`runtime.streamingOutput`）。
+ *
+ * ADR-0006 C1 塌陷为深单 loop 后未被内置 Sub-flow 消费(`tool-use` 走的是
+ * `onToolLoopEvent` 的 `tool-loop-delta`)；保留以兼容未来子流程复用。
  */
   private readonly activeRunDeltaOutbox = new Map<string, DeltaStreamQueue>();
 
@@ -378,7 +404,7 @@ export class Engine {
  * 活跃 runStream 的文生图 / 图像编辑产物 sink。
  *
  * 由 `runStream` 在 orchestrator 就绪后初始化为空数组、`finally` 清理；内置
- * `direct-answer` 子流程在 Provider 返回含 images 的 `ChatResponse` 时把列表
+ * `tool-use` 子流程在某个 loop step 的 Provider 响应携带 images 时把列表
  * 合并到本 sink。Output phase 结束前会一次性写入
  * `EngineOutput.metadata.generatedImages`。
  */
@@ -405,8 +431,8 @@ export class Engine {
  * - 当 scope 未提供 modelOverride 时与 `this.modelRouter` 同实例（零开销）
  * - 当提供时是一个新的 ModelRouter 包装层
  *
- * 内置 Sub-flow（typical: direct-answer）通过 `buildLayeredTaskExecutor` 间接
- * 接收 ModelRouter，需要按 traceId 查到本轮 effective router 才能让 modelOverride
+ * 内置 Sub-flow（`tool-use`）通过 `buildLayeredTaskExecutor` 间接接收
+ * ModelRouter，需要按 traceId 查到本轮 effective router 才能让 modelOverride
  * 真正影响子流程的 provider 调用。
  */
   private readonly activeRunModelRouters = new Map<string, ModelRouter>();
@@ -519,10 +545,14 @@ export class Engine {
         this.config.hooks.writeHookTimeout,
         this.config.hooks.failureBehavior,
       );
+    this.guardrails = {
+      turnStart: dependencies?.guardrails?.turnStart ?? [],
+      turnStop: dependencies?.guardrails?.turnStop ?? [],
+    };
  // TaskExecutor 装配：
- // - 无论业务是否注入自定义 executor，内置 Sub-flow（`direct-answer` 等）
+ // - 无论业务是否注入自定义 executor，内置 Sub-flow（`tool-use`）
  // 必须由引擎内部的 `InternalSubflowRegistry` 拦截执行；否则业务自定义 executor
- // 会把 `type === 'sub-flow'` 视为未知类型而抛错，简单意图分支会整条失败。
+ // 会把 `type === 'sub-flow'` 视为未知类型而抛错，整条 turn 会失败。
  // - 非内置 Sub-flow 的任务（tool / agent / 业务 Sub-flow）继续按业务自定义
  // executor 或默认占位 executor 处理。
     const fallbackExecutor = dependencies?.taskExecutor ?? this.buildPlaceholderTaskExecutor();
@@ -699,6 +729,246 @@ export class Engine {
         degradeAllowed: true,
       },
     });
+  }
+
+ /**
+ * `runtime.toolLoop.subagentDispatch.maxDepth` 的解析（默认 `1`，ADR-0006 D6）。
+ *
+ * 与 `AgentDescriptor.maxDepth` 取更小值后写入 `AgentRunConstraints.maxDepth`，
+ * 防止某个 agent 描述符自行声明更大的 `maxDepth` 时突破全局深度闸门。
+ */
+  private resolveAgentDispatchMaxDepth(): number {
+    const configured = this.config.runtime.toolLoop?.subagentDispatch?.maxDepth;
+    return typeof configured === "number" && configured >= 0
+      ? configured
+      : DEFAULT_SUBAGENT_DISPATCH_MAX_DEPTH;
+  }
+
+ /**
+ * Single-Writer Rule(ADR-0006 D6):sub-agent 只读，`allowedTools` 经本方法
+ * 确定性过滤掉非 `readonly` 工具，写操作留给主 loop。
+ *
+ * fail-closed：registry 查不到的工具名（比如已被业务侧移除）一律排除，不能
+ * 假定"未注册 = 只读"而放行。
+ */
+  private filterReadonlyToolNames(toolNames: readonly string[]): string[] {
+    return toolNames.filter((name) => {
+      const descriptor = this.registry.getLatest("tool", name);
+      return descriptor !== null && descriptor.sideEffect === "readonly";
+    });
+  }
+
+ /**
+ * 为已派发的 sub-agent 组装其自身 `tool-use` loop 所需的 `ToolUseContext`
+ * (被 `DefaultAgentRuntimeAdapter.toolUseContextFactory` 消费)。
+ *
+ * 除了原有的 prompt/tools 装配外，额外挂上 `dispatchAgent`/`agentDispatchDepth`
+ * 闭包 —— 这样若 `runtime.toolLoop.subagentDispatch.maxDepth` 配置 > 1，
+ * sub-agent 自身的 loop 仍可（在深度闸门允许范围内）继续派发下一层 sub-agent，
+ * 复用同一套 `runSubAgent` 实现而非另起一套派发逻辑。
+ */
+  private buildSubAgentToolUseContext(
+    invocation: AgentInvocation,
+    signal: AbortSignal,
+    executionContext: ExecutionContext,
+  ): ToolUseContext {
+    const toolDefs = (invocation.constraints.allowedTools ?? [])
+      .map((name) => this.registry.getLatest("tool", name))
+      .filter((d): d is NonNullable<typeof d> => d !== null)
+      .map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        inputSchema: tool.inputSchema,
+      }));
+    const prebuiltPrompt: AssembledPrompt = {
+      messages: [
+        {
+          role: "system",
+          content: `You are the "${invocation.agent.name}" sub-agent. ${invocation.agent.instructions}`,
+        },
+        {
+          role: "user",
+          content: `Objective:\n${invocation.objective}\n\nInput:\n${JSON.stringify(
+            invocation.input,
+            null,
+            2,
+          )}`,
+        },
+      ],
+      tools: toolDefs,
+      tokenCount: 0,
+      appliedCuts: [],
+      activeSkills: [],
+    };
+    const nestedDepth = invocation.constraints.currentDepth ?? 1;
+    const dispatchAgent: AgentDispatchFn = async (params, dispatchSignal) => {
+      const result = await this.runSubAgent(
+        params.agentName,
+        params.objective,
+        params.input ?? {},
+        executionContext,
+        dispatchSignal,
+        {
+          taskId: `${invocation.id}:dispatch-agent:${params.agentName}:${Date.now()}`,
+          currentDepth: nestedDepth + 1,
+        },
+      );
+      return { ...result, agent: params.agentName };
+    };
+    return {
+      config: this.config,
+      providers: this.providers,
+      modelRouter: this.modelRouter,
+      memorySystem: this.memorySystem,
+      observability: this.observability,
+      registry: this.registry,
+      taskExecutor: this.taskExecutor,
+      executionContext,
+      signal,
+      adapterContext: adapterCallContextFromExecution(executionContext),
+      prebuiltPrompt,
+      agentRunId: invocation.id,
+      hooks: this.hooks,
+      dispatchAgent,
+      agentDispatchDepth: nestedDepth,
+    };
+  }
+
+ /**
+ * sub-agent 派发的共享实现(ADR-0006 D6)。
+ *
+ * 两条调用路径共用本方法：
+ * 1. `task.type === "agent"`(显式 `@agent` 提及，`tool-routing` phase 产出的
+ *    确定性快路径，`currentDepth` 恒为 `1`)
+ * 2. loop 内 LLM 自决调用内置 `dispatch_agent` 工具(ADR-0006 D6 本阶段新增，
+ *    主 loop 派发时 `currentDepth` 同为 `1`；sub-agent 自身 loop 再次派发时递增)
+ *
+ * 统一保证：
+ * - Single-Writer Rule：`allowedTools` 经 {@link filterReadonlyToolNames} 收窄
+ * - maxDepth 闸门：`descriptor.maxDepth` 与 `resolveAgentDispatchMaxDepth()` 取更小值
+ * - summary-only 契约：`DefaultAgentRuntimeAdapter` 只回 `terminalDraft` + evidence 摘要，
+ *   不透传子 loop 全 transcript(现有实现已如此，本方法不改变该契约)
+ * - `preSubagent`/`postSubagent` hook 无论走哪条路径都一致触发
+ */
+  private async runSubAgent(
+    agentName: string,
+    objective: string,
+    input: Record<string, unknown>,
+    context: ExecutionContext,
+    signal: AbortSignal,
+    opts: {
+      taskId: string;
+      currentDepth: number;
+      structured?: AgentStructuredContext;
+    },
+  ): Promise<AgentRunResult> {
+    const descriptor = this.registry.get("agent", agentName);
+    if (!descriptor) {
+      return {
+        status: "failed",
+        error: {
+          code: "AGENT_DESCRIPTOR_NOT_FOUND",
+          message: `Agent descriptor not found: ${agentName}`,
+          retryable: false,
+        },
+      };
+    }
+
+ // preSubagent(ADR-0006 D2/D6):真正的 subagent 派发前置点。deny/abort 时
+ // 短路,不真正 spawn,也不消耗 budget 决策。
+    const preSubagentAction = await this.hooks.fire("preSubagent", {
+      point: "preSubagent",
+      timestamp: Date.now(),
+      correlation: context.correlation,
+      ...(context.subject !== undefined ? { subject: context.subject } : {}),
+      data: { agent: descriptor.name, objective, taskId: opts.taskId },
+    });
+    if (preSubagentAction?.type === "deny" || preSubagentAction?.type === "abort") {
+      return {
+        status: "failed",
+        error: {
+          code: "AGENT_DISPATCH_DENIED",
+          message: preSubagentAction.reason ?? "preSubagent hook 拒绝了本次 subagent 派发",
+          retryable: false,
+        },
+      };
+    }
+
+    const router =
+      this.activeRunModelRouters.get(context.correlation.traceId) ?? this.modelRouter;
+    let route: ModelRoute;
+    try {
+      route = router.resolve("high-reasoning");
+    } catch {
+      route = router.resolve("fast-cheap");
+    }
+    const runtime =
+      this.injectedAgentRuntime ??
+      new DefaultAgentRuntimeAdapter({
+        providers: this.providers,
+        route,
+        adapterContext: adapterCallContextFromExecution(context),
+        toolUseExecutor: this.toolUseExecutor,
+        toolUseContextFactory: (invocation, factorySignal, executionContext) =>
+          this.buildSubAgentToolUseContext(invocation, factorySignal, executionContext),
+      });
+
+    const allowedTools = this.filterReadonlyToolNames(descriptor.availableTools ?? []);
+ // sub-agent 预算走 Broker；去除硬编码 0.5/0.25 常量。
+    const maxOutputTokens = 1_500;
+    const estimatedSubAgentInput = Math.max(
+      256,
+      Math.ceil(
+        (objective.length + JSON.stringify(input).length + (opts.structured ? 512 : 0)) / 4,
+      ),
+    );
+    const subAgentBudget = this.decideSubAgentBudget(route, estimatedSubAgentInput, maxOutputTokens);
+ // chunkingAllowed=false 已禁用 chunk；reject 时退回保守默认（最小可用预算）。
+    const subAgentMaxInput =
+      subAgentBudget.kind === "chunk" || subAgentBudget.kind === "reject"
+        ? Math.max(512, Math.floor(this.resolveMaxContextTokens() / 2))
+        : subAgentBudget.envelope.maxInputTokens;
+
+    const invocation: AgentInvocation = {
+      id: opts.taskId,
+      agent: descriptor,
+      objective,
+      input,
+      context: {
+        scope: "sub-agent",
+        parentTraceId: context.correlation.traceId,
+        inherited: {
+          tools: allowedTools,
+          memory: "task-relevant",
+          ...(opts.structured !== undefined ? { structured: opts.structured } : {}),
+        },
+        budget: {
+          maxInputTokens: subAgentMaxInput,
+          maxWorkingTokens: Math.max(256, Math.floor(subAgentMaxInput / 2)),
+          maxOutputTokens,
+        },
+      },
+      constraints: {
+        maxDepth: Math.min(descriptor.maxDepth, this.resolveAgentDispatchMaxDepth()),
+        timeoutMs: descriptor.timeout,
+        allowedTools,
+        currentDepth: opts.currentDepth,
+      },
+    };
+
+    const result = await runtime.run(invocation, context, signal);
+
+ // postSubagent(ADR-0006 D2/D6):subagent 收敛后置点,只读订阅/审计用途;
+ // 不支持改写 result(summary-only 契约由 D6 的 runtime 自身保证)。
+    await this.hooks.fire("postSubagent", {
+      point: "postSubagent",
+      timestamp: Date.now(),
+      correlation: context.correlation,
+      ...(context.subject !== undefined ? { subject: context.subject } : {}),
+      data: { agent: descriptor.name, taskId: opts.taskId, status: result.status },
+    });
+
+    return result;
   }
 
  /**
@@ -1008,7 +1278,7 @@ export class Engine {
  *
  * 这样设计保证：
  * 1. 业务侧即便注入了只处理 `tool` 的 executor，
- * `direct-answer` 仍能正确执行，simple 路径不会整条失败
+ * `tool-use` 仍能正确执行，不会整条 turn 失败
  * 2. 业务侧无需了解内置 Sub-flow 的存在，协议层自行兜底
  * 3. 内置 Sub-flow 的 context 由引擎集中装配，避免业务侧重复拼装依赖
  */
@@ -1017,7 +1287,7 @@ export class Engine {
  *
  * 业务侧（典型为 `@tachu/cli` 的 `buildTaskExecutor`、或宿主自己实现的 executor）
  * 可以用本 helper 把自身 TaskExecutor 包裹成"先尝试内置 Sub-flow，未命中再落到业务
- * executor"的两层结构，从而复用引擎内置的 `direct-answer` 等子流程。
+ * executor"的两层结构，从而复用引擎内置的 `tool-use` 子流程。
  *
  * §决定4 承诺对外暴露这个 helper；详见 。
  *
@@ -1090,16 +1360,36 @@ export class Engine {
               }
             }
           : undefined;
+// dispatch_agent(ADR-0006 D6):主 loop 恒为深度 0，闭包内复用 runSubAgent
+// (Single-Writer Rule 收窄 / preSubagent-postSubagent hook / budget 决策
+// 与显式 `@agent` 派发完全一致)。深度闸门与「是否暴露该工具」的判断在
+// tool-use.ts 侧做（未注册任何 agent 时不会出现在工具列表里）。
+        const dispatchAgent: AgentDispatchFn = async (params, dispatchSignal) => {
+          const dispatchResult = await this.runSubAgent(
+            params.agentName,
+            params.objective,
+            params.input ?? {},
+            context,
+            dispatchSignal,
+            {
+              taskId: `${context.correlation.traceId}:dispatch-agent:${params.agentName}:${Date.now()}`,
+              currentDepth: 1,
+            },
+          );
+          return { ...dispatchResult, agent: params.agentName };
+        };
         const output = await internalSubflows.execute(task.ref, task.input, {
           config: this.config,
           providers: this.providers,
- // 优先使用本轮 effective router（含 SessionScope.modelOverride）；map 未命中时回退基础 router。
+// 优先使用本轮 effective router（含 SessionScope.modelOverride）；map 未命中时回退基础 router。
           modelRouter:
             this.activeRunModelRouters.get(context.correlation.traceId) ?? this.modelRouter,
           memorySystem: this.memorySystem,
           observability: this.observability,
           signal,
           adapterContext: adapterCallContextFromExecution(context),
+          dispatchAgent,
+          agentDispatchDepth: 0,
           ...(this.multimodalResolver !== undefined
             ? { multimodalResolver: this.multimodalResolver }
             : {}),
@@ -1113,6 +1403,7 @@ export class Engine {
           ...(nextStreamId !== undefined ? { nextStreamId } : {}),
           registry: this.registry,
           taskExecutor: fallback,
+          hooks: this.hooks,
           ...(executionContext !== undefined ? { executionContext } : {}),
           ...(onToolLoopEvent !== undefined ? { onToolLoopEvent } : {}),
           ...(onToolCall !== undefined ? { onToolCall } : {}),
@@ -1136,143 +1427,35 @@ export class Engine {
         return { ok: true, output };
       }
       if (task.type === "agent") {
-        const descriptor = this.registry.get("agent", task.ref);
-        if (!descriptor) {
-          return {
-            ok: false,
-            error: {
-              code: "AGENT_DESCRIPTOR_NOT_FOUND",
-              message: `Agent descriptor not found: ${task.ref}`,
-              retryable: false,
-              source: "scheduler",
-            },
-          };
-        }
-        const router =
-          this.activeRunModelRouters.get(context.correlation.traceId) ?? this.modelRouter;
-        let route;
-        try {
-          route = router.resolve("high-reasoning");
-        } catch {
-          route = router.resolve("fast-cheap");
-        }
-        const runtime =
-          this.injectedAgentRuntime ??
-          new DefaultAgentRuntimeAdapter({
-            providers: this.providers,
-            route,
-            adapterContext: adapterCallContextFromExecution(context),
-            toolUseExecutor: this.toolUseExecutor,
-            toolUseContextFactory: (invocation, signal, executionContext) => {
-              const toolDefs = (invocation.constraints.allowedTools ?? [])
- .map((name) => this.registry.getLatest("tool", name))
-                .filter((d): d is NonNullable<typeof d> => d !== null)
-                .map((tool) => ({
-                  name: tool.name,
-                  description: tool.description,
-                  inputSchema: tool.inputSchema,
-                }));
-              const prebuiltPrompt: AssembledPrompt = {
-                messages: [
-                  {
-                    role: "system",
-                    content: `You are the "${invocation.agent.name}" sub-agent. ${invocation.agent.instructions}`,
-                  },
-                  {
-                    role: "user",
-                    content: `Objective:\n${invocation.objective}\n\nInput:\n${JSON.stringify(
-                      invocation.input,
-                      null,
-                      2,
-                    )}`,
-                  },
-                ],
-                tools: toolDefs,
-                tokenCount: 0,
-                appliedCuts: [],
-                activeSkills: [],
-              };
-              return {
-                config: this.config,
-                providers: this.providers,
-                modelRouter: this.modelRouter,
-                memorySystem: this.memorySystem,
-                observability: this.observability,
-                registry: this.registry,
-                taskExecutor: this.taskExecutor,
-                executionContext,
-                signal,
-                adapterContext: adapterCallContextFromExecution(executionContext),
-                prebuiltPrompt,
-                agentRunId: invocation.id,
-              };
-            },
-          });
+// 用结构化 envelope 替代 JSON.stringify(task.contextSlice)。
+        const structured = this.decomposeAgentContextSlice(task.contextSlice);
         const objective =
           typeof task.input.objective === "string"
             ? task.input.objective
             : typeof task.input.prompt === "string"
               ? task.input.prompt
-              : descriptor.description;
-        const allowedTools = descriptor.availableTools ?? [];
- // 用结构化 envelope 替代 JSON.stringify(task.contextSlice)。
-        const structured = this.decomposeAgentContextSlice(task.contextSlice);
- // sub-agent 预算走 Broker；去除硬编码 0.5/0.25 常量。
-        const maxOutputTokens = 1_500;
-        const estimatedSubAgentInput = Math.max(
-          256,
-          Math.ceil(
-            (objective.length + JSON.stringify(task.input).length + (structured ? 512 : 0)) / 4,
-          ),
-        );
-        const subAgentBudget = this.decideSubAgentBudget(
-          route,
-          estimatedSubAgentInput,
-          maxOutputTokens,
-        );
- // chunkingAllowed=false 已禁用 chunk；reject 时退回保守默认（最小可用预算）。
-        const subAgentMaxInput =
-          subAgentBudget.kind === "chunk" || subAgentBudget.kind === "reject"
-            ? Math.max(512, Math.floor(this.resolveMaxContextTokens() / 2))
-            : subAgentBudget.envelope.maxInputTokens;
-        const result = await runtime.run(
-          {
-            id: task.id,
-            agent: descriptor,
-            objective,
-            input: task.input,
-            context: {
-              scope: "sub-agent",
-              parentTraceId: context.correlation.traceId,
-              inherited: {
-                tools: allowedTools,
-                memory: "task-relevant",
-                ...(structured !== undefined ? { structured } : {}),
-              },
-              budget: {
-                maxInputTokens: subAgentMaxInput,
-                maxWorkingTokens: Math.max(256, Math.floor(subAgentMaxInput / 2)),
-                maxOutputTokens,
-              },
-            },
-            constraints: {
-              maxDepth: descriptor.maxDepth,
-              timeoutMs: descriptor.timeout,
-              allowedTools,
- // main Engine 总是首层派发，depth=1。sub-agent 若日后
- // 嵌套派发，需要在 sub-agent 内部累加并 propagate 到下层 invocation。
-              currentDepth: 1,
-            },
-          },
+              : (this.registry.get("agent", task.ref)?.description ?? "");
+// main Engine 显式 `@agent` 派发总是首层，depth=1；实现细节（Single-Writer
+// Rule 收窄、preSubagent/postSubagent hook、budget 决策）均由 runSubAgent
+// 统一承担，与 loop 内 `dispatch_agent` 工具触发的派发共用同一份逻辑。
+        const result = await this.runSubAgent(
+          task.ref,
+          objective,
+          task.input,
           context,
           signal,
+          {
+            taskId: task.id,
+            currentDepth: 1,
+            ...(structured !== undefined ? { structured } : {}),
+          },
         );
         if (result.status === "completed") {
           return {
             ok: true,
             output: {
               kind: "agent-run-result",
-              agent: descriptor.name,
+              agent: task.ref,
               status: result.status,
               output: result.output,
               evidence: result.evidence ?? [],
@@ -1365,16 +1548,7 @@ export class Engine {
 
     const toolCalls: OutputMetadata["toolCalls"] = [];
     const startTs = Date.now();
-    const orchestrator = new ExecutionOrchestrator(
-      this.config,
-      {
-        correlation: normalizedContext.correlation,
-        ...(normalizedContext.subject !== undefined
-          ? { subject: normalizedContext.subject }
-          : {}),
-      },
-      this.observability,
-    );
+    const orchestrator = new ExecutionOrchestrator(this.config);
     const nextStreamId =
       scope?.idFactory ??
       (() => {
@@ -1514,6 +1688,40 @@ export class Engine {
     };
 
     try {
+ // turnStart guardrail 的 annotate/degrade 前缀说明(ADR-0006 D4)，
+ // 待 runOutputPhase 返回后前缀拼接到最终 content，与 contextBudgetDegradeReason 同模式。
+      let turnStartGuardAnnotation: string | undefined;
+// turnStart(ADR-0006 D2):一轮开始的 pre-guard 挂载点，提供真实 fire 位 +
+// free-mutation/deny 语义;`SafetyModule` baseline 归位为默认 guard(见下方
+// runSafetyPhase 之后的 turnStartGuardDecision 块,ADR-0006 D4)。
+      const turnStartAction = await this.hooks.fire("turnStart", {
+        point: "turnStart",
+        timestamp: Date.now(),
+        correlation: normalizedContext.correlation,
+        ...(normalizedContext.subject !== undefined
+          ? { subject: normalizedContext.subject }
+          : {}),
+        data: { input },
+      });
+      if (turnStartAction?.type === "deny" || turnStartAction?.type === "abort") {
+        throw EngineError.fromUnknown(
+          new Error(turnStartAction.reason ?? "turnStart hook 拒绝了本轮请求"),
+          "HOOK_EXECUTION_FAILED",
+        );
+      }
+      if (turnStartAction?.type === "modify" || turnStartAction?.type === "replace") {
+        const candidate =
+          turnStartAction.type === "modify" ? turnStartAction.patch : turnStartAction.data;
+        if (
+          typeof candidate === "object" &&
+          candidate !== null &&
+          "content" in candidate &&
+          "metadata" in candidate
+        ) {
+          input = candidate as InputEnvelope;
+        }
+      }
+
       yield* enterPhase("session");
       const sessionState = await runSessionPhase(input, normalizedContext, phaseEnv);
       yield* flushPendingUsageTelemetry();
@@ -1528,27 +1736,42 @@ export class Engine {
       yield* flushPendingUsageTelemetry();
       yield* exitPhase("safety");
 
-      yield* enterPhase("intent");
-      const intentState = await runIntentPhase(safetyState, phaseEnv);
-      yield* flushPendingUsageTelemetry();
-      yield* exitPhase("intent");
-
- /** Intent 阶段写入 turnPolicy 等 metadata；装配 Prompt 须与之后各阶段共用同一条 input。 */
-      const effectiveInput = intentState.input;
-      this.activeRunTurnPolicies.set(
-        normalizedContext.correlation.traceId,
-        readTurnPolicy(effectiveInput),
+// turnStart guardrail(ADR-0006 D4):内置默认 guard = SafetyModule baseline +
+// business policy(scope=turnStart)。`builtin.safety-violations` 把此前
+// 计算后从未被消费的 `safetyState.violations` 映射为 annotate/degrade,
+// 不再静默丢弃;host 通过 `EngineDependencies.guardrails.turnStart` 追加的
+// guard 在其后按顺序执行,恒 fail-closed(任一 block 立即中止整轮)。
+      const turnStartGuardDecision = await runGuardrails(
+        [createSafetyViolationsGuardrail(safetyState.violations), ...this.guardrails.turnStart],
+        {
+          point: "turnStart",
+          correlation: normalizedContext.correlation,
+          ...(normalizedContext.subject !== undefined
+            ? { subject: normalizedContext.subject }
+            : {}),
+          data: {
+            input: safetyState.input,
+            context: safetyState.context,
+            violations: safetyState.violations,
+          },
+        },
       );
+      if (turnStartGuardDecision.kind === "block") {
+        throw EngineError.fromUnknown(
+          new Error(
+            turnStartGuardDecision.userVisibleReason ?? turnStartGuardDecision.reason,
+          ),
+          "HOOK_EXECUTION_FAILED",
+        );
+      }
+      if (turnStartGuardDecision.kind === "annotate") {
+        turnStartGuardAnnotation = turnStartGuardDecision.prefix;
+      } else if (turnStartGuardDecision.kind === "degrade") {
+        turnStartGuardAnnotation = turnStartGuardDecision.userVisibleReason;
+      }
 
- // 所有请求（含 simple）统一穿过前置校验阶段，
- // 以保证 Rules / 安全策略 / Provider 可达性校验对所有路径生效一致。
-      yield* enterPhase("precheck");
-      const precheckState = await runPrecheckPhase(intentState, phaseEnv);
-      yield* flushPendingUsageTelemetry();
-      yield* exitPhase("precheck");
-
- // Turn-level retry loop. ValidationPhase 输出 `outcome.kind === "retry"`
- // 时回到 PlanningPhase 重新执行；受 runtime.maxTurnRetries 与 decideTurnRetry 反死循环约束。
+// Turn-level retry loop. ValidationPhase 输出 `outcome.kind === "retry"`
+ // 时回到 tool-routing 重新执行；受 runtime.maxTurnRetries 与 decideTurnRetry 反死循环约束。
  // 默认 maxTurnRetries=0 时本 do-while 仅执行一次，等价于先前的线性 planning→output。
       const maxTurnRetries = this.config.runtime.maxTurnRetries ?? 0;
       let turnAttemptCount = 0;
@@ -1559,6 +1782,8 @@ export class Engine {
  // 待 runOutputPhase 返回后前缀拼接到最终 content。Hoisted at turn scope so each
  // retry attempt overwrites and the final attempt's value reaches OutputPhase.
       let contextBudgetDegradeReason: string | undefined;
+      let effectiveInput = safetyState.input;
+      let toolRoutingState!: Awaited<ReturnType<typeof runToolRoutingPhase>>;
       do {
         shouldRetryTurn = false;
  // 每轮重试前清空本轮累积的 tool-loop 事件 / 工具调用记录与生成产物，
@@ -1571,40 +1796,48 @@ export class Engine {
           generatedMediaBucket.length = 0;
         }
 
-        yield* enterPhase("planning");
-      const planningState = await runPlanningPhase(precheckState, phaseEnv);
-      orchestrator.setPlanningResult(planningState.planning);
+// 深单 loop 塌陷(ADR-0006 D1):原 intent 分类 phase + precheck phase 的
+// LLM 猜测已删除,`runToolRoutingPhase` 用确定性规则(turnPolicy 规范化 +
+// 显式 @agent/@tool 名称匹配 + visibleTools 收窄)一次性替代四个死 phase 点
+// (intent / precheck / planning / graph-check)。放在重试循环内部重新计算,
+// 使 `phaseEnv.previousAttempt`(由上一轮 validation 写入)在 retry 时仍能被
+// 观测事件消费,即便路由本身是确定性、结果不因重试而改变。
+      yield* enterPhase("tool-routing");
+      toolRoutingState = await runToolRoutingPhase(safetyState, phaseEnv);
+      yield* flushPendingUsageTelemetry();
+      yield* exitPhase("tool-routing");
+
+ /** tool-routing 阶段写入 turnPolicy 等 metadata；装配 Prompt 须与之后各阶段共用同一条 input。 */
+      effectiveInput = toolRoutingState.input;
+      this.activeRunTurnPolicies.set(
+        normalizedContext.correlation.traceId,
+        readTurnPolicy(effectiveInput),
+      );
+
       if (this.config.runtime.planMode) {
-        const topPlan = planningState.planning.plans[0];
-        if (topPlan) {
-          yield withStreamEnvelope(
-            { type: "plan-preview", phase: "planning", plan: topPlan },
-            normalizedContext,
-          );
-        }
-        const action = await this.hooks.fire("afterPlanning", {
-          point: "afterPlanning",
+        yield withStreamEnvelope(
+          { type: "plan-preview", phase: "tool-routing", route: toolRoutingState.route },
+          normalizedContext,
+        );
+// planMode 的计划审批曾挂在死点 `afterPlanning`;塌陷为深单 loop 后
+// (ADR-0006 D1)该 gate 语义上就是"loop 首次调用 LLM 前的最后一次审批",
+// 故归位到 `preLLM`。
+        const action = await this.hooks.fire("preLLM", {
+          point: "preLLM",
           timestamp: Date.now(),
           correlation: normalizedContext.correlation,
           ...(normalizedContext.subject !== undefined
             ? { subject: normalizedContext.subject }
             : {}),
-          data: planningState.planning,
+          data: toolRoutingState.route,
         });
         if (action?.type === "deny" || action?.type === "abort") {
           throw EngineError.fromUnknown(
-            new Error(action.reason ?? "afterPlanning hook 拒绝了当前计划"),
+            new Error(action.reason ?? "preLLM hook 拒绝了当前计划"),
             "HOOK_EXECUTION_FAILED",
           );
         }
       }
-      yield* flushPendingUsageTelemetry();
-      yield* exitPhase("planning");
-
-      yield* enterPhase("graph-check");
-      const graphState = await runGraphCheckPhase(planningState, phaseEnv);
-      yield* flushPendingUsageTelemetry();
-      yield* exitPhase("graph-check");
 
       const distributed = this.contextDistributor.distribute(
         {
@@ -1612,10 +1845,10 @@ export class Engine {
           constraints: this.config.safety,
           taskResults: {},
         },
-        graphState.planning.plans[0]?.tasks ?? [],
-        graphState.planning.plans[0]?.edges ?? [],
+        toolRoutingState.route.tasks,
+        toolRoutingState.route.edges,
       );
-      graphState.planning.plans[0]?.tasks.forEach((task) => {
+      toolRoutingState.route.tasks.forEach((task) => {
         task.contextSlice = distributed.get(task.id);
       });
 
@@ -1720,7 +1953,7 @@ export class Engine {
             : {}),
         });
         const assembled = await this.promptAssembler.assemble({
-          phase: "planning",
+          phase: "preLLM",
           model: route.model,
           tokenizer: this.tokenizer,
           modelCapabilities: {
@@ -1773,7 +2006,7 @@ export class Engine {
         const deltaQueue = new DeltaStreamQueue();
         this.activeRunDeltaOutbox.set(normalizedContext.correlation.traceId, deltaQueue);
         const execPromise = runExecutionPhase(
-          graphState,
+          toolRoutingState,
           phaseEnv,
           ({ taskId, taskType, taskRef, status, output, error }) => {
             if (taskType === "tool" && status === "completed") {
@@ -1828,7 +2061,7 @@ export class Engine {
         executionState = await execPromise;
       } else {
         executionState = await runExecutionPhase(
-          graphState,
+          toolRoutingState,
           phaseEnv,
           ({ taskId, taskType, taskRef, status, output, error }) => {
             if (taskType === "tool" && status === "completed") {
@@ -1900,39 +2133,11 @@ export class Engine {
       yield* flushPendingUsageTelemetry();
       yield* exitPhase("execution");
 
-      const assembledPrompt = this.activeRunPrompts.get(normalizedContext.correlation.traceId);
-      let candidateState: Awaited<ReturnType<typeof runCandidateAnswerPhase>>;
-      if (this.config.runtime.streamingOutput) {
-        const candidateDeltaQueue = new DeltaStreamQueue();
-        const candidatePromise = runCandidateAnswerPhase(executionState, {
-          ...phaseEnv,
-          finalAnswerActiveSkills: assembledPrompt?.activeSkills ?? [],
-          onFinalAnswerDelta: (text: string): void => {
-            candidateDeltaQueue.enqueue(
-              withStreamEnvelope({ type: "delta", content: text }, normalizedContext),
-            );
-          },
-        }).finally(() => {
-          candidateDeltaQueue.enqueue(DELTA_STREAM_END);
-        });
-        while (true) {
-          const item = await candidateDeltaQueue.dequeue();
-          if (item === DELTA_STREAM_END) {
-            break;
-          }
-          yield item;
-        }
-        candidateState = await candidatePromise;
-      } else {
-        candidateState = await runCandidateAnswerPhase(executionState, {
-          ...phaseEnv,
-          finalAnswerActiveSkills: assembledPrompt?.activeSkills ?? [],
-        });
-      }
+      const candidateState = await runCandidateAnswerPhase(executionState, phaseEnv);
 
- // 结果验证对所有请求统一执行。
- // 对 simple 路径（单步 direct-answer）而言，validation 退化为"步骤成功 → 通过"的确定性判断，
- // 但这条判断链路与 complex 路径同构，保证预算熔断 / Hook / 可观测事件覆盖一致。
+ // 结果验证对所有请求统一执行(ADR-0006 塌陷为深单 loop 后，唯一路径是
+ // `tool-use`；零工具调用的纯文本答复由 loop step-1 自然产出，validation
+ // 退化为"步骤成功 → 通过"的确定性判断)。
       yield* enterPhase("validation");
       validationState = await runValidationPhase(
         candidateState,
@@ -1947,18 +2152,7 @@ export class Engine {
  // 5 种 outcome 在 helper 内集中映射事件，避免 engine.ts 分支漂移。
           this.observability.emit(engineEventFromContext(normalizedContext, event));
         }
-        if (
-          validationOutcome.kind === "retry" &&
-          validationOutcome.target === "next-plan"
-        ) {
-          const switched = orchestrator.switchToNextPlan(
-            validationState.validation.diagnosis?.reason ?? "validation-failed",
-          );
-          if (switched) {
-            orchestrator.markReplanRequest("validation requested alternative plan");
-          }
-        }
- // 由 decideTurnRetry 决定是否回到 PlanningPhase。
+ // 由 decideTurnRetry 决定是否回到 tool-routing 重新执行。
         if (maxTurnRetries > 0) {
           const decision = decideTurnRetry({
             outcome: validationOutcome,
@@ -2002,6 +2196,90 @@ export class Engine {
       yield* exitPhase("validation");
       } while (shouldRetryTurn);
 
+// turnStop(ADR-0006 D2/D4):一轮结束前的 post-guard 挂载点,恒最后跑、
+// fail-closed。默认 Result Validation guard 的归位是 Stage 3(C3b)的工作;
+// 本阶段先提供真实 fire 位 + deny(拒绝交付)/modify|replace(改写最终文案,
+// 如 degrade/annotate 类用法)的通用语义。
+      const turnStopAction = await this.hooks.fire("turnStop", {
+        point: "turnStop",
+        timestamp: Date.now(),
+        correlation: normalizedContext.correlation,
+        ...(normalizedContext.subject !== undefined
+          ? { subject: normalizedContext.subject }
+          : {}),
+        data: {
+          candidateAnswer: validationState.candidateAnswer,
+          validation: validationState.validation,
+        },
+      });
+      if (turnStopAction?.type === "deny" || turnStopAction?.type === "abort") {
+        throw EngineError.fromUnknown(
+          new Error(turnStopAction.reason ?? "turnStop hook 拒绝了本轮交付"),
+          "HOOK_EXECUTION_FAILED",
+        );
+      }
+      if (
+        (turnStopAction?.type === "modify" || turnStopAction?.type === "replace") &&
+        validationState.candidateAnswer !== undefined
+      ) {
+        const candidate =
+          turnStopAction.type === "modify" ? turnStopAction.patch : turnStopAction.data;
+        if (
+          typeof candidate === "object" &&
+          candidate !== null &&
+          typeof (candidate as { content?: unknown }).content === "string"
+        ) {
+          validationState.candidateAnswer = {
+            ...validationState.candidateAnswer,
+            content: (candidate as { content: string }).content,
+          };
+        }
+      }
+
+// turnStop guardrail(ADR-0006 D4):宿主通过 `EngineDependencies.guardrails.turnStop`
+// 注入的对称守卫,在 raw HookAction 之后按 pass/block/degrade/annotate 语义执行。
+// 内置默认 Result Validation guard 不在此重复接入 —— `runOutputPhase` 已经按
+// `outcome.kind` 做 content 选取(pass/degrade/handoff 的正文分支已在 output.ts
+// 落地),此处再叠加会造成双重降级前缀;`createResultValidationGuardrail` 仍作为
+// 可复用工具导出，供自定义 Engine 组装或测试使用。
+      if (this.guardrails.turnStop.length > 0) {
+        const turnStopGuardDecision = await runGuardrails(this.guardrails.turnStop, {
+          point: "turnStop",
+          correlation: normalizedContext.correlation,
+          ...(normalizedContext.subject !== undefined
+            ? { subject: normalizedContext.subject }
+            : {}),
+          data: {
+            candidateAnswer: validationState.candidateAnswer,
+            validation: validationState.validation,
+          },
+        });
+        if (turnStopGuardDecision.kind === "block") {
+          throw EngineError.fromUnknown(
+            new Error(
+              turnStopGuardDecision.userVisibleReason ?? turnStopGuardDecision.reason,
+            ),
+            "HOOK_EXECUTION_FAILED",
+          );
+        }
+        if (
+          (turnStopGuardDecision.kind === "degrade" ||
+            turnStopGuardDecision.kind === "annotate") &&
+          validationState.candidateAnswer !== undefined
+        ) {
+          const prefix =
+            turnStopGuardDecision.kind === "degrade"
+              ? `[${turnStopGuardDecision.userVisibleReason}]\n\n`
+              : `[${turnStopGuardDecision.prefix}]\n\n`;
+          if (!validationState.candidateAnswer.content.startsWith(prefix)) {
+            validationState.candidateAnswer = {
+              ...validationState.candidateAnswer,
+              content: `${prefix}${validationState.candidateAnswer.content}`,
+            };
+          }
+        }
+      }
+
       yield* enterPhase("output");
       const usage = orchestrator.getUsage();
       const outputMetadata = applyTurnOutcome(
@@ -2030,13 +2308,25 @@ export class Engine {
         },
       );
       const output = await runOutputPhase(validationState, phaseEnv, outputMetadata);
- // 当 ContextBudgetBroker 决策为 degrade 时，把
- // userVisibleReason 真实前缀到最终回答，让用户看见降级说明而非静默缩水。
+// 当 ContextBudgetBroker 决策为 degrade 时，把
+// userVisibleReason 真实前缀到最终回答，让用户看见降级说明而非静默缩水。
       if (
         contextBudgetDegradeReason !== undefined &&
         typeof output.content === "string"
       ) {
         const prefix = `[降级说明] ${contextBudgetDegradeReason}\n\n`;
+        if (!output.content.startsWith(prefix)) {
+          output.content = `${prefix}${output.content}`;
+        }
+      }
+// turnStart guardrail(ADR-0006 D4)annotate/degrade 决策的前缀说明，
+// 同一模式：真实前缀到最终回答，而不是静默丢弃（此前 safetyState.violations
+// 计算后从未被消费）。
+      if (
+        turnStartGuardAnnotation !== undefined &&
+        typeof output.content === "string"
+      ) {
+        const prefix = `[${turnStartGuardAnnotation}]\n\n`;
         if (!output.content.startsWith(prefix)) {
           output.content = `${prefix}${output.content}`;
         }

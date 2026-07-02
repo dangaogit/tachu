@@ -32,7 +32,7 @@ describe("deterministic.evidence.required", () => {
   it("passes silently when claims.length === 0", () => {
     const findings = evidenceRequiredRule.evaluate({
       ...baseCtx(),
-      candidateAnswer: { content: "hi", producedBy: "direct-answer", claims: [], evidence: [] },
+      candidateAnswer: { content: "hi", producedBy: "tool-use", claims: [], evidence: [] },
     });
     expect(findings).toHaveLength(0);
   });
@@ -42,7 +42,7 @@ describe("deterministic.evidence.required", () => {
       ...baseCtx(),
       candidateAnswer: {
         content: "hi",
-        producedBy: "direct-answer",
+        producedBy: "tool-use",
         claims: [claim({ requiredEvidence: "none" })],
         evidence: [],
       },
@@ -195,7 +195,7 @@ describe("deterministic.evidence.required", () => {
       evidence: [],
       candidateAnswer: {
         content: "limitation acknowledged",
-        producedBy: "direct-answer",
+        producedBy: "tool-use",
         claims: [
           claim({ id: "lim1", kind: "limitation", requiredEvidence: "none" }),
         ],

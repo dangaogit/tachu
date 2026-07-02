@@ -240,7 +240,7 @@ const normalizeMessagesForDashScopeOpenAi = (model: string, messages: Message[])
  * 多模态时 `content` 为合法 list，典型 400：`Input should be 'user': input.messages.0.role`。
  *
  * 将 system 前缀合并进**最后一条 user**（引擎里即本轮当前输入；含多模态块时并入其文本前缀），
- * 与 Intent / direct-answer / tool-use 组装顺序一致：`[system, ...history, lastUser]`。
+ * 与 `tool-use` 组装顺序一致：`[system, ...history, lastUser]`。
  *
  * @see https://help.aliyun.com/zh/dashscope/developer-reference/compatibility-of-openai-with-dashscope
  */

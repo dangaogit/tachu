@@ -184,7 +184,7 @@ export class InkStreamRenderer implements ChunkRenderer {
       }
       case "plan-preview": {
         this.appendLog("── Plan Preview ──");
-        this.appendLog(JSON.stringify(chunk.plan, null, 2));
+        this.appendLog(JSON.stringify(chunk.route, null, 2));
         this.appendLog("──────────────────");
         this.push();
         break;

@@ -78,7 +78,7 @@ const deriveCacheKey = (input: SemanticJudgeInput): string => {
   if (input.cacheKey !== undefined && input.cacheKey.length > 0) return input.cacheKey;
   const signalsBlob = JSON.stringify({
     n: input.signals.intentValidationNeed ?? "none",
-    c: input.signals.finalAnswerHasClaims,
+    c: input.signals.answerHasClaims,
     o: input.signals.hasToolObservations,
     s: input.signals.hasExternalSources,
     w: input.signals.hasFileWrites,

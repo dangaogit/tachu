@@ -133,7 +133,7 @@ Respond in the same language as the latest user message.
 - If the user writes in Chinese, reply in Chinese.
 - If the user writes in English, reply in English.
 - Default to English when the language is ambiguous or mixed.
-- This rule is enforced for tool-use, direct-answer and fallback responses.
+- This rule is enforced for tool-use and fallback responses.
 `;
 
 const EXAMPLE_TOOL_MD = `---
@@ -354,10 +354,9 @@ const config: EngineConfig = {
   hooks: { writeHookTimeout: 5000, failureBehavior: 'continue' },
 
  // ── 领域扩展（按需启用）──────────────────────────────────────────────────────
- // core 只内置普遍信号（URL / 文件路径 / 实时数据）；领域特定规则（命令名白名单、
- // 项目配置修改动词、tool-use 工作流指南）通过 intent / toolUse 字段注入。
- // 详见 https://github.com/dangaogit/tachu#intent--tooluse-config
- // intent: { additionalComplexPatterns: [], fewShotExamples: [] },
+ // core 只内置通用的 tool-use loop system prompt；领域工作流指南（如"改前先读 /
+ // 改后 typecheck"）通过 toolUse 字段追加，不污染 core prompt 本体。
+ // 详见 https://github.com/dangaogit/tachu#tooluse-config
  // toolUse: { systemPromptSuffix: '' },
 };
 

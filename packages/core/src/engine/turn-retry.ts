@@ -4,12 +4,12 @@ import type { ValidationOutcome } from "../types";
  * Engine turn-level retry 决策输入。
  *
  * Engine 主循环在每次 ValidationPhase 收尾后调用 {@link decideTurnRetry}
- * 来判定本轮 turn 是直接进入 OutputPhase（exit）还是回到 PlanningPhase 重试（continue）。
+ * 来判定本轮 turn 是直接进入 OutputPhase（exit）还是回到 tool-routing phase 重试（continue）。
  *
  * 设计要点：
  * - 终态 outcome（`pass` / `degrade` / `handoff`）一律 exit；不重试。
  * - `retry/tool-loop-finalize` 属于 tool-use sub-flow 的内部信号，turn 级别 exit。
- * - `retry/same-plan` 与 `retry/next-plan` 触发 turn 级重试，受 maxRetries 约束。
+ * - `retry/retry-turn` 触发 turn 级重试，受 maxRetries 约束。
  * - 反死循环：上一轮 outcome.kind 与本轮相同 → 强制 exit，避免相同失败模式无限循环。
  */
 export interface TurnRetryDecisionInput {
@@ -31,9 +31,9 @@ export type TurnRetryDecision =
  * 计算 ValidationPhase outcome 之后下一步动作。
  *
  * 返回 `continue` 时 Engine 应当：
- * 1. 把 `previousAttempt` 注入 PlanningPhase evidence；
+ * 1. 把 `previousAttempt` 注入下一轮 `tool-routing` phase（供观测 / 审计）；
  * 2. `retryCount` 升到 `nextRetryCount`；
- * 3. 回到 planning 阶段重新跑一轮（precheck 不重复）。
+ * 3. 回到 `tool-routing` 阶段重新跑一轮。
  *
  * 返回 `exit` 时 Engine 进入 OutputPhase。
  */

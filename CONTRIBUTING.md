@@ -69,7 +69,7 @@ Before opening a PR:
 |----------|---------|
 | [README.md](./README.md) | Product overview, project status table, CLI reference |
 | [CHANGELOG.md](./CHANGELOG.md) | Release and unreleased changes |
-| [docs/overview-design.md](./docs/overview-design.md) | Architecture overview and 9-phase pipeline |
+| [docs/overview-design.md](./docs/overview-design.md) | Architecture overview and 6-phase skeleton + deep single loop |
 | [docs/detailed-design.md](./docs/detailed-design.md) | TypeScript interfaces, module specs, configuration schema |
 | [docs/technical-design.md](./docs/technical-design.md) | Technology choices, engineering structure, implementation guide |
 | [docs/architecture/pipeline-phases.md](./docs/architecture/pipeline-phases.md) | Phase-by-phase implementation reference |

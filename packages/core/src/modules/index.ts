@@ -1,3 +1,4 @@
+export * from "./guardrail";
 export * from "./hooks";
 export * from "./memory";
 export * from "./model-router";

@@ -135,7 +135,7 @@ export const runCommand = defineCommand({
     },
     "plan-mode": {
       type: "boolean",
-      description: "启用 Plan 模式（阶段 5 后暂停等待批准）",
+      description: "启用 Plan 模式（tool-routing 阶段后暂停等待批准）",
       default: false,
     },
     verbose: {

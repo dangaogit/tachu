@@ -13,7 +13,7 @@ describe("DefaultPromptAssembler", () => {
  test("assembles 11 segments in stable order", async () => {
     const assembler = new DefaultPromptAssembler();
     const result = await assembler.assemble({
-      phase: "planning",
+      phase: "preLLM",
       model: "dev-large",
       tokenizer,
       modelCapabilities: {
@@ -37,7 +37,7 @@ describe("DefaultPromptAssembler", () => {
           name: "p1",
           description: "pref desc",
           type: "preference",
-          scope: ["planning"],
+          scope: ["preLLM"],
           content: "prefer concise answer",
         },
       ],
@@ -105,7 +105,7 @@ describe("DefaultPromptAssembler", () => {
     const assembler = new DefaultPromptAssembler();
     const compressed: string[] = [];
     const result = await assembler.assemble({
-      phase: "planning",
+      phase: "preLLM",
       model: "dev-small",
       tokenizer,
       modelCapabilities: {
@@ -168,7 +168,7 @@ describe("DefaultPromptAssembler", () => {
  test("trimOrder 优先于内置顺序（history 在第一位则先裁 history）", async () => {
     const assembler = new DefaultPromptAssembler();
     const result = await assembler.assemble({
-      phase: "planning",
+      phase: "preLLM",
       model: "dev",
       tokenizer,
       modelCapabilities: {
@@ -207,7 +207,7 @@ describe("DefaultPromptAssembler", () => {
  test("trimOrder 中未识别 token 静默跳过并记录 appliedCuts", async () => {
     const assembler = new DefaultPromptAssembler();
     const result = await assembler.assemble({
-      phase: "planning",
+      phase: "preLLM",
       model: "dev",
       tokenizer,
       modelCapabilities: {
@@ -242,7 +242,7 @@ describe("DefaultPromptAssembler", () => {
  test("当 history 末尾就是 currentInput（session 已 append）时，不重复 push 末尾 user", async () => {
     const assembler = new DefaultPromptAssembler();
     const result = await assembler.assemble({
-      phase: "planning",
+      phase: "preLLM",
       model: "dev-large",
       tokenizer,
       modelCapabilities: {
@@ -274,7 +274,7 @@ describe("DefaultPromptAssembler", () => {
     const assembler = new DefaultPromptAssembler();
     const ts = Date.now();
     const result = await assembler.assemble({
-      phase: "planning",
+      phase: "preLLM",
       model: "dev-large",
       tokenizer,
       modelCapabilities: {
@@ -308,7 +308,7 @@ describe("DefaultPromptAssembler", () => {
     const assembler = new DefaultPromptAssembler();
     await expect(
       assembler.assemble({
-        phase: "planning",
+        phase: "preLLM",
         model: "dev-small",
         tokenizer,
         modelCapabilities: {

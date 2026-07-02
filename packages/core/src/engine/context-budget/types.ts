@@ -1,9 +1,7 @@
 export type ContextScope =
   | "intent"
   | "main-agent"
-  | "direct-answer"
   | "tool-use-loop"
-  | "tool-use-final-answer"
   | "fallback-summary"
   | "validation"
   | "memory-compression"

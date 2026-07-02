@@ -15,7 +15,7 @@ graph TD
         B[OpenAI & Anthropic Adapters / 22 Built-in Tools / Terminal+File+Web Backends / Qdrant+LocalFs VectorStore / MCP Adapter / OTel+JSONL Emitters / 4 Common Rules]
     end
     subgraph "Engine Core — @tachu/core"
-        C[Protocol Definitions / 9-Phase Pipeline / Lifecycle Hooks / Session / Memory / Safety / Model Router / Runtime State]
+        C[Protocol Definitions / 6-Phase Pipeline + tool-use Deep Agentic Loop / Loop-Lifecycle Hooks / Session / Memory / Safety / Model Router / Runtime State]
     end
     A --> B
     B --> C
@@ -23,135 +23,177 @@ graph TD
 
 | Layer | Package | Responsibility |
 |-------|---------|----------------|
-| Engine Core | `@tachu/core` | Protocol interfaces, 9-phase pipeline skeleton, 8 core modules, Registry, Prompt assembler, VectorStore interface + built-in light implementation |
+| Engine Core | `@tachu/core` | Protocol interfaces, 6-phase pipeline skeleton with a single deep `tool-use` agentic loop as its spine, 8 core modules, Registry, Prompt assembler, VectorStore interface + built-in light implementation |
 | Extensions Library | `@tachu/extensions` | Official concrete implementations: Provider adapters, Tools, Backends, VectorStore adapters, OTel/JSONL emitters, common Rules |
 | Business / CLI | `@tachu/cli` or your code | Assembles core + extensions into a working Agent; provides domain Rules/Skills/Tools/Agents |
 | Optional Sidecar | `@tachu/web-fetch-server` | Private HTTP service backing `web-fetch` / `web-search`; deploy only when those tools are needed |
 
-### Task Planning + Tool-use Loop
+### Deep Single Loop + tool-routing (ADR-0006)
 
-The default complex path is **not** a separate LLM planner that emits a complete ranked task DAG before execution. In `1.0.0-rc.0`, Phase 5 is a deterministic planning router:
+As of `0.2.0`, the engine no longer runs a 9-phase homogeneous pipeline. The former `intent` (LLM classification), `precheck`, `planning`, and `graph-check` phases — plus the built-in `direct-answer` sub-flow — have been collapsed into a **deterministic `tool-routing` phase** feeding **one deep `tool-use` agentic loop**, which is the engine's sole execution spine:
 
-| Intent path | Phase 5 output | Where reasoning happens |
-|-------------|----------------|-------------------------|
-| `simple` | one `direct-answer` sub-flow task | `direct-answer` produces the final Markdown reply |
-| `complex` + visible tools | one `tool-use` sub-flow task | `tool-use` runs the Agentic Loop and decides tools step by step |
-| `complex` + no visible tools | one `direct-answer` sub-flow task with `warn: true` | `direct-answer` gives an honest tool-missing answer |
+| Old (9-phase, removed) | New (`0.2.0`) |
+|-------------------------|----------------|
+| `intent` (LLM simple/complex classification) | Deleted. No LLM classification step exists anywhere in the pipeline. |
+| `precheck` | Deleted. Provider/capability existence checks happen where they are needed (route resolution), not as a standalone phase. |
+| `planning` (LLM-free router emitting `direct-answer` or `tool-use`) | Folded into `tool-routing`: always emits exactly one `tool-use` task. |
+| `graph-check` | Folded into `tool-routing`: a minimal single-task graph validation (`topologicalSort` + registry lookups), kept for when the task count grows beyond one. |
+| `direct-answer` built-in sub-flow | Physically deleted. "Answer with no tool call" is handled naturally by `tool-use` loop step 1 producing no `tool_call`. |
 
-Inside `tool-use`, the model receives the assembled prompt and available tool schemas, then repeats this loop until it can answer or hits a budget:
+`tool-routing` (`packages/core/src/engine/phases/tool-routing.ts`) is **purely deterministic** — no LLM call, no `simple`/`complex` classification:
+
+1. **`turnPolicy` normalization** — consumes only `SessionScope` and any pre-seeded `input.metadata.turnPolicy` (e.g. explicit CLI flags). Tool allow/deny and skill pin/exclude are **hard enforcement** driven by host/config/agent snapshot only — never guessed by a model.
+2. **Tool-set narrowing** — when a `ToolActivator` is configured, `visibleTools` deterministically narrows the candidate tool set (relevance scoring + name matching + discovery expansion) instead of exposing the full registry.
+3. **Routing branch** (independent of any removed complexity classification):
+   - Explicit `@agent` mention → an `agent-batch` task (`TaskNode.type === "agent"`).
+   - Everything else → exactly one `{ id: "task-tool-use", type: "sub-flow", ref: "tool-use", input: { prompt, toolNames? } }` task. A prompt with zero matching tools still produces this task — the loop still runs, and the model naturally answers in plain text when it emits no `tool_call`.
+4. **Minimal plan validation** (replaces `graph-check`) — verifies referenced tool/agent descriptors exist and runs `topologicalSort` once (trivially passes for the single-task case, but keeps real cycle detection available if task count grows).
+5. **Output constraint** — a single `ExecutionRoute` with `tasks.length ≥ 1` (no multi-plan `plans[]`).
 
 ```mermaid
 flowchart TD
-    P5[Phase 5: Planning Router] --> TU[Phase 7: tool-use Sub-flow]
-    TU --> LLM[LLM call with messages + tools]
-    LLM -->|tool_calls| Gate[Execution Gate: scope / approval / sandbox]
-    Gate --> Exec[Run Tool]
-    Exec --> Obs[Append tool result to conversation]
-    Obs --> LLM
-    LLM -->|final text| Out[Terminal assistant answer]
+    Start([User input + visible tools]) --> AgentM{explicit agent mention}
+    AgentM -->|yes| ATasks[agent-batch task]
+    AgentM -->|no| Single[single task-tool-use task]
+    ATasks --> Validate[minimal plan validation]
+    Single --> Validate
+    Validate --> Route([ExecutionRoute, 1 task])
 ```
 
-This keeps the 9-phase pipeline stable while putting multi-step planning where it has the most information: inside the feedback loop after each tool observation. An optional Plan Preview / Human Review mode may still be built on top of Phase 5 later, but it is not the default execution path.
+Inside `tool-use`, the model receives the assembled prompt and available tool schemas, then repeats a step loop until it can answer or hits a budget — this loop (not a static multi-step plan) is where genuine multi-step reasoning now lives:
 
-### 9-Phase Execution Pipeline
+```mermaid
+flowchart TD
+    TR[tool-routing] --> TU["execution: tool-use deep agentic loop"]
+    TU --> LLM["preLLM → Provider.chat(messages, tools) → postLLM"]
+    LLM -->|tool_calls| Gate["preToolUse: scope / approval / sandbox gate"]
+    Gate --> Exec[Run tool or dispatch_agent in parallel]
+    Exec --> Post[postToolUse]
+    Post --> Compact{context over threshold?}
+    Compact -->|yes| PreCompact[preCompact auto-compact]
+    PreCompact --> LLM
+    Compact -->|no| LLM
+    LLM -->|no tool_calls| Terminal["terminalDraft = candidate answer"]
+```
 
-Every request processed by the engine flows through exactly 9 phases:
+### 6-Phase Execution Pipeline
+
+Every request flows through exactly 6 numbered phases, wrapping the single `tool-use` loop:
 
 ```mermaid
 graph TD
-    Start([Business Request]) --> S1[Phase 1: Session Management]
-    S1 --> S2[Phase 2: Minimum Safety Check]
-    S2 --> S3[Phase 3: Intent Analysis — LLM]
-    S3 --> S4[Phase 4: Pre-Check]
-    S4 --> S5[Phase 5: Planning Router]
-    S5 --> S6[Phase 6: DAG Validation]
-    S6 --> S7[Phase 7: Sub-task Execution]
-    S7 --> S8[Phase 8: Result Validation]
-    S8 --> S9[Phase 9: Output Normalization]
-    S9 --> End([Output])
+    Start([Business Request]) --> S1[Phase 1: Session]
+    S1 --> S2[Phase 2: Safety]
+    S2 --> S3[Phase 3: tool-routing — deterministic]
+    S3 --> S4[Phase 4: execution — tool-use deep loop]
+    S4 --> S5[Phase 5: Validation]
+    S5 --> S6[Phase 6: Output]
+    S6 --> End([Output])
 
     style S2 fill:#ffeaa7,stroke:#fdcb6e
-    style S7 fill:#dfe6e9,stroke:#b2bec3
+    style S4 fill:#dfe6e9,stroke:#b2bec3
 ```
 
-| # | Phase | LLM Call | Key Output |
-|---|-------|----------|------------|
-| 1 | Session Management | No | Session context loaded |
-| 2 | Minimum Safety Check | No | Pass / reject |
-| 3 | Intent Analysis | **Yes** | `IntentResult` (simple/complex, context relevance) |
-| 4 | Pre-Check | No | Resource availability, deep safety validation |
-| 5 | Task Planning | No | `PlanningResult` with at least one task (`direct-answer` or `tool-use`) |
-| 6 | DAG Validation | No | Cycle detection, node integrity (deterministic) |
-| 7 | Sub-task Execution | Per sub-task | `TaskResult[]` (parallel where possible) |
-| 8 | Result Validation | No | `ValidationResult` with structured `ValidationOutcome`; semantic judge validation remains on the roadmap |
-| 9 | Output Normalization | No | `EngineOutput` (typed, with steps, metadata, artifacts) |
+| # | Phase | `EnginePhase` value | LLM Call | Key Output |
+|---|-------|----------------------|----------|------------|
+| 1 | Session | `session` | No | Session context loaded |
+| 2 | Safety | `safety` | No | Pass / reject, aggregated `violations[]` |
+| 3 | tool-routing | `tool-routing` | No (deterministic) | `ExecutionRoute` with exactly 1 task (`tool-use`, or an agent batch for explicit `@agent` mentions) |
+| 4 | Execution | `execution` | Yes, once per loop step | `ToolUseResult` (`terminalDraft`, tool observations, status) |
+| 5 | Validation | `validation` | Optional semantic judge | `ValidationResult` with structured `ValidationOutcome` |
+| 6 | Output | `output` | **No** | `EngineOutput` (typed, with steps, metadata, artifacts) |
+
+These 6 values are the full `EnginePhase` union (`packages/core/src/types/io.ts`); there is no phase 7–9 anymore. `intent.ts` / `precheck.ts` / `planning.ts` / `graph-check.ts` / `direct-answer.ts` and their standalone tests have been physically deleted.
 
 **Key pipeline properties:**
 
-- **Full-path safety gating** — Phase 2 runs on every request, including fast-path simple responses
-- **Context guard** — Phase 3 decides whether session history is relevant; irrelevant history is not forwarded
-- **Three-strikes limit** — Task-level retries are bounded at 3 (configurable); system-level retries at 2
-- **Last-message-wins** — A new request on the same session cancels the current execution via `AbortController`
+- **Full-path safety gating** — Phase 2 runs on every request; there is no fast-path that skips it.
+- **No classification lane** — there is no `simple`/`complex` split anywhere; every request goes through the same 6 phases and the same loop.
+- **`turnStart` / `turnStop` guardrails** — pre-guard and post-guard checkpoints wrap the loop (see below), both fail-closed.
+- **Last-message-wins** — a new request on the same session cancels the current execution via `AbortController`.
+
+### Loop-lifecycle: 9 HookPoints, two semantics
+
+The old `HookPoint` union had 14 phase-named events, of which only one (`afterPlanning`) ever fired. ADR-0006 replaced it with **9 loop-lifecycle events**, each with a verified, tested fire site — `turnStart · preLLM · postLLM · preToolUse · postToolUse · turnStop · preSubagent · postSubagent · preCompact` (`packages/core/src/types/hooks.ts`).
+
+Every hook point carries one of two semantics:
+
+- **Guardrail** (`turnStart`, `turnStop`) — a symmetric pre-guard / post-guard checkpoint. A `Guardrail` (`packages/core/src/types/guardrail.ts`) returns `pass | block | degrade | annotate`, always fail-closed. `turnStart`'s built-in guard is the `SafetyModule` baseline; `turnStop`'s built-in guard is Result Validation. Hosts append more guards via `EngineDependencies.guardrails.{turnStart,turnStop}`. Guardrails never silently reformat a passing answer — reformatting is an explicit transform, not a guard's job.
+- **Free-mutation** (`preLLM`, `postLLM`, `preToolUse`, `postToolUse`, `preCompact`) — a host handler may `modify`/`replace` the conversation, response, or tool result. These are constrained by the **Engine Seatbelt**: after any mutation, `tool-use.ts` structurally re-validates the result (`applyConversationMutation`/`applyResponseMutation`) — a malformed mutation is discarded (with a `warning` event) rather than sent to the Provider, and `usage` always reflects the real Provider value regardless of mutation.
+
+`preSubagent` / `postSubagent` are a third, narrower category — audit-only checkpoints around subagent dispatch (see below); `preSubagent` can still `deny`/`abort` to prevent a dispatch.
+
+| HookPoint | Semantics | Fire site |
+|---|---|---|
+| `turnStart` | Guardrail (pre) | `engine.ts`, before Phase 1 (`session`) |
+| `preLLM` | Free-mutation | `tool-use.ts`, before each loop step's Provider call (also `engine.ts` for plan-preview approval when `planMode` is on) |
+| `postLLM` | Free-mutation | `tool-use.ts`, after each loop step's Provider response |
+| `preToolUse` | Free-mutation | `tool-use.ts`, before each tool call (unconditional; complements the existing conditional `onBeforeToolCall` approval callback) |
+| `postToolUse` | Free-mutation | `tool-use.ts`, after each tool call, success or failure |
+| `preCompact` | Free-mutation | `tool-use.ts`, when per-step estimated context exceeds `maxContextTokens * 0.85` |
+| `turnStop` | Guardrail (post) | `engine.ts`, after Phase 5 (`validation`), before Phase 6 (`output`) |
+| `preSubagent` | Audit / deny-only | `engine.ts`, inside `Engine.runSubAgent`, before spawning |
+| `postSubagent` | Audit-only | `engine.ts`, inside `Engine.runSubAgent`, after completion |
+
+Every `fire()` call unconditionally emits a `hook_fired` observability event (with `subscriberCount`/`registrarCount`), so even an unused hook point leaves an observable trace instead of silently doing nothing.
+
+### `dispatch_agent`: subagent dispatch
+
+The loop's LLM can decompose a read-only sub-task to a registered `agent` descriptor via a built-in Task-style tool, `dispatch_agent` (`tool-use.ts`, `AGENT_DISPATCH_TOOL_NAME`). Both this path and the deterministic `tool-routing`-produced `agent-batch` path (explicit `@agent` mention) share one implementation, `Engine.runSubAgent`:
+
+- **Single-Writer Rule** — `Engine.filterReadonlyToolNames` deterministically restricts a subagent's `availableTools` to descriptors with `sideEffect === "readonly"`; any tool name that can't be resolved in the registry is fail-closed excluded (never assumed read-only). All write access stays with the main loop.
+- **summary-only contract** — a subagent's `AgentRunResult` carries only an `output` + `evidence` summary, never the full sub-loop transcript.
+- **`maxDepth` default `1`** (`DEFAULT_SUBAGENT_DISPATCH_MAX_DEPTH`, `packages/core/src/engine/agents/types.ts`) — nested subagent spawning is disabled by default (configurable via `runtime.toolLoop.subagentDispatch.maxDepth`), aligning with Claude Code's Task tool depth discipline.
+- Zero new architectural surface — `dispatch_agent` is only exposed in the tool list when `ctx.dispatchAgent` is injected, `subagentDispatch.enabled !== false`, remaining depth allows it, and at least one `agent` descriptor is registered; otherwise it is omitted from the tool schema rather than exposed and failing at call time.
+- `preSubagent` / `postSubagent` fire identically for both dispatch paths since both funnel through `Engine.runSubAgent`.
 
 ### Pipeline orchestration (`Engine.runStream`)
 
-Phases 1–4 always run once per user turn. Phases 5–8 sit inside an optional **turn-level retry loop** (`runtime.maxTurnRetries`, default `0`). Between Phase 6 and Phase 7 the engine also runs **prompt assembly** (not a numbered phase, but on the critical path). Between Phase 7 and Phase 8 it runs **candidate-answer synthesis** so Result Validation can judge claims against evidence before Output renders anything.
+Phases 1–3 (`session`, `safety`, `tool-routing`) run once to set up the turn. Phases 4–5 (`execution`, `validation`) sit inside an optional **turn-level retry loop** (`runtime.maxTurnRetries`, default `0` — the do-while runs exactly once at the default). Between `tool-routing` and `execution` the engine runs **prompt assembly** (not a numbered phase, but on the critical path). Between `execution` and `validation` it runs a now-**deterministic** candidate-answer synthesis step — `terminalDraft` (already written by the loop under the full assembled prompt) is promoted directly to the candidate answer, with no independent "final-answer" LLM rewrite.
 
 ```mermaid
 sequenceDiagram
     participant Host as Host / CLI
     participant Eng as Engine.runStream
-    participant P as Phases 1-4
+    participant P as Phases 1-3
     participant Retry as Turn retry loop
     participant Asm as Prompt assembly
-    participant CA as Candidate answer
+    participant CA as Candidate answer (deterministic)
     participant Mem as MemorySystem
 
     Host->>Eng: InputEnvelope + ExecutionContext
-    Eng->>P: session, safety, intent, precheck
+    Eng->>Eng: fire turnStart guardrail
+    Eng->>P: session, safety, tool-routing
     loop Each turn attempt
-        Eng->>Retry: planning, graph-check
         Eng->>Asm: context budget + PromptAssembler
-        Eng->>Retry: execution sub-flows
-        Eng->>CA: evidence + CandidateAnswer
+        Eng->>Retry: execution (tool-use deep loop)
+        Eng->>CA: promote terminalDraft + evidence
         Eng->>Retry: validation
         alt outcome retry and retries left
-            Retry-->>Eng: continue to planning
+            Retry-->>Eng: continue to tool-routing
         else pass degrade handoff or exhausted
             Retry-->>Eng: exit retry loop
         end
     end
+    Eng->>Eng: fire turnStop guardrail
     Eng->>Eng: output normalization
     Eng->>Mem: append assistant message
     Eng-->>Host: StreamChunk done + EngineOutput
 ```
 
-Implementation entry points: orchestrator in `packages/core/src/engine/engine.ts`; one module per numbered phase under `packages/core/src/engine/phases/`; built-in sub-flows in `packages/core/src/engine/subflows/`.
+Implementation entry points: orchestrator in `packages/core/src/engine/engine.ts`; one module per numbered phase under `packages/core/src/engine/phases/`; the single built-in sub-flow (`tool-use`) in `packages/core/src/engine/subflows/`.
 
 ### Phase-by-phase implementation
 
-Each subsection maps to a **deep module** in `@tachu/core`: a small typed interface (`run*Phase`) with most behaviour behind it. Every phase emits `phase_enter` / `phase_exit` observability events and updates `RuntimeState.currentPhase`.
+Each subsection maps to a **deep module** in `@tachu/core`. Every phase emits `phase_enter` / `phase_exit` observability events and updates `RuntimeState.currentPhase`; these event *types* are unchanged from the 9-phase era, they now simply bound the 6 current phases instead of 9. Fine-grained progress inside the loop uses separate, flatter per-step events (`tool_loop_step_*` / `tool_call_*` / `llm_call_*` / `hook_fired`) rather than phase boundaries.
 
-#### Phase 1 — Session Management
+#### Phase 1 — Session
 
 | | |
 |---|---|
 | **Module** | `packages/core/src/engine/phases/session.ts` |
 | **LLM** | No |
 | **Input → Output** | `InputEnvelope` → `{ input, context }` with session + memory hydrated |
-
-```mermaid
-sequenceDiagram
-    participant S as runSessionPhase
-    participant SM as SessionManager
-    participant M as MemorySystem
-    participant R as RuntimeState
-
-    S->>SM: resolve(sessionId)
-    S->>M: load(sessionId)
-    S->>M: append(user turn)
-    S->>R: currentPhase = session
-```
 
 Steps:
 
@@ -160,7 +202,7 @@ Steps:
 3. Append the current user message as a memory entry (crash-safe append-before-process).
 4. Return unchanged `input` and `context` for downstream phases.
 
-#### Phase 2 — Minimum Safety Check
+#### Phase 2 — Safety
 
 | | |
 |---|---|
@@ -168,211 +210,104 @@ Steps:
 | **LLM** | No |
 | **Input → Output** | `{ input, context }` → same + aggregated `violations[]` |
 
-```mermaid
-sequenceDiagram
-    participant S as runSafetyPhase
-    participant Baseline as SafetyModule.checkBaseline
-    participant Biz as SafetyModule.checkBusiness
-
-    S->>Baseline: input + context
-    Note over Baseline: size / recursion / budget / workspace — error → throw
-    S->>Biz: input + context, scope "safety"
-    Note over Biz: business policies — error → throw; warning → collect
-    S-->>S: violations = baseline ∪ business warnings
-```
-
 Steps:
 
 1. **Fail-closed baseline** — input size, recursion depth, budget headroom, workspace root; prompt-injection patterns emit warnings only.
 2. **Business policies** — registered via `SafetyModule.registerPolicy`; fatal violations throw, warnings are forwarded.
-3. Every request path passes Phase 2, including `simple` fast paths.
+3. Immediately after this phase, the `turnStart` guardrail runs: the built-in guard maps these `violations` to `annotate`/`degrade`/`block`, and any host guards appended via `EngineDependencies.guardrails.turnStart` run next, fail-closed.
 
-#### Phase 3 — Intent Analysis
-
-| | |
-|---|---|
-| **Module** | `packages/core/src/engine/phases/intent.ts` |
-| **LLM** | **Yes** (`capabilityMapping.intent`, always) — multimodal input is reduced to lightweight `[Image #N]` / `[File #N]` placeholder tokens (zero-materialization), so intent never routes to `vision` and never receives base64 |
-| **Host** | To consume opaque resource refs, register a `MultimodalResolver.resolveResources(refs, ctx)` on `EngineDependencies`; refs are materialized **on demand at the provider boundary** (not at intent), inline `data:`/`http(s):` images are carried without the resolver, and multi-turn fidelity holds for sessions **created on this version onward**. Optionally inject `resourceDemandRouter` to drive **token-level on-demand materialization** (which refs each model/tool call expands); default keeps full fidelity |
-| **Input → Output** | `SafetyPhaseOutput` → same + `IntentResult` |
-
-`IntentResult = { complexity, intent, contextRelevance, relevantContext?, textToImage? }`. Phase 3 is **classification only** — it never produces the final user-facing answer.
-
-```mermaid
-flowchart TD
-    Start([User input]) --> T2I{explicit text-to-image}
-    T2I -->|yes| OutSimple[complexity simple, textToImage]
-    T2I -->|no| ToolM{explicit tool mention}
-    ToolM -->|yes| OutComplex[complexity complex]
-    ToolM -->|no| StrongC{strong complex marker}
-    StrongC -->|yes| OutComplex
-    StrongC -->|no| StrongS{short strong simple marker}
-    StrongS -->|yes| OutSimple2[complexity simple]
-    StrongS -->|no| LLM[LLM JSON classify]
-    LLM -->|parsed| Guard{simple but strong complex}
-    Guard -->|yes| OutComplex
-    Guard -->|no| Done([IntentResult])
-    LLM -->|failed| Heur[keyword heuristic fallback]
-    Heur --> Done
-    OutSimple --> Done
-    OutSimple2 --> Done
-    OutComplex --> Done
-```
-
-Steps:
-
-1. **Fast paths** (no LLM): CLI `/draw` or `metadata.explicitTextToImage`; `@tool` name match; URL/path/command/realtime **strong complex** regex; short **strong simple** regex (≤ 40 chars).
-2. **LLM path**: `INTENT_SYSTEM_PROMPT_BASE` in `intent.ts` (4 embedded JSON examples; optional `config.intent.fewShotExamples`) + up to 10 recent memory entries + current turn → `ProviderAdapter.chat` with composed timeout; parse strict JSON (fenced / embedded tolerant).
-3. **Degrade gracefully**: provider missing, timeout, or parse failure → keyword heuristic; budget exhaustion → throw (no silent fallback).
-4. **Post-guard**: if LLM returns `simple` but input contains strong complex signals, force upgrade to `complex`.
-5. Optional `textToImage` flag is written to input metadata for Phase 5 routing.
-
-#### Phase 4 — Pre-Check
+#### Phase 3 — tool-routing
 
 | | |
 |---|---|
-| **Module** | `packages/core/src/engine/phases/precheck.ts` |
-| **LLM** | No |
-| **Input → Output** | `PrecheckPhaseOutput` (pass-through) |
+| **Module** | `packages/core/src/engine/phases/tool-routing.ts` |
+| **LLM** | **No** — fully deterministic |
+| **Input → Output** | `SafetyPhaseOutput` → same + `ExecutionRoute` with `tasks.length === 1` |
 
-Steps:
+See "Deep Single Loop + tool-routing" above for the full routing algorithm. On a turn retry, `tool-routing` emits a `previous-attempt-injected` observability event when `PhaseEnvironment.previousAttempt` is set — purely diagnostic, since routing itself never changes shape based on prior attempts.
 
-1. If `metadata.textToImage`, verify `text-to-image` capability provider is registered.
-2. For each backbone capability (`intent`, and `planning` / `validation` / `output` when configured in `capabilityMapping`), resolve route and assert provider exists.
-3. Throws `ProviderError.unavailable` early instead of failing mid-execution.
+#### Between tool-routing and execution — Prompt assembly (engine-internal)
 
-#### Phase 5 — Planning Router
-
-| | |
-|---|---|
-| **Module** | `packages/core/src/engine/phases/planning.ts` |
-| **LLM** | No (deterministic router) |
-| **Input → Output** | `PrecheckPhaseOutput` → same + `PlanningResult` with `plans[0].tasks.length ≥ 1` |
-
-```mermaid
-flowchart TD
-    Start([IntentResult and visible tools]) --> AgentM{agent mentioned}
-    AgentM -->|yes| ATasks[agent task batch]
-    AgentM -->|no| ETool{explicit tool names}
-    ETool -->|yes| TU1[task-tool-use]
-    ETool -->|no| T2I{text-to-image}
-    T2I -->|yes, image tool| TU2[task-tool-use image.qwen]
-    T2I -->|yes, no tool| DA1[task-direct-answer textToImage]
-    T2I -->|no| Simple{complexity simple}
-    Simple -->|yes| DA2[task-direct-answer]
-    Simple -->|no| Tools{visible tools}
-    Tools -->|yes| TU3[task-tool-use]
-    Tools -->|no| DA3[direct-answer with warn]
-    ATasks --> Guard[ensureNonEmptyTasks]
-    TU1 --> Guard
-    TU2 --> Guard
-    DA1 --> Guard
-    DA2 --> Guard
-    TU3 --> Guard
-    DA3 --> Guard
-    Guard --> Plan([PlanningResult])
-```
-
-Steps:
-
-1. **Tool activation**: `ToolActivator` scores registry tools (+ `scope.additionalTools`) into `visibleTools` / `matchedToolNames`.
-2. **Routing priority**: explicit agent mentions → agent tasks; explicit tool mentions → single `tool-use` task with pinned tools; text-to-image → `tool-use` with `image.qwen` or `direct-answer`; `simple` → `direct-answer`; `complex` + tools → `tool-use` (optional `run-shell`-only limit for “current time” queries); `complex` + no tools → `direct-answer` with `warn: true`.
-3. Build a single ranked plan with linear `edges` between tasks.
-4. On turn retry, emit `previous-attempt-injected` when `PhaseEnvironment.previousAttempt` is set.
-5. **Post-guard** `ensureNonEmptyTasks`: empty list → forced `direct-answer` fallback.
-
-#### Phase 6 — DAG Validation
-
-| | |
-|---|---|
-| **Module** | `packages/core/src/engine/phases/graph-check.ts` |
-| **LLM** | No |
-| **Input → Output** | `GraphCheckPhaseOutput` (validated plan) |
-
-Steps:
-
-1. Assert `plans[0]` exists.
-2. For each `tool` / `agent` task node, verify descriptor exists in `DescriptorRegistry`.
-3. Run `topologicalSort(tasks, edges)` — cycle or missing node → `PlanningError.invalidPlan`.
-
-#### Between Phase 6 and Phase 7 — Prompt assembly (engine-internal)
-
-Not a numbered phase, but every non–text-to-image run executes this block in `engine.ts` before `runExecutionPhase`:
+Not a numbered phase, but the engine always runs this block in `engine.ts` before `execution`:
 
 1. **Context distribution** — slice rules/constraints per task via `ContextDistributor`.
 2. **Context budget** — `ContextBudgetBroker` may trim, compress, chunk, degrade, or reject; emits `context_budget` events.
-3. **Skill recall** — sticky + semantic candidate strategies resolve active skills for this turn.
+3. **Skill recall** — sticky + semantic candidate strategies resolve active skills for this turn (once per turn; further discovery happens inside the loop via `load_skill`/`search_skills`).
 4. **PromptAssembler** — KV-cache-friendly ordering: hard rules → skills → tool schemas → history + recall + current input; respects `trimOrder` from budget broker.
-5. Result stored in `activeRunPrompts` and passed into `direct-answer` / `tool-use` sub-flows as `prebuiltPrompt`.
+5. Result stored in `activeRunPrompts` and passed into the `tool-use` sub-flow as `prebuiltPrompt`.
 
-#### Phase 7 — Sub-task Execution
+#### Phase 4 — Execution (`tool-use` deep agentic loop)
 
 | | |
 |---|---|
-| **Module** | `packages/core/src/engine/phases/execution.ts` + `packages/core/src/engine/scheduler.ts` |
-| **LLM** | Per sub-flow (see below) |
-| **Input → Output** | `GraphCheckPhaseOutput` → `{ steps, taskResults, taskErrors }` |
+| **Module** | `packages/core/src/engine/phases/execution.ts` + `packages/core/src/engine/scheduler.ts` + `packages/core/src/engine/subflows/tool-use.ts` |
+| **LLM** | Once per loop step |
+| **Input → Output** | `ToolRoutingPhaseOutput` → `{ steps, taskResults, taskErrors }`, with `taskResults["task-tool-use"]` holding a `ToolUseResult` |
 
 ```mermaid
 sequenceDiagram
     participant E as runExecutionPhase
     participant Sch as TaskScheduler
-    participant DA as direct-answer sub-flow
     participant TU as tool-use sub-flow
-    participant Ag as Agent runtime
+    participant Ag as Agent runtime (dispatch_agent)
 
     E->>Sch: execute(plan, context)
-    alt task-direct-answer
-        Sch->>DA: prebuiltPrompt + intent prompt
-        DA->>DA: Provider.chat (Markdown reply)
-        DA-->>Sch: string
-    else task-tool-use
-        Sch->>TU: prebuiltPrompt + tool schemas
-        loop Until answer or budget
-            TU->>TU: LLM + tool_calls
-            TU->>TU: gate → execute → append observation
+    Sch->>TU: prebuiltPrompt + tool schemas
+    loop Until terminal draft or budget
+        TU->>TU: preLLM → Provider.chat → postLLM
+        alt has tool_calls
+            TU->>TU: preToolUse → gate → execute (or dispatch_agent) → postToolUse
+            TU->>Ag: dispatch_agent (optional, readonly, maxDepth 1)
+            Ag-->>TU: summary-only AgentRunResult
+            TU->>TU: append observation, preCompact if over threshold
+        else no tool_calls
+            TU->>TU: terminalDraft = candidate answer text
         end
-        TU-->>Sch: ToolUseResult
-    else agent tasks
-        Sch->>Ag: objective
-        Ag-->>Sch: agent-run-result
     end
+    TU-->>Sch: ToolUseResult
     Sch-->>E: StepStatus[] + taskResults map
 ```
 
-Built-in sub-flows (`packages/core/src/engine/subflows/`):
+Only one built-in sub-flow remains registered in `InternalSubflowRegistry` (`packages/core/src/engine/subflows/registry.ts`):
 
 | Task ID | Ref | Behaviour |
 |---------|-----|-----------|
-| `task-direct-answer` | `direct-answer` | Uses assembled prompt; routes `intent` → `fast-cheap`; 60 s timeout; Markdown-only reply; `warn: true` adds honest “no matching tool” disclaimer |
-| `task-tool-use` | `tool-use` | Agentic loop: LLM ↔ execution gate (scopes / approval / sandbox) ↔ tool executor; max steps from `toolLoop.maxSteps`; streams loop events to host |
-| `task-agent-*` | registered agent | `DefaultAgentRuntimeAdapter` single LLM call; full tool loop remains on the roadmap |
+| `task-tool-use` | `tool-use` | Deep agentic loop: LLM ↔ execution gate (scopes / approval / sandbox) ↔ tool executor ↔ optional `dispatch_agent`; max steps from `runtime.toolLoop.maxSteps` (default 25); a no-tool-call step naturally produces the final plain-text answer (subsuming the deleted `direct-answer` sub-flow); streams loop events to host |
+| `task-agent-*` | registered agent | `DefaultAgentRuntimeAdapter`, shares `Engine.runSubAgent` with `dispatch_agent` |
 
-The scheduler honours `runtime.maxConcurrency`, `defaultTaskTimeoutMs`, `failFast`, and propagates `AbortSignal`.
+Absorbed from the deleted `direct-answer` sub-flow, now living inside `tool-use.ts`:
 
-#### Candidate answer synthesis (between Phase 7 and Phase 8)
+- **Media / image passthrough** — `onGeneratedImages` / `onGeneratedMedia` fire whenever a loop step's Provider response carries generated images/media.
+- **No-empty-promise guard** — a mandatory clause in the loop's base system prompt (a deterministic, always-on constraint rather than a dynamic rule, to avoid rule-matching overhead).
+- **`shortTaskRoute` cheap route** — when `runtime.toolLoop.shortTaskRoute.enabled` and the turn looks like a short single-tool task (few tool names, short prompt), the loop tries a cheaper capability (typically `fast-cheap`) before falling back to the default `high-reasoning → fast-cheap` chain.
+
+The scheduler honours `runtime.maxConcurrency`, `defaultTaskTimeoutMs`, `failFast`, and propagates `AbortSignal` into every Provider call and tool execution inside the loop.
+
+#### Between execution and validation — Candidate answer synthesis (deterministic)
 
 | | |
 |---|---|
 | **Module** | `packages/core/src/engine/phases/candidate-answer.ts` |
-| **LLM** | Optional — tool-use path may call LLM once to polish observations into a **Candidate Answer** |
-| **Purpose** | Build `{ content, claims, evidence }` for Result Validation; Output Phase must not invent new completed claims ([CONTEXT.md](../../CONTEXT.md)) |
+| **LLM** | **No** — no independent "final answer writer" call anymore |
+| **Purpose** | Build `{ content, claims, evidence }` for Result Validation |
 
 Steps:
 
 1. **Collect evidence** — tool observations, agent-run evidence, file-write records, external-source refs (descriptor-grounded, not keyword regex).
-2. **`direct-answer` path** — promote sub-flow string output as candidate (claims empty; validation is lighter).
-3. **`tool-use` path** — LLM “final answer writer” over observations + terminal draft; on failure, deterministic local fallback text.
-4. **`agent` path** — Markdown synthesis of agent outputs.
-5. Streaming: `onFinalAnswerDelta` feeds host before validation completes.
+2. **`tool-use` path** — when `ToolUseResult.status === "ready_for_output"`, `terminalDraft` (already written by the loop under the full `prebuiltPrompt`) is promoted verbatim as candidate content; any other status yields empty content, so `validation`'s deterministic `tool-use.status` rule can honestly flag the failure instead of a synthesized narrative papering over it.
+3. **`agent` path** — Markdown synthesis of agent outputs, when the plan resolved to an `agent-batch`.
 
-#### Phase 8 — Result Validation
+This removes the historical "final-answer writer" LLM call that used to run over a thin system prompt (a source of format drift against the loop's own rules/skills-aware system prompt) — the candidate answer is now exactly what the loop itself produced.
+
+#### Phase 5 — Validation
 
 | | |
 |---|---|
 | **Module** | `packages/core/src/engine/phases/validation/phase.ts` |
 | **LLM** | Optional semantic judge when `validation.policyMode` is `always` or `auto` (and adapter registered) |
 | **Input → Output** | `CandidateAnswerPhaseOutput` → same + `ValidationResult` with `ValidationOutcome` |
+
+Result Validation is the built-in **`turnStop` guardrail** — validation itself stays a phase producing structured findings, but its outcome now flows into the same `GuardrailDecision` (`pass | block | degrade | annotate`) vocabulary used at `turnStart`.
 
 ```mermaid
 flowchart LR
@@ -382,27 +317,30 @@ flowchart LR
     Judge -->|no| Reduce
     Merge --> Reduce[reduceOutcome]
     Reduce --> Pass[pass]
-    Reduce --> Retry[retry → next-plan / tool-loop-finalize]
+    Reduce --> Retry[retry → retry-turn / tool-loop-finalize]
     Reduce --> Degrade[degrade]
     Reduce --> Handoff[handoff]
+    Pass --> Guard[turnStop guardrail: pass]
+    Degrade --> GuardD[turnStop guardrail: degrade]
+    Handoff --> GuardB[turnStop guardrail: block]
+    Retry -.turn-level retry, not a guardrail outcome.-> RetryLoop[back to tool-routing]
 ```
 
 Steps:
 
-1. Run deterministic rules (`evidence-required`, execution failures, output length budget, …) via `ValidationRuleRegistry`.
+1. Run deterministic rules via `ValidationRuleRegistry` (`policyMode` default `deterministic-only`).
 2. Build `ValidationSignals` — uses descriptor `sideEffect` for write detection (not step-name regex).
-3. Optionally invoke `SemanticJudgeAdapter` under budget when policy allows.
-4. `reduceOutcome` → `pass` / `retry` / `degrade` / `handoff`.
-5. **Turn retry** (`runtime.maxTurnRetries > 0`): on `retry` + `target=next-plan`, engine loops back to Phase 5 with `previousAttempt` injected; tool-loop partial retries target `tool-loop-finalize` inside the sub-flow.
+3. Optionally invoke `SemanticJudgeAdapter` under budget when policy allows and signals warrant it.
+4. `reduceOutcome` → `pass` / `retry` (`target: retry-turn | tool-loop-finalize`) / `degrade` / `handoff`.
+5. **Turn retry** (`runtime.maxTurnRetries > 0`, via `decideTurnRetry`): on `retry` + `target=retry-turn`, the engine loops back to `tool-routing` with `previousAttempt` injected.
+6. **`turnStop` guardrail**: `handoff → block`, `degrade → degrade`, `pass`/`retry → pass` (retry is a turn-level concern, not part of the guardrail vocabulary); `block` rejects delivery, `degrade`/`annotate` prefix the final content.
 
-Current rc.0 maturity: five deterministic rules, turn retry, and degrade/handoff exit paths are wired; optional semantic judge remains partial. **Runtime provider fallback** (automatic switch on `ProviderError`) is **not implemented** and planned for **v1.x+**; see [Project Status](../../README.md#project-status).
-
-#### Phase 9 — Output Normalization
+#### Phase 6 — Output
 
 | | |
 |---|---|
 | **Module** | `packages/core/src/engine/phases/output.ts` |
-| **LLM** | **No** (no post-validation LLM calls) |
+| **LLM** | **No** (no post-validation LLM calls, ever) |
 | **Input → Output** | `ValidationPhaseOutput` → `EngineOutput` |
 
 Content selection priority:
@@ -411,8 +349,8 @@ Content selection priority:
 2. Validation passing + agent results only → agent synthesis text.
 3. Validation passing + no natural-language candidate → structured JSON `{ intent, taskResults }` (tool-only paths).
 4. Validation failing + partial tool-use candidate → local tool-observation fallback text.
-5. Otherwise → deterministic `ensureFallbackText()` template (≥ 30 chars, no internal terms).
+5. Otherwise → `ensureFallbackText()`, which **always** returns a local, deterministic template (≥ 30 chars, no internal terms) — it never calls an LLM, even as a best-effort attempt. If a friendlier LLM-authored fallback is ever wanted, it must be synthesized *before* `validation` as part of the `CandidateAnswer` so `validation`/`turnStop` can judge it like any other answer, not injected after failure has already been declared.
 
-After Phase 9: engine appends the assistant message to `MemorySystem`, then yields `done` with token usage, steps, tool-call records, and optional `generatedImages` / `generatedMedia` metadata.
+After Phase 6: engine appends the assistant message to `MemorySystem`, then yields `done` with token usage, steps, tool-call records, and optional `generatedImages` / `generatedMedia` metadata.
 
 ---

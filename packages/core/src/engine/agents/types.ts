@@ -95,6 +95,44 @@ export interface AgentRuntimeAdapter {
   ): Promise<AgentRunResult>;
 }
 
+/**
+ * loop 内 LLM 自决派发 sub-agent 的入参(ADR-0006 D6:内置 Task-style 工具)。
+ *
+ * 与 {@link AgentInvocation} 的区别:后者是 runtime 内部已装配好 context/budget/
+ * constraints 的完整调用信封;本类型是**工具调用参数**这一薄外层，由
+ * `Engine.runSubAgent` 负责补全 envelope 后再转交 runtime。
+ */
+export interface AgentDispatchParams {
+  agentName: string;
+  objective: string;
+  input?: Record<string, unknown> | undefined;
+}
+
+/** {@link AgentRunResult} 附加 `agent` 名称，便于工具调用侧序列化时无需闭包捕获。 */
+export type AgentDispatchOutcome = AgentRunResult & { agent: string };
+
+/**
+ * `dispatch_agent` 内置工具的执行入口签名。
+ *
+ * 由 Engine 侧注入进 `ToolUseContext`/`InternalSubflowContext`；闭包内部携带
+ * registry / router / agent runtime 等 tool-use 子流程本身拿不到的依赖，并按
+ * 派发深度(`agentDispatchDepth`)与 `runtime.toolLoop.subagentDispatch.maxDepth`
+ * 做 fail-closed 校验。
+ */
+export type AgentDispatchFn = (
+  params: AgentDispatchParams,
+  signal: AbortSignal,
+) => Promise<AgentDispatchOutcome>;
+
+/**
+ * `runtime.toolLoop.subagentDispatch.maxDepth` 未配置时的默认值(ADR-0006 D6)。
+ *
+ * 唯一权威定义，由 `Engine.resolveAgentDispatchMaxDepth`(深度闸门写入
+ * `AgentRunConstraints.maxDepth`)与 `tool-use.ts` 的 `resolveAgentDispatchMaxDepth`
+ * (决定是否在工具列表暴露 `dispatch_agent`)共同引用，避免同一语义值在两处漂移。
+ */
+export const DEFAULT_SUBAGENT_DISPATCH_MAX_DEPTH = 1;
+
 export interface AgentRuntimeOptions {
   providers: Map<string, import("../../modules/provider").ProviderAdapter>;
   route: ModelRoute;

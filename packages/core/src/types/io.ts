@@ -1,6 +1,6 @@
 import type { EngineError } from "../errors/engine-error";
 import type { ExecutionCorrelation, ExecutionSubject } from "./context";
-import type { RankedPlan } from "./result";
+import type { ExecutionRoute } from "./result";
 import type { TurnPolicy } from "./turn-policy";
 
 /**
@@ -76,7 +76,7 @@ export interface ToolCallRecord {
  * 文生图 / 图像编辑产物。
  *
  * Provider Adapter 在文生图类响应上返回结构化列表（`ChatResponse.images`），
- * 由 `direct-answer` Sub-flow 透传到引擎主干，最终出现在
+ * 由 `tool-use` Sub-flow 透传到引擎主干，最终出现在
  * {@link OutputMetadata.generatedImages}。CLI / 宿主据此可：
  * 1. 下载 URL 并持久化到本地（`tachu run --save-image <path>`、`/draw ... --save <path>`）
  * 2. 渲染图片缩略图 / 结构化卡片
@@ -361,8 +361,15 @@ export interface UsageChunk {
 }
 
 /**
- * 引擎 9 阶段（session / safety / intent / precheck / planning / graph-check /
- * execution / validation / output）枚举。
+ * 引擎 6 阶段（session / safety / tool-routing / execution / validation /
+ * output）枚举。
+ *
+ * ADR-0006 落地后，原 `intent / precheck / planning / graph-check` 四个死
+ * phase 点已塌陷合并为单一确定性的 `tool-routing`（详见
+ * `engine/phases/tool-routing.ts`）；真正的意图判断/工具选择决策权交还给
+ * `tool-use` 深单 loop 内的 LLM 本身，通过 `preLLM`/`postLLM`/`preToolUse`/
+ * `postToolUse` 等 loop-lifecycle hook 点（见 `types/hooks.ts`）挂载，而非
+ * 靠额外的分类 phase 猜测。
  *
  * 用于 `phase-enter` / `phase-exit` 顶层 StreamChunk 的结构化标签，替代
  * `progress` chunk 上靠 `message` 后缀（`"${phase} started"`）判 START/END
@@ -371,16 +378,13 @@ export interface UsageChunk {
 export type EnginePhase =
   | "session"
   | "safety"
-  | "intent"
-  | "precheck"
-  | "planning"
-  | "graph-check"
+  | "tool-routing"
   | "execution"
   | "validation"
   | "output";
 
 /**
- * 阶段进入事件：tachu engine 在每个 9 阶段开始时 yield 一次。
+ * 阶段进入事件：tachu engine 在每个 6 阶段开始时 yield 一次。
  *
  * 与现有 `progress` chunk 的关系：
  * - `progress` 保留：现有 CLI / 旧消费方按 message 文案展示
@@ -394,7 +398,7 @@ export interface PhaseEnterChunk {
 }
 
 /**
- * 阶段退出事件：tachu engine 在每个 9 阶段结束时 yield 一次。
+ * 阶段退出事件：tachu engine 在每个 6 阶段结束时 yield 一次。
  *
  * `ok=false` 仅在阶段函数抛错时由 `runStream` 的 catch 分支补发；正常完成时
  * `ok=true`。
@@ -444,7 +448,7 @@ export type StreamChunkPayload =
   | { type: "delta"; content: string }
   | { type: "artifact"; artifact: Artifact }
   | { type: "error"; error: EngineError }
-  | { type: "plan-preview"; phase: "planning"; plan: RankedPlan }
+  | { type: "plan-preview"; phase: "tool-routing"; route: ExecutionRoute }
   | PhaseEnterChunk
   | PhaseExitChunk
   | ReasoningDeltaChunk

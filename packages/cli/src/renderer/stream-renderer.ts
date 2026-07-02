@@ -16,10 +16,8 @@ import { Spinner } from "./spinner";
  */
 const CLI_INTERNAL_TERMS_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\btask-tool-\d+\b/gi, "某个内部步骤"],
-  [/\btask-direct-answer\b/gi, "兜底回答"],
   [/\btask-tool-use\b/gi, "工具循环"],
   [/\bPhase\s*\d+\b/gi, "执行阶段"],
-  [/direct-answer\s*子流程/gi, "兜底回答"],
   [/tool-use\s*子流程/gi, "工具循环"],
   [/capability\s*路由/gi, "能力路由"],
   [/Tool\s*\/\s*Agent\s*描述符/gi, "工具描述"],
@@ -110,7 +108,7 @@ export interface StreamRendererOptions {
  * - plan-preview → 蓝色
  * - error → 红色
  * - done → 蓝色
- * - delta/text → 白色直写
+ * - delta/tool-loop-delta/text → 白色直写
  *
  * @example
  * ```ts
@@ -176,7 +174,8 @@ export class StreamRenderer implements ChunkRenderer {
       case "usage": {
         break;
       }
-      case "delta": {
+      case "delta":
+      case "tool-loop-delta": {
         this.spinner.stop();
         this.streamedBody += chunk.content;
         process.stdout.write(chunk.content);
@@ -229,7 +228,7 @@ export class StreamRenderer implements ChunkRenderer {
       case "plan-preview": {
         this.spinner.stop();
         process.stdout.write(colorize(`\n── Plan Preview ──\n`, "blue"));
-        process.stdout.write(colorize(JSON.stringify(chunk.plan, null, 2) + "\n", "blue"));
+        process.stdout.write(colorize(JSON.stringify(chunk.route, null, 2) + "\n", "blue"));
         process.stdout.write(colorize(`──────────────────\n`, "blue"));
         break;
       }

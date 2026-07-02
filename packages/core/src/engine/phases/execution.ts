@@ -1,9 +1,9 @@
 import type { StepStatus } from "../../types";
 import type { TaskExecutionError } from "../scheduler";
-import type { GraphCheckPhaseOutput } from "./graph-check";
+import type { ToolRoutingPhaseOutput } from "./tool-routing";
 import type { PhaseEnvironment } from "./index";
 
-export interface ExecutionPhaseOutput extends GraphCheckPhaseOutput {
+export interface ExecutionPhaseOutput extends ToolRoutingPhaseOutput {
   steps: StepStatus[];
   taskResults: Record<string, unknown>;
   taskErrors: Record<string, TaskExecutionError>;
@@ -13,7 +13,7 @@ export interface ExecutionPhaseOutput extends GraphCheckPhaseOutput {
  * 阶段 7：任务调度执行。
  */
 export const runExecutionPhase = async (
-  state: GraphCheckPhaseOutput,
+  state: ToolRoutingPhaseOutput,
   env: PhaseEnvironment,
   onTaskResult?: (result: {
     taskId: string;
@@ -24,12 +24,12 @@ export const runExecutionPhase = async (
     error?: { code: string; message: string; retryable: boolean; source: string } | undefined;
   }) => void,
 ): Promise<ExecutionPhaseOutput> => {
-  const plan = state.planning.plans[0]!;
+  const route = state.route;
   const steps: StepStatus[] = [];
   const taskResults: Record<string, unknown> = {};
   const taskErrors: Record<string, TaskExecutionError> = {};
 
-  for await (const result of env.scheduler.execute(plan, state.context, {
+  for await (const result of env.scheduler.execute(route, state.context, {
     abortSignal: env.activeAbortSignal,
     maxConcurrency: env.config.runtime.maxConcurrency,
     taskTimeoutMs: env.config.runtime.defaultTaskTimeoutMs,
@@ -56,8 +56,8 @@ export const runExecutionPhase = async (
     }
     onTaskResult?.({
       taskId: result.taskId,
-      taskType: plan.tasks.find((task) => task.id === result.taskId)?.type ?? "unknown",
-      taskRef: plan.tasks.find((task) => task.id === result.taskId)?.ref ?? result.taskId,
+      taskType: route.tasks.find((task) => task.id === result.taskId)?.type ?? "unknown",
+      taskRef: route.tasks.find((task) => task.id === result.taskId)?.ref ?? result.taskId,
       status: result.status,
       output: result.output,
       ...(result.error !== undefined ? { error: result.error } : {}),

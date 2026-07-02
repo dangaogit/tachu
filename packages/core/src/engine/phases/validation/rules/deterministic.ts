@@ -137,7 +137,7 @@ export const structuredOutputViolationRule: ValidationRule = {
   kind: "deterministic",
   evaluate(ctx: ValidationRuleContext) {
     const findings: ValidationFinding[] = [];
-    for (const task of ctx.plan.tasks) {
+    for (const task of ctx.route.tasks) {
       if (task.type !== "tool") continue;
       const getLatest = (ctx.registry as { getLatest?: (kind: string, name: string) => unknown }).getLatest;
       if (typeof getLatest !== "function") continue;

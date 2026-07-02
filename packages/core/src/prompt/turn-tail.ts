@@ -74,8 +74,8 @@ const partEqual = (a: MessageContentPart, b: MessageContentPart): boolean => {
  *
  * ## 为什么需要这个
  *
- * `Session` 阶段会在 `assembler` 与下游 `intent` / `direct-answer` / `tool-use`
- * 读取 memory **之前**，把本轮 user 写入 memory（崩溃恢复语义）。这导致 memory
+ * `Session` 阶段会在 `assembler` 与下游 `tool-use` 读取 memory **之前**，
+ * 把本轮 user 写入 memory（崩溃恢复语义）。这导致 memory
  * load 出来的 `history` 末尾已经带着本轮 user，下游再 push 一次 `currentInput`
  * 就会产生**双发**。该函数把"剥尾"这条不变式收敛到唯一一处，三个调用点统一行为。
  */

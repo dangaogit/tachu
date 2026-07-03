@@ -9,6 +9,7 @@ import {
   requireValidDescriptorNameFormat,
   warnOnDescriptorIdentityMismatch,
   type AnyDescriptor,
+  type RuleActivation,
   type RuleDescriptor,
   type ToolDescriptor,
   type AgentDescriptor,
@@ -76,6 +77,27 @@ function resolveDescriptorKind(data: Record<string, unknown>): DescriptorKind {
     return "agent";
   }
   return "skill";
+}
+
+function parseRuleActivation(raw: unknown): RuleActivation {
+  if (!raw || typeof raw !== "object") {
+    return { mode: "always" };
+  }
+  const mode = (raw as { mode?: unknown }).mode;
+  if (mode === "always" || mode === "manual" || mode === "semantic") {
+    return { mode };
+  }
+  if (mode === "path") {
+    const globs = (raw as { globs?: unknown }).globs;
+    if (
+      Array.isArray(globs) &&
+      globs.length > 0 &&
+      globs.every((glob): glob is string => typeof glob === "string" && glob.length > 0)
+    ) {
+      return { mode: "path", globs: [...globs] };
+    }
+  }
+  return { mode: "always" };
 }
 
 /**
@@ -177,9 +199,7 @@ async function parseDescriptor(
       ...base,
       kind: "rule",
       type: type === "preference" ? "preference" : "rule",
-      scope: Array.isArray(data.scope)
-        ? data.scope.filter((s): s is RuleDescriptor["scope"][number] => typeof s === "string")
-        : ["*"],
+      activation: parseRuleActivation(data.activation),
       content,
     };
     return descriptor;

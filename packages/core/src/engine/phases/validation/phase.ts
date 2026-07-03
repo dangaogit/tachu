@@ -266,6 +266,24 @@ export const runValidationPhase = async (
     });
     findings = [...deterministicFindings, ...semanticFindings];
   }
+  if (env.hooks && typeof env.hooks.fire === "function") {
+    const findingAction = await env.hooks.fire("turnStop", {
+      point: "turnStop",
+      timestamp: Date.now(),
+      correlation: state.context.correlation,
+      ...(state.context.subject !== undefined ? { subject: state.context.subject } : {}),
+      data: {
+        candidateAnswer,
+        evidence,
+        route,
+        state: stateWithConfig,
+        findings,
+      },
+    });
+    if (findingAction?.type === "finding") {
+      findings = [...findings, ...findingAction.findings];
+    }
+  }
 
   const outcome = reduceOutcome(findings);
   const signals = buildSignals(

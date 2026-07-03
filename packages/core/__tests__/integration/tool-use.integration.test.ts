@@ -367,9 +367,9 @@ describe("engine integration: tool-use agentic loop", () => {
       expect(echoCall.success).toBe(true);
     }
 
- // 4. Observability：phase_enter / phase_exit + tool_call_start / tool_call_end
-    expect(events.some((e) => e.type === "phase_enter")).toBe(true);
-    expect(events.some((e) => e.type === "phase_exit")).toBe(true);
+ // 4. Observability：loop_step_enter / loop_step_exit + tool_call_start / tool_call_end
+    expect(events.some((e) => e.type === "loop_step_enter")).toBe(true);
+    expect(events.some((e) => e.type === "loop_step_exit")).toBe(true);
     expect(events.some((e) => e.type === "tool_call_start")).toBe(true);
     expect(events.some((e) => e.type === "tool_call_end")).toBe(true);
 

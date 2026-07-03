@@ -118,20 +118,20 @@ The old `HookPoint` union had 14 phase-named events, of which only one (`afterPl
 
 Every hook point carries one of two semantics:
 
-- **Guardrail** (`turnStart`, `turnStop`) — a symmetric pre-guard / post-guard checkpoint. A `Guardrail` (`packages/core/src/types/guardrail.ts`) returns `pass | block | degrade | annotate`, always fail-closed. `turnStart`'s built-in guard is the `SafetyModule` baseline; `turnStop`'s built-in guard is Result Validation. Hosts append more guards via `EngineDependencies.guardrails.{turnStart,turnStop}`. Guardrails never silently reformat a passing answer — reformatting is an explicit transform, not a guard's job.
-- **Free-mutation** (`preLLM`, `postLLM`, `preToolUse`, `postToolUse`, `preCompact`) — a host handler may `modify`/`replace` the conversation, response, or tool result. These are constrained by the **Engine Seatbelt**: after any mutation, `tool-use.ts` structurally re-validates the result (`applyConversationMutation`/`applyResponseMutation`) — a malformed mutation is discarded (with a `warning` event) rather than sent to the Provider, and `usage` always reflects the real Provider value regardless of mutation.
+- **Guard** (`turnStart`, `turnStop`) — pre/post guard checkpoints on the unified `HookAction` seam. Handlers return `{ type: "guard"; decision: pass | block | degrade | annotate }` (fail-closed) or `{ type: "finding"; findings }` (ValidationRule output). Built-in guards: `turnStart` = SafetyModule baseline; `turnStop` = Result Validation. Hosts append more guards via `hooks.register("turnStart" | "turnStop", ...)`. Guards never silently reformat a passing answer — reformatting is an explicit transform, not a guard's job.
+- **Free-mutation** (`preLLM`, `postLLM`, `preToolUse`, `postToolUse`, `preCompact`) — a host handler may return `{ type: "mutate"; data }` to rewrite the conversation, response, or tool result. These are constrained by the **Engine Seatbelt**: after any mutation, `tool-use.ts` structurally re-validates the result — a malformed mutation is discarded (with a `warning` event) rather than sent to the Provider, and `usage` always reflects the real Provider value regardless of mutation.
 
-`preSubagent` / `postSubagent` are a third, narrower category — audit-only checkpoints around subagent dispatch (see below); `preSubagent` can still `deny`/`abort` to prevent a dispatch.
+`preSubagent` / `postSubagent` are a third, narrower category — audit-only checkpoints around subagent dispatch (see below); `preSubagent` can still `deny` to prevent a dispatch.
 
 | HookPoint | Semantics | Fire site |
 |---|---|---|
-| `turnStart` | Guardrail (pre) | `engine.ts`, before Phase 1 (`session`) |
+| `turnStart` | Guard (pre) | `engine.ts`, before Phase 1 (`session`) |
 | `preLLM` | Free-mutation | `tool-use.ts`, before each loop step's Provider call (also `engine.ts` for plan-preview approval when `planMode` is on) |
 | `postLLM` | Free-mutation | `tool-use.ts`, after each loop step's Provider response |
 | `preToolUse` | Free-mutation | `tool-use.ts`, before each tool call (unconditional; complements the existing conditional `onBeforeToolCall` approval callback) |
 | `postToolUse` | Free-mutation | `tool-use.ts`, after each tool call, success or failure |
 | `preCompact` | Free-mutation | `tool-use.ts`, when per-step estimated context exceeds `maxContextTokens * 0.85` |
-| `turnStop` | Guardrail (post) | `engine.ts`, after Phase 5 (`validation`), before Phase 6 (`output`) |
+| `turnStop` | Guard (post) | `engine.ts`, after Phase 5 (`validation`), before Phase 6 (`output`) |
 | `preSubagent` | Audit / deny-only | `engine.ts`, inside `Engine.runSubAgent`, before spawning |
 | `postSubagent` | Audit-only | `engine.ts`, inside `Engine.runSubAgent`, after completion |
 
@@ -185,7 +185,7 @@ Implementation entry points: orchestrator in `packages/core/src/engine/engine.ts
 
 ### Phase-by-phase implementation
 
-Each subsection maps to a **deep module** in `@tachu/core`. Every phase emits `phase_enter` / `phase_exit` observability events and updates `RuntimeState.currentPhase`; these event *types* are unchanged from the 9-phase era, they now simply bound the 6 current phases instead of 9. Fine-grained progress inside the loop uses separate, flatter per-step events (`tool_loop_step_*` / `tool_call_*` / `llm_call_*` / `hook_fired`) rather than phase boundaries.
+Each subsection maps to a **deep module** in `@tachu/core`. Every phase emits `loop_step_enter` / `loop_step_exit` observability events (and structured `phase-enter` / `phase-exit` StreamChunks) and updates `RuntimeState.currentPhase`. Fine-grained progress inside the loop uses separate, flatter per-step events (`tool_loop_step_*` / `tool_call_*` / `llm_call_*` / `hook_fired`) rather than phase boundaries.
 
 #### Phase 1 — Session
 
@@ -214,7 +214,7 @@ Steps:
 
 1. **Fail-closed baseline** — input size, recursion depth, budget headroom, workspace root; prompt-injection patterns emit warnings only.
 2. **Business policies** — registered via `SafetyModule.registerPolicy`; fatal violations throw, warnings are forwarded.
-3. Immediately after this phase, the `turnStart` guardrail runs: the built-in guard maps these `violations` to `annotate`/`degrade`/`block`, and any host guards appended via `EngineDependencies.guardrails.turnStart` run next, fail-closed.
+3. Immediately after this phase, the `turnStart` guard runs: the built-in guard maps these `violations` to `annotate`/`degrade`/`block`, and any host guards registered via `hooks.register("turnStart", ...)` run next, fail-closed.
 
 #### Phase 3 — tool-routing
 
@@ -307,7 +307,7 @@ This removes the historical "final-answer writer" LLM call that used to run over
 | **LLM** | Optional semantic judge when `validation.policyMode` is `always` or `auto` (and adapter registered) |
 | **Input → Output** | `CandidateAnswerPhaseOutput` → same + `ValidationResult` with `ValidationOutcome` |
 
-Result Validation is the built-in **`turnStop` guardrail** — validation itself stays a phase producing structured findings, but its outcome now flows into the same `GuardrailDecision` (`pass | block | degrade | annotate`) vocabulary used at `turnStart`.
+Result Validation is the built-in **`turnStop` guard** — validation itself stays a phase producing structured findings, but its outcome flows into the same `HookGuardDecision` (`pass | block | degrade | annotate`) vocabulary used at `turnStart`.
 
 ```mermaid
 flowchart LR
@@ -320,10 +320,10 @@ flowchart LR
     Reduce --> Retry[retry → retry-turn / tool-loop-finalize]
     Reduce --> Degrade[degrade]
     Reduce --> Handoff[handoff]
-    Pass --> Guard[turnStop guardrail: pass]
-    Degrade --> GuardD[turnStop guardrail: degrade]
-    Handoff --> GuardB[turnStop guardrail: block]
-    Retry -.turn-level retry, not a guardrail outcome.-> RetryLoop[back to tool-routing]
+    Pass --> Guard[turnStop guard: pass]
+    Degrade --> GuardD[turnStop guard: degrade]
+    Handoff --> GuardB[turnStop guard: block]
+    Retry -.turn-level retry, not a guard outcome.-> RetryLoop[back to tool-routing]
 ```
 
 Steps:
@@ -333,7 +333,7 @@ Steps:
 3. Optionally invoke `SemanticJudgeAdapter` under budget when policy allows and signals warrant it.
 4. `reduceOutcome` → `pass` / `retry` (`target: retry-turn | tool-loop-finalize`) / `degrade` / `handoff`.
 5. **Turn retry** (`runtime.maxTurnRetries > 0`, via `decideTurnRetry`): on `retry` + `target=retry-turn`, the engine loops back to `tool-routing` with `previousAttempt` injected.
-6. **`turnStop` guardrail**: `handoff → block`, `degrade → degrade`, `pass`/`retry → pass` (retry is a turn-level concern, not part of the guardrail vocabulary); `block` rejects delivery, `degrade`/`annotate` prefix the final content.
+6. **`turnStop` guard**: `handoff → block`, `degrade → degrade`, `pass`/`retry → pass` (retry is a turn-level concern); `block` rejects delivery, `degrade`/`annotate` prefix the final content.
 
 #### Phase 6 — Output
 

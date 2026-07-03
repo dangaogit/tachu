@@ -3,7 +3,8 @@ kind: rule
 name: always-safe-output
 description: enforce safe output
 type: rule
-scope: [output]
+activation:
+  mode: always
 tags: [safety]
 ---
 

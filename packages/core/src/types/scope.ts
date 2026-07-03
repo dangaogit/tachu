@@ -56,20 +56,14 @@ export interface SessionScope {
  */
   toolRoutingDisabled?: boolean;
  /**
- * Per-turn agent context injected into the intent classifier so it can make
- * context-aware complexity decisions without hardcoded domain patterns.
- *
- * - `systemInstruction`: brief agent persona / capability summary (≤300 chars used)
- * - `tools`: name + one-line description of each tool available to this agent
- *
- * When present, the intent LLM sees a "### Agent Context" section describing
- * what the agent can do, enabling it to recognise tool-query questions as "complex"
- * without relying on regex patterns.
+ * Per-turn agent context the host may inject for tool/skill activation hints
+ * (e.g. persona summary and visible tool/skill menus). Not an intent-LLM input —
+ * turn policy is deterministic host gating (see `HostPolicyToolStrategy`).
  */
   intentAgentContext?: {
     systemInstruction?: string;
     tools?: Array<{ name: string; description: string }>;
- /** Agent-visible skills for intent LLM turnPolicy output (name + description + optional tags). */
+ /** Agent-visible skills for turn-policy hints (name + description + optional tags). */
     skills?: Array<{ name: string; description: string; tags?: string[] }>;
   };
  /**
@@ -77,9 +71,17 @@ export interface SessionScope {
  * Planning forces tool-use with these names even when intent is simple.
  */
   explicitToolNames?: string[];
- /**
- * Host-detected explicit skill invocation (e.g. `/chart-output`, @mention, UI pick).
- * Copied to turnPolicy.explicitSkills during intent normalization; highest pin priority.
- */
+  /**
+   * Host-detected explicit skill invocation (e.g. `/chart-output`, @mention, UI pick).
+   * Copied to turnPolicy.explicitSkills during intent normalization; highest pin priority.
+   */
   explicitSkillNames?: string[];
+  /**
+   * 本轮被显式点名的 rule 名称(与 `explicitSkillNames` 对称)。
+   *
+   * 仅 `activation.mode === "manual"` 的规则在命中此集合时才注入 prompt;
+   * `always` 规则始终注入、`manual` 规则未命中则不注入。承载 `@rule` 手动引用、
+   * UI 勾选等宿主侧显式激活信号。
+   */
+  explicitRuleNames?: readonly string[];
 }

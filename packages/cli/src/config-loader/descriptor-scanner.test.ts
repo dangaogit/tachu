@@ -37,7 +37,8 @@ name: test-rule
 description: 测试规则
 kind: rule
 type: rule
-scope: ["*"]
+activation:
+  mode: always
 ---
 
 测试规则内容。
@@ -147,7 +148,8 @@ name: duplicated-rule
 description: ${description}
 kind: rule
 type: rule
-scope: ["*"]
+activation:
+  mode: always
 ---
 
 正文内容。
@@ -178,7 +180,8 @@ name: no-sensitive-output
 description: 用户版本-敏感信息输出限制
 kind: rule
 type: rule
-scope: ["*"]
+activation:
+  mode: always
 ---
 
 用户自定义内容（应覆盖内置）。
@@ -341,7 +344,8 @@ name: Invalid-Name
 description: name 含大写字母
 kind: rule
 type: rule
-scope: ["*"]
+activation:
+  mode: always
 ---
 
 正文内容。
@@ -360,7 +364,8 @@ name: mismatched-name
 description: name 与文件名不一致
 kind: rule
 type: rule
-scope: ["*"]
+activation:
+  mode: always
 ---
 
 正文内容。

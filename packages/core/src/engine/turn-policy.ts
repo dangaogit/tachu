@@ -1,6 +1,6 @@
 import type { InputEnvelope } from "../types/io";
 import type { SessionScope } from "../types/scope";
-import type { IntentTurnPolicyLlmOutput, TurnPolicy } from "../types/turn-policy";
+import type { TurnPolicy } from "../types/turn-policy";
 
 export const emptyTurnPolicy = (): TurnPolicy => ({
   excludeTools: [],
@@ -47,11 +47,10 @@ export const readTurnPolicy = (input: InputEnvelope): TurnPolicy => {
 };
 
 export interface NormalizeTurnPolicyOptions {
-  llm?: IntentTurnPolicyLlmOutput | undefined;
   scope?: SessionScope | undefined;
   knownToolNames?: ReadonlySet<string> | undefined;
   knownSkillNames?: ReadonlySet<string> | undefined;
- /** Pre-seeded policy (e.g. CLI includeTools) merged with LLM output. */
+ /** Pre-seeded deterministic host policy (e.g. CLI includeTools). */
   preseed?: TurnPolicy | undefined;
 }
 
@@ -59,31 +58,28 @@ const mergeStringLists = (...lists: Array<readonly string[] | undefined>): strin
   dedupeNames(lists.flatMap((list) => list ?? []));
 
 export const normalizeTurnPolicy = (options: NormalizeTurnPolicyOptions): TurnPolicy => {
-  const { llm, scope, knownToolNames, knownSkillNames, preseed } = options;
+  const { scope, knownToolNames, knownSkillNames, preseed } = options;
   const explicitSkills = filterKnownNames(
     dedupeNames(scope?.explicitSkillNames),
     knownSkillNames,
   );
   const excludeTools = filterKnownNames(
-    mergeStringLists(preseed?.excludeTools, llm?.excludeTools),
+    mergeStringLists(preseed?.excludeTools),
     knownToolNames,
   );
   const includeTools = filterKnownNames(
-    mergeStringLists(preseed?.includeTools, llm?.includeTools),
+    mergeStringLists(preseed?.includeTools),
     knownToolNames,
   );
   const excludeSkills = filterKnownNames(
-    mergeStringLists(preseed?.excludeSkills, llm?.excludeSkills),
+    mergeStringLists(preseed?.excludeSkills),
     knownSkillNames,
   );
   const pinSkills = filterKnownNames(
-    mergeStringLists(preseed?.pinSkills, llm?.pinSkills),
+    mergeStringLists(preseed?.pinSkills),
     knownSkillNames,
   );
-  const visualization =
-    typeof llm?.visualization === "string" && llm.visualization.trim().length > 0
-      ? llm.visualization.trim().slice(0, 120)
-      : (preseed?.visualization ?? "");
+  const visualization = preseed?.visualization ?? "";
 
   return {
     excludeTools,

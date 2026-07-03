@@ -174,19 +174,19 @@ describe("DescriptorEmbeddingToolCandidateStrategy", () => {
 });
 
 describe("createDefaultToolCandidateStrategies", () => {
-  it("default order: HostRule (when source) → IntentTurnPolicy → NameMatch → DescriptorEmbedding", () => {
+  it("default order: HostRule (when source) → HostPolicy → NameMatch → DescriptorEmbedding", () => {
     const withPolicy = createDefaultToolCandidateStrategies({
       policySource: { list: () => [] },
     });
     expect(withPolicy.map((s) => s.name)).toEqual([
       "host-rule",
-      "intent-turn-policy",
+      "host-policy",
       "name-match",
       "descriptor-embedding",
     ]);
     const withoutPolicy = createDefaultToolCandidateStrategies();
     expect(withoutPolicy.map((s) => s.name)).toEqual([
-      "intent-turn-policy",
+      "host-policy",
       "name-match",
       "descriptor-embedding",
     ]);

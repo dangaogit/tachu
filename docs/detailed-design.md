@@ -122,19 +122,20 @@ interface DependencyRef {
 ```typescript
 interface RuleDescriptor extends BaseDescriptor {
   type: 'rule' | 'preference';   // 硬约束 vs 软偏好
-  scope: RuleScope[];             // 作用阶段
+  activation: RuleActivation;     // 激活条件：规则正文何时被注入 prompt
   content: string;                // 规则正文（注入 Prompt 的文本）
 }
 
-// ADR-0006 D5：RuleScope 塌陷为 loop-lifecycle 子集，与 §7.3 的 `HookPoint`
-// 共用同一套词汇；旧 7 个 phase 名（safety/intent/precheck/planning/execution/
-// validation/output）随 9 阶段流水线一并废弃。映射：safety/intent/precheck →
-// turnStart；planning/execution → preLLM；validation/output → turnStop。
-type RuleScope =
-  | 'turnStart'        // 前置守卫：safety/intent/precheck 原本承载的准入类规则
-  | 'preLLM'           // loop 每步 LLM 调用前：planning/execution 原本承载的输出塑形类规则
-  | 'turnStop'         // 后置守卫：validation/output 原本承载的质量把关类规则（只 check/block/annotate，不 reformat）
-  | '*';               // 全部生命周期事件
+// Rule 激活轴——回答「何时进 prompt」，终点永远是 prompt。它**不是**生命周期
+// 挂载点：block/annotate/validate 属于 §7.3 的 `HookPoint` / `Guardrail` /
+// `ValidationRule`，不由 Rule 承担（旧的 turnStart/preLLM/turnStop 生命周期式
+// scope 已废弃——那是把 rule 与 hook 混为一谈）。语义对齐业界 rule 系统
+// （Cursor / Copilot / Continue / Cline）的激活模型。
+type RuleActivation =
+  | { mode: 'always' }                          // 总是注入（≈ Cursor alwaysApply）
+  | { mode: 'manual' }                          // 仅当被显式点名（SessionScope.explicitRuleNames）
+  | { mode: 'semantic' }                        // 依据 description 语义相关（调用方提供活跃集；缺省 fail-closed 不注入）
+  | { mode: 'path'; globs: readonly string[] }; // 命中 globs 的文件出现在本轮上下文时
 ```
 
 **优先级合并**：
@@ -524,20 +525,20 @@ interface HookEvent<TData = unknown> {
 
 | HookPoint | 触发时机 | 真实 fire 位 | `data` 形状 | 语义 |
 | --- | --- | --- | --- | --- |
-| `turnStart` | 一轮开始，`session`/`safety` phase 之后、`tool-routing` 之前 | `engine.ts`（`Engine.runStream`） | `{ input: InputEnvelope }` | pre-guard；`deny`/`abort` 中止整轮，`modify`/`replace` 改写 `input` |
-| `preLLM` | loop 每 step 调用 LLM 前 | `subflows/tool-use.ts` | `{ conversation: Message[]; step: number; stepId: string }` | free-mutation（见 §7.4）；`deny`/`abort` 抛 `TOOL_LOOP_PRE_LLM_DENIED` |
-| `postLLM` | loop 每 step 调用 LLM 后 | `subflows/tool-use.ts` | `{ response: ToolUseStepResponse; step: number; stepId: string }` | free-mutation；`usage` 字段恒以 Provider 真值为准，mutation 无法覆盖 |
-| `preToolUse` | loop 每次工具调用前 | `subflows/tool-use.ts` | `{ tool: string; callId: string; arguments: Record<string, unknown>; parentStepId: string }` | 归位既有 `onBeforeToolCall` 审批语义；`deny`/`abort` 时合成"已被拒绝"tool 消息回灌 LLM，不中断循环 |
-| `postToolUse` | loop 每次工具调用后 | `subflows/tool-use.ts` | `{ tool: string; callId: string; parentStepId: string; result: ExecutedToolRecord }` | `modify`/`replace` 可改写 `result.content`（校验后合法才生效） |
-| `turnStop` | 一轮结束前，`validation` phase 之后 | `engine.ts`（`Engine.runStream`） | `{ candidateAnswer: CandidateAnswer; validation: ValidationResult }` | post-guard + Result Validation，恒 fail-closed 最后跑；`deny`/`abort` 拒绝交付，`modify`/`replace` 改写 `candidateAnswer.content` |
-| `preSubagent` | 真正 spawn subagent 前（`task.type === "agent"` 快路径与 `dispatch_agent` 工具两条路径共用） | `engine.ts`（`Engine.runSubAgent`） | `{ agent: string; objective: string; taskId: string }` | `deny`/`abort` 时短路，不真正 spawn，也不消耗 budget 决策 |
-| `postSubagent` | subagent 收敛后 | `engine.ts`（`Engine.runSubAgent`） | `{ agent: string; taskId: string; status: AgentRunResult["status"] }` | 只读订阅/审计用途，不支持改写 result（summary-only 契约由 runtime 自身保证） |
-| `preCompact` | loop per-step 估算上下文超过 `0.85 × maxContextTokens` 阈值时 | `subflows/tool-use.ts` | `{ conversation: Message[]; step: number; stepId: string; estimatedTokens: number; maxContextTokens: number; threshold: number }` | host 可返回 `replace` mutation 自定义压缩；未处理或 mutation 不合法时套用默认压缩（丢最老一轮完整 assistant+tool 往返） |
+| `turnStart` | 一轮开始，`session`/`safety` phase 之后、`tool-routing` 之前 | `engine.ts`（`Engine.runStream`） | `{ input: InputEnvelope }` | pre-guard；`guard`/`deny` 中止整轮 |
+| `preLLM` | loop 每 step 调用 LLM 前 | `subflows/tool-use.ts` | `{ conversation: Message[]; step: number; stepId: string }` | free-mutation（`mutate`，见 §7.4）；`deny` 抛 `TOOL_LOOP_PRE_LLM_DENIED` |
+| `postLLM` | loop 每 step 调用 LLM 后 | `subflows/tool-use.ts` | `{ response: ToolUseStepResponse; step: number; stepId: string }` | free-mutation（`mutate`）；`usage` 字段恒以 Provider 真值为准 |
+| `preToolUse` | loop 每次工具调用前 | `subflows/tool-use.ts` | `{ tool: string; callId: string; arguments: Record<string, unknown>; parentStepId: string }` | `approve`/`deny` 审批语义；`deny` 时合成拒绝态 tool 消息回灌 LLM |
+| `postToolUse` | loop 每次工具调用后 | `subflows/tool-use.ts` | `{ tool: string; callId: string; parentStepId: string; result: ExecutedToolRecord }` | `mutate` 可改写 `result.content`（校验后合法才生效） |
+| `turnStop` | 一轮结束前，`validation` phase 之后 | `engine.ts`（`Engine.runStream`） | `{ candidateAnswer: CandidateAnswer; validation: ValidationResult }` | post-guard + Result Validation；`guard`/`finding`；恒 fail-closed 最后跑 |
+| `preSubagent` | 真正 spawn subagent 前 | `engine.ts`（`Engine.runSubAgent`） | `{ agent: string; objective: string; taskId: string }` | `deny` 时短路，不 spawn |
+| `postSubagent` | subagent 收敛后 | `engine.ts`（`Engine.runSubAgent`） | `{ agent: string; taskId: string; status: AgentRunResult["status"] }` | 只读订阅/审计 |
+| `preCompact` | loop per-step 估算上下文超过阈值时 | `subflows/tool-use.ts` | `{ conversation: Message[]; step: number; stepId: string; estimatedTokens: number; ... }` | `mutate` 自定义压缩；不合法时套用默认压缩 |
 
-**free-mutation 与 guardrail 语义的区分**：
+**free-mutation 与 guard 语义的区分**：
 
-- `preLLM`/`postLLM`/`preToolUse`/`postToolUse`/`preCompact` 是 **free-mutation** 点——host 可通过 `modify`/`replace` 任意改写数据，但受 **Engine Seatbelt**（§7.4）约束。
-- `turnStart`/`turnStop` 是 **guardrail 挂载点**——除了原始 `HookAction`（`deny`/`abort`/`modify`/`replace`）外，还额外挂一套通用 `Guardrail` 契约（§7.5），语义更收敛（`pass`/`block`/`degrade`/`annotate`，不支持"静默重排版"）。
+- `preLLM`/`postLLM`/`preToolUse`/`postToolUse`/`preCompact` 是 **free-mutation** 点——host 通过 `{ type: "mutate", data }` 改写数据，受 **Engine Seatbelt**（§7.4）约束。
+- `turnStart`/`turnStop` 是 **guard 挂载点**——handler 返回 `{ type: "guard", decision }` 或 `{ type: "finding", findings }`（§7.5），语义 fail-closed（`pass`/`block`/`degrade`/`annotate`）。
 
 `DefaultHookRegistry.fire()`（`modules/hooks.ts`）每次调用无条件发一条 `hook_fired` observability 事件（即使当前无人订阅/注册），防止"定义了却查不出是否真被触发"的死面问题重演；单个 handler 失败按 `HookFailureBehavior`（`'continue'` 吞错 + 发 `error` 事件 / `'abort'` 抛出）处理。详细的 Action 类型与适用矩阵见 §9.8。
 
@@ -546,56 +547,40 @@ interface HookEvent<TData = unknown> {
 `preLLM`/`postLLM`（以及 `preCompact`）是 free-mutation 点——host 有全权改写，但引擎守两条底线（`subflows/tool-use.ts` 的 `applyConversationMutation`/`applyResponseMutation`）：
 
 1. **每次 mutation hook 后跑结构化 normalize/re-validate**：`isValidConversationMutation` 校验 mutation 后的 `conversation` 是否仍是合法 `Message[]`（非空数组、每条消息 `role` ∈ `system/user/assistant/tool`、`content` 类型合法）；`isValidResponseMutation` 校验 `postLLM` mutation 后的 response 是否仍保留 `content: string`。校验失败时**丢弃这次 mutation 并继续用 mutation 前的值**，绝不把畸形对话喂给 Provider，同时通过 observability 发一条 `warning`（`reason: "hook-mutation-rejected"`）。
-2. **`turnStop` guards 恒最后跑、fail-closed**：`turnStop` 的 raw `HookAction` 与 `Guardrail` 组合器（§7.5）都在 `validation` phase 之后、`EngineOutput` 产出之前执行，mutation 不能绕过合规。
+2. **`turnStop` guards 恒最后跑、fail-closed**：`turnStop` 的 `guard`/`finding` 动作都在 `validation` phase 之后、`EngineOutput` 产出之前执行，mutation 不能绕过合规。
 3. **所有 mutation 记入 observability 审计**：`postLLM`/`preLLM` 的 mutation 拒绝会发 `warning` 事件；`preCompact` 的自动压缩会发 `warning`（`reason: "context-auto-compact"`，携带 `estimatedTokensBefore`/`messageCountBefore`/`messageCountAfter`）。
 
 `usage`（token 计费）字段被硬性排除在 `postLLM` mutation 之外——`applyResponseMutation` 始终以 mutation 前的 Provider 真值覆盖候选 mutation 里的 `usage`，防止 host mutation 污染计费/预算。
 
-### 7.5 对称守卫 seam（Guardrail 契约）
-
-`types/guardrail.ts` 定义了一个通用 guardrail 契约，挂 `turnStart`（pre-guard）与 `turnStop`（post-guard）：单个 guard 干合规检查、内容策略、还是质量 validation，由宿主消费方决定，core 不区分语义，只区分挂载点。
+**统一 guard seam（HookAction）**：`types/hooks.ts` 定义唯一的 hook/guard firing 面。`turnStart`/`turnStop` 的 pre/post guard 通过 `{ type: "guard"; decision: HookGuardDecision }` 表达（`pass` / `block` / `degrade` / `annotate`，恒 fail-closed）；`turnStop` 的 ValidationRule 产出经 `{ type: "finding"; findings }` 汇入同一 fire 路径。`types/guardrail.ts` 仅保留 `HookGuardDecision` 的类型别名，不再暴露独立的 `Guardrail` 公共接口。
 
 ```typescript
-type GuardrailPoint = "turnStart" | "turnStop";
-
-type GuardrailDecision =
+type HookGuardDecision =
   | { readonly kind: "pass" }
   | { readonly kind: "block"; readonly reason: string; readonly userVisibleReason?: string }
   | { readonly kind: "degrade"; readonly reason: string; readonly userVisibleReason: string }
   | { readonly kind: "annotate"; readonly prefix: string };
 
-interface GuardrailContext {
-  readonly point: GuardrailPoint;
-  readonly correlation: ExecutionCorrelation;
-  readonly subject?: ExecutionSubject | undefined;
-  readonly data: unknown;   // turnStart: { input, context, violations }；turnStop: { candidateAnswer, validation }
-}
-
-interface Guardrail {
-  readonly id: string;
-  run(ctx: GuardrailContext): GuardrailDecision | Promise<GuardrailDecision>;
-}
+type HookAction =
+  | { type: "continue" }
+  | { type: "mutate"; data: unknown }              // preLLM/postLLM/preCompact 等 free-mutation 点
+  | { type: "guard"; decision: HookGuardDecision } // turnStart/turnStop guard
+  | { type: "finding"; findings: ValidationFinding[] }
+  | { type: "approve" } | { type: "deny"; reason: string }; // preToolUse 审批
 ```
 
-四种处置结果恒 **fail-closed**：
+四种 guard 处置结果恒 **fail-closed**（刻意不提供"静默重排版"语义——想改格式是显式 transform，不是 guard 的职责）。
 
-- `pass`：放行，无附加处置。
-- `block`：拒付。`turnStart` 场景中止整轮；`turnStop` 场景拒绝交付候选答案。
-- `degrade`：放行但降级说明（如"仅确认部分内容"），`userVisibleReason` 会前缀到最终 `candidateAnswer.content`。
-- `annotate`：放行但附加简短前缀说明（如安全警告），不改写正文其余部分。
-
-刻意不提供"静默重排版"语义——想改格式是显式 transform，不是 guard 的职责。
-
-`runGuardrails()`（`modules/guardrail.ts`）组合运行一组 guardrail：任一 guard 返回 `block` → 立即短路返回；无 `block` 时若存在 `degrade` → 返回第一个 `degrade`（优先级高于 `annotate`）；都没有 `degrade` 时若存在一个或多个 `annotate` → 合并前缀（空格分隔）返回；全部 `pass` → 返回 `pass`。
+`reduceGuardDecisions()` / `reduceGuardActions()`（`modules/guardrail.ts`）组合多个 guard：任一 `block` → 立即短路；无 `block` 时若存在 `degrade` → 返回第一个；都没有 `degrade` 时合并 `annotate` 前缀；全部 `pass` → 返回 `pass`。
 
 **内置默认 guard**：
 
-| 挂载点 | 内置 guard | 语义 |
+| 挂载点 | 内置 helper | 语义 |
 | --- | --- | --- |
-| `turnStart` | `createSafetyViolationsGuardrail`（`builtin.safety-violations`） | 把 `SafetyModule` baseline（前 4 项 throw、injection 走 warning）+ business policy 已产出的 warning 级 `violations` 映射为 `annotate`，不再静默丢弃 |
-| `turnStop` | `createResultValidationGuardrail`（`builtin.result-validation`） | 把 §7.6 结果验证的 `ValidationOutcome` 映射为 guardrail 决策：`pass`→`pass`，`degrade`→`degrade`，`handoff`→`block`（人工接手），`retry`→`pass`（retry 是 §8.1 turn-level 重试循环职责，不在 guardrail 词汇表内） |
+| `turnStart` | `createSafetyViolationsGuardAction` | 把 `SafetyModule` baseline + business policy 已产出的 warning 级 `violations` 映射为 `annotate` |
+| `turnStop` | `createResultValidationGuardAction` | 把 §7.6 结果验证的 `ValidationOutcome` 映射为 guard 决策：`pass`→`pass`，`degrade`→`degrade`，`handoff`→`block`，`retry`→`pass`（retry 是 turn-level 重试循环职责） |
 
-内置 guard 恒跑在对应挂载点最前；`EngineDependencies.guardrails.turnStart`/`turnStop` 注入的宿主 guard 在其后按顺序执行。对齐 OpenAI Agents SDK `input/output_guardrails` + tripwire、Claude Code `Stop` hook（可 block→强制继续）语义。
+内置 guard 恒跑在对应挂载点最前；宿主通过 `hooks.register("turnStart" | "turnStop", handler)` 追加 `{ type: "guard", decision }` 处理器（按 `priority` 升序在其后执行）。`EngineDependencies.guardrails` 已在 rc.12 移除。
 
 ### 7.6 子任务执行
 
@@ -1126,7 +1111,8 @@ interface EngineEvent {
 }
 
 type EventType =
-  | 'phase_enter' | 'phase_exit'                        // 6 个 EnginePhase 的宏观边界（§7.1）
+  | 'loop_step_enter' | 'loop_step_exit'                  // 6 个 EnginePhase 的宏观边界（§7.1）
+  | 'phase_enter' | 'phase_exit'                          // legacy：类型 union 保留供旧消费端；引擎不再 emit
   | 'progress'                                           // 阶段/loop 内部状态快照（如 tool-routing 的路由决策）
   | 'llm_call_start' | 'llm_call_end'
   | 'tool_call_start' | 'tool_call_end'
@@ -1144,7 +1130,7 @@ type EventType =
   | 'tool_loop_failure_recovery_injected';
 ```
 
-**ADR-0006 D5 落地现状**：`EnginePhase` 由 9 个收敛为 6 个（session/safety/tool-routing/execution/validation/output）后，`phase_enter`/`phase_exit` 依然存在，但只标记这 6 个宏观阶段的边界（不再有 intent/precheck/planning/graph-check 各自的进入/退出事件）；`tool-use` loop 内部不再重新发明"子阶段边界"，而是复用 loop 已有的**扁平 per-step 事件**：`tool_loop_step_start`/`tool_loop_step_end`（每个 loop step）、`tool_call_start`/`tool_call_end`（每次工具调用）、`llm_call_start`/`llm_call_end`（每次 LLM 请求）、`hook_fired`（每次 9 个 loop-lifecycle HookPoint 触发，见 §9.8）。这些事件通过 `parentStepId` 相互关联（例如一次工具调用的 `tool_call_start`/`tool_call_end` 携带发起它的 loop step 的 `stepId` 作为 `parentStepId`），下游可据此重建"某个 loop step 内发生了哪些工具调用/hook 触发"的树状关系，而不依赖额外的子阶段命名。
+**rc.12 可观测性对齐**：`Engine.emitPhaseStart` / `emitPhaseEnd` 在 observability 层发 `loop_step_enter`/`loop_step_exit`（取代 `phase_enter`/`phase_exit`），StreamChunk 层仍 yield 结构化 `phase-enter`/`phase-exit` 供 CLI 消费。`tool-use` loop 内部复用扁平 per-step 事件：`tool_loop_step_start`/`tool_loop_step_end`、`tool_call_start`/`tool_call_end`、`llm_call_start`/`llm_call_end`、`hook_fired`（每次 9 个 loop-lifecycle HookPoint 触发，见 §9.8）。这些事件通过 `parentStepId` 相互关联。
 
 **双通道消费**：
 
@@ -1194,27 +1180,26 @@ type SubscribeHandler<TData = unknown> = (event: HookEvent<TData>) => void | Pro
 type RegisterHandler<TData = unknown> = (event: HookEvent<TData>) => Promise<HookAction | void>;
 
 type HookAction =
-  | { type: 'continue' }                        // 默认值；保持原有数据流
-  | { type: 'abort'; reason: string }           // 立即中止当前执行（throw EngineError）
-  | { type: 'modify'; patch: unknown }          // free-mutation 点用差量补丁改写数据（受 Engine Seatbelt 约束，见 §7.4）
-  | { type: 'approve' }                         // 显式放行需要审批的操作（preToolUse）
-  | { type: 'deny'; reason: string }            // 显式拒绝需要审批的操作（同上）
-  | { type: 'replace'; data: unknown }          // 用 data 整体替换事件数据（同受 Engine Seatbelt 约束）
-  | { type: 'enrich'; data: Record<string, unknown> };   // 仅向 metadata 追加字段（不影响主数据）
+  | { type: 'continue' }
+  | { type: 'mutate'; data: unknown }           // free-mutation 点（受 Engine Seatbelt 约束，见 §7.4）
+  | { type: 'guard'; decision: HookGuardDecision }
+  | { type: 'finding'; findings: ValidationFinding[] }
+  | { type: 'approve' }
+  | { type: 'deny'; reason: string };
 ```
 
 **9 个 HookPoint 的适用 Action 矩阵**（详见 §7.3 的逐点 fire 位 + payload 表）：
 
 | HookPoint | 适用 Action 类型 | 备注 |
 | --- | --- | --- |
-| `turnStart` | `continue` / `deny` / `abort` / `modify` / `replace` | pre-guard；`modify`/`replace` 改写 `input`；额外挂一套 `Guardrail`（§7.5） |
-| `preLLM` / `postLLM` | `continue` / `deny`（仅 `preLLM`） / `abort` / `modify` / `replace` | free-mutation，受 Engine Seatbelt 约束（§7.4）；`postLLM` 的 mutation 不能覆盖 `usage` |
-| `preToolUse` | `continue` / `approve` / `deny` / `abort` | 归位既有 `onBeforeToolCall` 审批语义 |
-| `postToolUse` | `continue` / `modify` / `replace` | 仅当 mutation 含合法 `content: string` 时生效 |
-| `preCompact` | `continue` / `replace` | host 可自定义压缩策略；未处理/mutation 不合法时套用默认压缩 |
-| `turnStop` | `continue` / `deny` / `abort` / `modify` / `replace` | post-guard + 结果验证，恒最后跑、fail-closed；额外挂一套 `Guardrail`（§7.5） |
-| `preSubagent` | `continue` / `deny` / `abort` | `deny`/`abort` 时短路，不真正 spawn |
-| `postSubagent` | `continue` | 只读订阅/审计用途，不支持改写 result |
+| `turnStart` | `continue` / `guard` / `deny` | pre-guard（§7.5） |
+| `preLLM` / `postLLM` | `continue` / `mutate` / `deny`（仅 `preLLM`） | free-mutation，受 Engine Seatbelt 约束（§7.4） |
+| `preToolUse` | `continue` / `approve` / `deny` | 归位既有 `onBeforeToolCall` 审批语义 |
+| `postToolUse` | `continue` / `mutate` | 仅当 mutation 含合法 `content: string` 时生效 |
+| `preCompact` | `continue` / `mutate` | host 可自定义压缩策略 |
+| `turnStop` | `continue` / `guard` / `finding` / `deny` | post-guard + 结果验证，恒最后跑、fail-closed（§7.5） |
+| `preSubagent` | `continue` / `deny` | `deny` 时短路，不 spawn |
+| `postSubagent` | `continue` | 只读订阅/审计 |
 
 `subscribe` 注册的处理器始终视为只读订阅（其返回值被忽略，异常不影响主流程但会记入 `error` 事件）。
 
@@ -1337,8 +1322,9 @@ interface PromptAssembler {
 }
 
 interface AssembleParams {
-  // —— 阶段与匹配元素（必填）
-  phase: RuleScope;                          // 当前阶段（决定 Rules scope 筛选）
+  // —— 匹配元素（必填）
+  // 规则激活由调用方提供的确定性输入决定（explicitRuleNames / contextFilePaths /
+  // semanticActiveRuleNames）；assembler 不做语义检索、也不自判文件上下文。
   activeRules: RuleDescriptor[];
   activeSkills: SkillDescriptor[];
   availableTools: ToolDescriptor[];

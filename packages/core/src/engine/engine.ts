@@ -8,8 +8,8 @@ import {
   InMemoryRuntimeState,
   InMemorySessionManager,
   NoopProvider,
-  createSafetyViolationsGuardrail,
-  runGuardrails,
+  createSafetyViolationsGuardAction,
+  reduceGuardActions,
   type HookRegistry,
   type MemoryEntry,
   type MemorySystem,
@@ -20,7 +20,6 @@ import {
   type SafetyModule,
   type SessionManager,
 } from "../modules";
-import type { Guardrail } from "../types/guardrail";
 import {
   DefaultPromptAssembler,
   NeedToKnowContextDistributor,
@@ -38,6 +37,7 @@ import type {
   GeneratedImage,
   GeneratedMedia,
   InputEnvelope,
+  HookAction,
   Message,
   ModelRoute,
   OutputMetadata,
@@ -287,24 +287,12 @@ export interface EngineDependencies {
  * opt-in。
  */
   resourceDemandRouter?: import("./resolve-provider-messages").ResourceDemandRouter;
- /**
- * 对称守卫 seam(ADR-0006 D4):挂 `turnStart`/`turnStop` 的宿主自定义 guardrail。
- *
- * 与 `hooks.register("turnStart"/"turnStop", ...)` 的差异:guardrail 契约提供
- * `pass/block/degrade/annotate` 更贴合"合规/内容策略/质量校验"语义的判别联合,
- * 而不是通用的 `HookAction`。两者共存:引擎内置的 `builtin.safety-violations`
- * guard 恒跑在 `turnStart`;这里注入的列表在其后追加执行。
- */
-  guardrails?: {
-    turnStart?: Guardrail[];
-    turnStop?: Guardrail[];
-  };
 }
 
 /**
  * Tachu 核心引擎。
  *
- * 该类负责组装运行时依赖并串联 6 阶段主干流程（深单 agentic loop，ADR-0006），
+ * 该类负责组装运行时依赖并串联深单 agentic loop 主干（ADR-0006），
  * 支持流式与非流式执行、会话级取消传播、Hook 扩展以及资源释放。
  */
 export class Engine {
@@ -323,7 +311,6 @@ export class Engine {
   private readonly safetyModule: SafetyModule;
   private readonly observability: ObservabilityEmitter;
   private readonly hooks: HookRegistry;
-  private readonly guardrails: { turnStart: Guardrail[]; turnStop: Guardrail[] };
   private readonly scheduler: TaskScheduler;
   private readonly taskExecutor: TaskExecutor;
   private readonly internalSubflows: InternalSubflowRegistry;
@@ -331,7 +318,7 @@ export class Engine {
  /**
  * 活跃 runStream 的预组装 Prompt 缓存，按 `traceId` 索引。
  *
- * 由 `runStream` 在 Phase 6 预热阶段写入、在 `finally` 里清理；`buildLayeredTaskExecutor`
+ * 由 `runStream` 在主 loop 的 prompt 装配步骤写入、在 `finally` 里清理；`buildLayeredTaskExecutor`
  * 读取它并作为 `prebuiltPrompt` 传递给内置 Sub-flow（`tool-use`）。
  *
  * 以 `traceId` 为键而非 `sessionId`：同一 session 可能有并发取消后的重试，
@@ -454,7 +441,7 @@ export class Engine {
  /**
  * 共享的 tool-use 执行器。
  *
- * 主 Engine planning/validation 走 orchestrator；sub-agent runtime 通过该执行器
+ * 主 Engine 路由/guard 步骤走 orchestrator；sub-agent runtime 通过该执行器
  * 复用同一份多轮 tool-use loop 实现，并以 `ctx.agentRunId = invocation.id`
  * 作为 history-scope 隔离键，避免父子调度的工具历史互相串扰。
  */
@@ -545,10 +532,6 @@ export class Engine {
         this.config.hooks.writeHookTimeout,
         this.config.hooks.failureBehavior,
       );
-    this.guardrails = {
-      turnStart: dependencies?.guardrails?.turnStart ?? [],
-      turnStop: dependencies?.guardrails?.turnStop ?? [],
-    };
  // TaskExecutor 装配：
  // - 无论业务是否注入自定义 executor，内置 Sub-flow（`tool-use`）
  // 必须由引擎内部的 `InternalSubflowRegistry` 拦截执行；否则业务自定义 executor
@@ -676,7 +659,7 @@ export class Engine {
   ): Promise<ContextBudgetDecision> {
     const providerMaxContextTokens = await this.resolveProviderContextTokens(route);
     return this.contextBudgetBroker.decide({
-      phase: "planning",
+      phase: "preLLM",
       scope: "main-agent",
       purpose: "assemble main prompt",
       model: route.model,
@@ -883,7 +866,7 @@ export class Engine {
       ...(context.subject !== undefined ? { subject: context.subject } : {}),
       data: { agent: descriptor.name, objective, taskId: opts.taskId },
     });
-    if (preSubagentAction?.type === "deny" || preSubagentAction?.type === "abort") {
+    if (preSubagentAction?.type === "deny") {
       return {
         status: "failed",
         error: {
@@ -1691,6 +1674,7 @@ export class Engine {
  // turnStart guardrail 的 annotate/degrade 前缀说明(ADR-0006 D4)，
  // 待 runOutputPhase 返回后前缀拼接到最终 content，与 contextBudgetDegradeReason 同模式。
       let turnStartGuardAnnotation: string | undefined;
+      let turnStartHookGuardAction: Extract<HookAction, { type: "guard" }> | undefined;
 // turnStart(ADR-0006 D2):一轮开始的 pre-guard 挂载点，提供真实 fire 位 +
 // free-mutation/deny 语义;`SafetyModule` baseline 归位为默认 guard(见下方
 // runSafetyPhase 之后的 turnStartGuardDecision 块,ADR-0006 D4)。
@@ -1703,25 +1687,26 @@ export class Engine {
           : {}),
         data: { input },
       });
-      if (turnStartAction?.type === "deny" || turnStartAction?.type === "abort") {
+      if (turnStartAction?.type === "deny") {
         throw EngineError.fromUnknown(
           new Error(turnStartAction.reason ?? "turnStart hook 拒绝了本轮请求"),
           "HOOK_EXECUTION_FAILED",
         );
       }
-      if (turnStartAction?.type === "modify" || turnStartAction?.type === "replace") {
-        const candidate =
-          turnStartAction.type === "modify" ? turnStartAction.patch : turnStartAction.data;
-        if (
-          typeof candidate === "object" &&
-          candidate !== null &&
-          "content" in candidate &&
-          "metadata" in candidate
-        ) {
-          input = candidate as InputEnvelope;
-        }
+      if (
+        turnStartAction?.type === "guard" &&
+        turnStartAction.decision.kind === "block"
+      ) {
+        throw EngineError.fromUnknown(
+          new Error(
+            turnStartAction.decision.userVisibleReason ?? turnStartAction.decision.reason,
+          ),
+          "HOOK_EXECUTION_FAILED",
+        );
       }
-
+      if (turnStartAction?.type === "guard") {
+        turnStartHookGuardAction = turnStartAction;
+      }
       yield* enterPhase("session");
       const sessionState = await runSessionPhase(input, normalizedContext, phaseEnv);
       yield* flushPendingUsageTelemetry();
@@ -1739,23 +1724,11 @@ export class Engine {
 // turnStart guardrail(ADR-0006 D4):内置默认 guard = SafetyModule baseline +
 // business policy(scope=turnStart)。`builtin.safety-violations` 把此前
 // 计算后从未被消费的 `safetyState.violations` 映射为 annotate/degrade,
-// 不再静默丢弃;host 通过 `EngineDependencies.guardrails.turnStart` 追加的
-// guard 在其后按顺序执行,恒 fail-closed(任一 block 立即中止整轮)。
-      const turnStartGuardDecision = await runGuardrails(
-        [createSafetyViolationsGuardrail(safetyState.violations), ...this.guardrails.turnStart],
-        {
-          point: "turnStart",
-          correlation: normalizedContext.correlation,
-          ...(normalizedContext.subject !== undefined
-            ? { subject: normalizedContext.subject }
-            : {}),
-          data: {
-            input: safetyState.input,
-            context: safetyState.context,
-            violations: safetyState.violations,
-          },
-        },
-      );
+// 不再静默丢弃;内置 safety guard 也归一为 HookAction.guard。
+      const turnStartGuardDecision = reduceGuardActions([
+        createSafetyViolationsGuardAction(safetyState.violations),
+        ...(turnStartHookGuardAction ? [turnStartHookGuardAction] : []),
+      ]).decision;
       if (turnStartGuardDecision.kind === "block") {
         throw EngineError.fromUnknown(
           new Error(
@@ -1772,7 +1745,7 @@ export class Engine {
 
 // Turn-level retry loop. ValidationPhase 输出 `outcome.kind === "retry"`
  // 时回到 tool-routing 重新执行；受 runtime.maxTurnRetries 与 decideTurnRetry 反死循环约束。
- // 默认 maxTurnRetries=0 时本 do-while 仅执行一次，等价于先前的线性 planning→output。
+ // 默认 maxTurnRetries=0 时本 do-while 仅执行一次，等价于先前的线性 route→output。
       const maxTurnRetries = this.config.runtime.maxTurnRetries ?? 0;
       let turnAttemptCount = 0;
       const previousOutcomeKinds: string[] = [];
@@ -1796,7 +1769,7 @@ export class Engine {
           generatedMediaBucket.length = 0;
         }
 
-// 深单 loop 塌陷(ADR-0006 D1):原 intent 分类 phase + precheck phase 的
+// 深单 loop 塌陷(ADR-0006 D1):原 intent 分类步骤 + precheck 步骤的
 // LLM 猜测已删除,`runToolRoutingPhase` 用确定性规则(turnPolicy 规范化 +
 // 显式 @agent/@tool 名称匹配 + visibleTools 收窄)一次性替代四个死 phase 点
 // (intent / precheck / planning / graph-check)。放在重试循环内部重新计算,
@@ -1819,7 +1792,7 @@ export class Engine {
           { type: "plan-preview", phase: "tool-routing", route: toolRoutingState.route },
           normalizedContext,
         );
-// planMode 的计划审批曾挂在死点 `afterPlanning`;塌陷为深单 loop 后
+// planMode 的计划审批曾挂在已删除的计划后置点;塌陷为深单 loop 后
 // (ADR-0006 D1)该 gate 语义上就是"loop 首次调用 LLM 前的最后一次审批",
 // 故归位到 `preLLM`。
         const action = await this.hooks.fire("preLLM", {
@@ -1831,7 +1804,7 @@ export class Engine {
             : {}),
           data: toolRoutingState.route,
         });
-        if (action?.type === "deny" || action?.type === "abort") {
+        if (action?.type === "deny") {
           throw EngineError.fromUnknown(
             new Error(action.reason ?? "preLLM hook 拒绝了当前计划"),
             "HOOK_EXECUTION_FAILED",
@@ -1953,7 +1926,6 @@ export class Engine {
             : {}),
         });
         const assembled = await this.promptAssembler.assemble({
-          phase: "preLLM",
           model: route.model,
           tokenizer: this.tokenizer,
           modelCapabilities: {
@@ -1992,6 +1964,9 @@ export class Engine {
             : {}),
           ...(scope?.systemInstruction !== undefined
             ? { systemInstruction: scope.systemInstruction }
+            : {}),
+          ...(scope?.explicitRuleNames !== undefined
+            ? { explicitRuleNames: scope.explicitRuleNames }
             : {}),
         });
         assembled.tools = mergeInternalToolDefinitions(assembled.tools, {
@@ -2178,7 +2153,7 @@ export class Engine {
             turnAttemptCount = decision.nextRetryCount;
             shouldRetryTurn = true;
  // 把上一轮 outcome 摘要写入 PhaseEnvironment，
- // 供下一轮 PlanningPhase emit + planner 候选策略消费。
+ // 供下一轮 tool-routing 观测事件与候选策略消费。
             phaseEnv.previousAttempt = {
               retryCount: turnAttemptCount,
               lastOutcomeKind: validationOutcome.kind,
@@ -2212,65 +2187,28 @@ export class Engine {
           validation: validationState.validation,
         },
       });
-      if (turnStopAction?.type === "deny" || turnStopAction?.type === "abort") {
+      if (turnStopAction?.type === "deny") {
         throw EngineError.fromUnknown(
           new Error(turnStopAction.reason ?? "turnStop hook 拒绝了本轮交付"),
           "HOOK_EXECUTION_FAILED",
         );
       }
-      if (
-        (turnStopAction?.type === "modify" || turnStopAction?.type === "replace") &&
-        validationState.candidateAnswer !== undefined
-      ) {
-        const candidate =
-          turnStopAction.type === "modify" ? turnStopAction.patch : turnStopAction.data;
-        if (
-          typeof candidate === "object" &&
-          candidate !== null &&
-          typeof (candidate as { content?: unknown }).content === "string"
-        ) {
-          validationState.candidateAnswer = {
-            ...validationState.candidateAnswer,
-            content: (candidate as { content: string }).content,
-          };
-        }
-      }
-
-// turnStop guardrail(ADR-0006 D4):宿主通过 `EngineDependencies.guardrails.turnStop`
-// 注入的对称守卫,在 raw HookAction 之后按 pass/block/degrade/annotate 语义执行。
-// 内置默认 Result Validation guard 不在此重复接入 —— `runOutputPhase` 已经按
-// `outcome.kind` 做 content 选取(pass/degrade/handoff 的正文分支已在 output.ts
-// 落地),此处再叠加会造成双重降级前缀;`createResultValidationGuardrail` 仍作为
-// 可复用工具导出，供自定义 Engine 组装或测试使用。
-      if (this.guardrails.turnStop.length > 0) {
-        const turnStopGuardDecision = await runGuardrails(this.guardrails.turnStop, {
-          point: "turnStop",
-          correlation: normalizedContext.correlation,
-          ...(normalizedContext.subject !== undefined
-            ? { subject: normalizedContext.subject }
-            : {}),
-          data: {
-            candidateAnswer: validationState.candidateAnswer,
-            validation: validationState.validation,
-          },
-        });
-        if (turnStopGuardDecision.kind === "block") {
+      if (turnStopAction?.type === "guard") {
+        const decision = turnStopAction.decision;
+        if (decision.kind === "block") {
           throw EngineError.fromUnknown(
-            new Error(
-              turnStopGuardDecision.userVisibleReason ?? turnStopGuardDecision.reason,
-            ),
+            new Error(decision.userVisibleReason ?? decision.reason),
             "HOOK_EXECUTION_FAILED",
           );
         }
         if (
-          (turnStopGuardDecision.kind === "degrade" ||
-            turnStopGuardDecision.kind === "annotate") &&
+          (decision.kind === "degrade" || decision.kind === "annotate") &&
           validationState.candidateAnswer !== undefined
         ) {
           const prefix =
-            turnStopGuardDecision.kind === "degrade"
-              ? `[${turnStopGuardDecision.userVisibleReason}]\n\n`
-              : `[${turnStopGuardDecision.prefix}]\n\n`;
+            decision.kind === "degrade"
+              ? `[${decision.userVisibleReason}]\n\n`
+              : `[${decision.prefix}]\n\n`;
           if (!validationState.candidateAnswer.content.startsWith(prefix)) {
             validationState.candidateAnswer = {
               ...validationState.candidateAnswer,
@@ -2279,7 +2217,6 @@ export class Engine {
           }
         }
       }
-
       yield* enterPhase("output");
       const usage = orchestrator.getUsage();
       const outputMetadata = applyTurnOutcome(
@@ -2473,7 +2410,7 @@ export class Engine {
       engineEventFromContext(context, {
         timestamp: Date.now(),
         phase,
-        type: "phase_enter",
+        type: "loop_step_enter",
         payload: {},
       }),
     );
@@ -2507,7 +2444,7 @@ export class Engine {
       engineEventFromContext(context, {
         timestamp: Date.now(),
         phase,
-        type: "phase_exit",
+        type: "loop_step_exit",
         payload: {},
       }),
     );

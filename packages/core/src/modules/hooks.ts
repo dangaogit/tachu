@@ -14,6 +14,38 @@ interface SubscribedHandler {
   handler: SubscribeHandler;
 }
 
+type GuardHookAction = Extract<HookAction, { type: "guard" }>;
+type FindingHookAction = Extract<HookAction, { type: "finding" }>;
+
+const mergeGuardAction = (
+  current: GuardHookAction | undefined,
+  next: GuardHookAction,
+): GuardHookAction => {
+  const existing = current?.decision;
+  const incoming = next.decision;
+  if (!existing || existing.kind === "pass") return next;
+  if (incoming.kind === "pass") return current;
+  if (existing.kind === "block") return current;
+  if (incoming.kind === "block") return next;
+  if (existing.kind === "degrade") return current;
+  if (incoming.kind === "degrade") return next;
+  const prefixes = [existing.prefix, incoming.prefix]
+    .map((prefix) => prefix.trim())
+    .filter((prefix) => prefix.length > 0);
+  if (prefixes.length === 0) {
+    return { type: "guard", decision: { kind: "pass" } };
+  }
+  return { type: "guard", decision: { kind: "annotate", prefix: prefixes.join(" ") } };
+};
+
+const mergeFindingAction = (
+  current: FindingHookAction | undefined,
+  next: FindingHookAction,
+): FindingHookAction => ({
+  type: "finding",
+  findings: [...(current?.findings ?? []), ...next.findings],
+});
+
 /**
  * 单次 Hook 执行失败时的处理策略。
  *
@@ -184,6 +216,20 @@ export class DefaultHookRegistry implements HookRegistry {
             setTimeout(() => reject(TimeoutError.hookTimeout(point, item.timeoutMs)), item.timeoutMs);
           }),
         ]);
+        if (action?.type === "guard") {
+          resultAction = mergeGuardAction(
+            resultAction?.type === "guard" ? resultAction : undefined,
+            action,
+          );
+          continue;
+        }
+        if (action?.type === "finding") {
+          resultAction = mergeFindingAction(
+            resultAction?.type === "finding" ? resultAction : undefined,
+            action,
+          );
+          continue;
+        }
         if (action && action.type !== "continue") {
           resultAction = action;
           break;

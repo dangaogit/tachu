@@ -27,7 +27,8 @@ name: my-rule
 description: 简短描述
 kind: rule
 type: rule
-scope: ["*"]
+activation:
+  mode: always
 ---
 
 规则正文...
@@ -109,7 +110,8 @@ name: no-sensitive-output-example
 description: 示例：项目级自定义规则脚手架（可按需重命名或删除）
 kind: rule
 type: rule
-scope: ["*"]
+activation:
+  mode: always
 tags: [example, security]
 ---
 
@@ -126,7 +128,8 @@ name: respond-in-user-language
 description: Mirror the user's language in every reply (CN/EN auto)
 kind: rule
 type: rule
-scope: ["*"]
+activation:
+  mode: always
 ---
 
 Respond in the same language as the latest user message.

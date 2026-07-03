@@ -1,7 +1,7 @@
 # Security Policy
 
 ## ⚠️ Release Candidate Disclaimer
-**IMPORTANT:** `tachu` is currently at **`1.0.0-rc.10`**. This is a stabilization candidate for `1.0.0`, not a final stable release.
+**IMPORTANT:** `tachu` is currently at **`1.0.0-rc.12`**. This is a stabilization candidate for `1.0.0`, not a final stable release.
 
 As such:
 - The codebase has not yet undergone a formal security audit.

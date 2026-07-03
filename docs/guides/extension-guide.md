@@ -12,7 +12,8 @@ Tachu is extended by creating Markdown descriptor files in the `.tachu/` directo
 name: no-external-calls
 description: Prevent the agent from making external network calls without explicit approval
 type: rule
-scope: [execution]
+activation:
+  mode: always
 tags: [security, network]
 ---
 

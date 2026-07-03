@@ -1,13 +1,13 @@
-import type { ExecutionCorrelation, ExecutionSubject } from "./context";
+import type { HookEvent, HookGuardDecision, HookPoint } from "./hooks";
 
 /**
- * 对称守卫 seam(ADR-0006 D4)。
+ * Guard 决策类型别名（`HookGuardDecision` 的 re-export）。
  *
- * 一个通用 guardrail 契约,挂 `turnStart`(pre-guard)与 `turnStop`(post-guard):
- * 单个 guard 干合规检查、内容策略、还是质量 validation,由宿主消费方决定,
- * core 不区分语义,只区分挂载点。
+ * rc.12 起 standalone `Guardrail` 公共接口已移除；pre/post guard 统一经
+ * `HookAction` 的 `{ type: "guard"; decision }` 表达。本文件保留别名供
+ * 内置 helper（`createSafetyViolationsGuardAction` 等）与测试引用。
  */
-export type GuardrailPoint = "turnStart" | "turnStop";
+export type GuardrailPoint = Extract<HookPoint, "turnStart" | "turnStop">;
 
 /**
  * Guardrail 的处置结果。
@@ -22,11 +22,7 @@ export type GuardrailPoint = "turnStart" | "turnStop";
  * 刻意不提供"静默重排版"语义 —— 想改格式是显式 transform,不是 guard 的职责
  * (ADR-0006 D4)。
  */
-export type GuardrailDecision =
-  | { readonly kind: "pass" }
-  | { readonly kind: "block"; readonly reason: string; readonly userVisibleReason?: string }
-  | { readonly kind: "degrade"; readonly reason: string; readonly userVisibleReason: string }
-  | { readonly kind: "annotate"; readonly prefix: string };
+export type GuardrailDecision = HookGuardDecision;
 
 /**
  * 传给 Guardrail 的运行时上下文。
@@ -38,20 +34,4 @@ export type GuardrailDecision =
  * 刻意用 `unknown` 而非强类型联合,避免 `types/guardrail.ts` 反向依赖
  * `engine/phases/*` 具体阶段类型,保持这是一个可独立复用的横切契约。
  */
-export interface GuardrailContext {
-  readonly point: GuardrailPoint;
-  readonly correlation: ExecutionCorrelation;
-  readonly subject?: ExecutionSubject | undefined;
-  readonly data: unknown;
-}
-
-/**
- * 一个 guardrail。
- *
- * `id` 用于 observability 审计与调试(哪个 guard 做出了处置);`run` 可同步或异步,
- * 允许宿主接入远程合规服务 / LLM judge 等真实 I/O。
- */
-export interface Guardrail {
-  readonly id: string;
-  run(ctx: GuardrailContext): GuardrailDecision | Promise<GuardrailDecision>;
-}
+export type GuardrailContext = HookEvent;

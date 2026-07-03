@@ -3,7 +3,8 @@ kind: rule
 name: no-hallucination
 description: 禁止编造未经验证的事实
 type: rule
-scope: [output]
+activation:
+  mode: always
 tags: [accuracy]
 version: 1.0.0
 ---

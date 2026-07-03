@@ -5,6 +5,7 @@ import { ValidationError } from "../errors";
 import type {
   AgentDescriptor,
   AnyDescriptor,
+  RuleActivation,
   RuleDescriptor,
   SkillDescriptor,
   ToolDescriptor,
@@ -53,17 +54,67 @@ const normalizeTrigger = (
   if (!raw || typeof raw !== "object") {
     return { type: "semantic" };
   }
-  const candidate = raw as { type?: string };
-  if (candidate.type === "always" || candidate.type === "explicit" || candidate.type === "semantic") {
-    return { type: candidate.type };
+  const triggerType = (raw as { type?: unknown }).type;
+  if (triggerType === undefined) {
+    return { type: "semantic" };
   }
-  if (candidate.type === "keyword" || candidate.type === "custom") {
+  if (triggerType === "always" || triggerType === "explicit" || triggerType === "semantic") {
+    return { type: triggerType };
+  }
+  if (triggerType === "keyword" || triggerType === "custom") {
     console.warn(
-      `[tachu] skill "${skillName}" (${filePath}): trigger.type "${candidate.type}" is deprecated, using semantic`,
+      `[tachu] skill "${skillName}" (${filePath}): trigger.type "${triggerType}" is deprecated, using semantic`,
     );
     return { type: "semantic" };
   }
-  return { type: "semantic" };
+  throw ValidationError.invalidConfig(
+    `skill "${skillName}" (${filePath}): 未知 trigger.type "${String(triggerType)}"（合法值：always/semantic/explicit）`,
+  );
+};
+
+/**
+ * 解析并 **fail-closed** 校验 rule 的激活条件(activation)。
+ *
+ * - 未声明 → 默认 `{ mode: "always" }`(未限定的规则默认总是注入)。
+ * - `always` / `manual` / `semantic` → 原样返回。
+ * - `path` → 必须带非空字符串数组 `globs`,否则报错。
+ * - 其它一律报错(旧的 `turnStart`/`preLLM`/`turnStop`/`*` 生命周期式 scope
+ *   已废弃;误用会在加载期显式失败,而非静默丢弃)。
+ */
+const normalizeRuleActivation = (
+  raw: unknown,
+  ruleName: string,
+  filePath?: string,
+): RuleActivation => {
+  const where = filePath ?? "?";
+  if (raw === undefined || raw === null) {
+    return { mode: "always" };
+  }
+  if (typeof raw !== "object") {
+    throw ValidationError.invalidConfig(
+      `rule "${ruleName}" (${where}): activation 必须是对象（形如 { mode: "always" }）`,
+    );
+  }
+  const mode = (raw as { mode?: unknown }).mode;
+  if (mode === "always" || mode === "manual" || mode === "semantic") {
+    return { mode };
+  }
+  if (mode === "path") {
+    const globs = (raw as { globs?: unknown }).globs;
+    if (
+      !Array.isArray(globs) ||
+      globs.length === 0 ||
+      !globs.every((g): g is string => typeof g === "string" && g.length > 0)
+    ) {
+      throw ValidationError.invalidConfig(
+        `rule "${ruleName}" (${where}): activation.mode="path" 必须带非空字符串数组 globs`,
+      );
+    }
+    return { mode: "path", globs: [...globs] };
+  }
+  throw ValidationError.invalidConfig(
+    `rule "${ruleName}" (${where}): 未知 activation.mode "${String(mode)}"（合法值：always/manual/semantic/path）`,
+  );
 };
 
 const requireString = (value: unknown, field: string): string => {
@@ -71,6 +122,23 @@ const requireString = (value: unknown, field: string): string => {
     throw ValidationError.invalidConfig(`frontmatter 字段 ${field} 必须是非空字符串`);
   }
   return value;
+};
+
+const normalizeSideEffect = (
+  raw: unknown,
+  descriptorKind: "tool" | "agent",
+  descriptorName: string,
+  filePath?: string,
+): "readonly" | "write" | "irreversible" => {
+  if (raw === undefined) {
+    return "readonly";
+  }
+  if (raw === "readonly" || raw === "write" || raw === "irreversible") {
+    return raw;
+  }
+  throw ValidationError.invalidConfig(
+    `${descriptorKind} "${descriptorName}" (${filePath ?? "?"}): sideEffect 必须是 readonly/write/irreversible`,
+  );
 };
 
 const toDescriptor = async (
@@ -92,7 +160,7 @@ const toDescriptor = async (
     "requires",
     "kind",
     "type",
-    "scope",
+    "activation",
     "sideEffect",
     "idempotent",
     "requiresApproval",
@@ -113,6 +181,17 @@ const toDescriptor = async (
     Object.entries(data).filter(([field]) => !knownFields.has(field)),
   );
   const name = requireString(data.name, "name");
+  if (
+    kind !== undefined &&
+    kind !== "rule" &&
+    kind !== "skill" &&
+    kind !== "tool" &&
+    kind !== "agent"
+  ) {
+    throw ValidationError.invalidConfig(
+      `descriptor "${name}" (${sourceFile ?? "?"}): 未知 kind "${kind}"（合法值：rule/skill/tool/agent）`,
+    );
+  }
   requireValidDescriptorNameFormat(name, sourceFile);
   const base = {
     ...extraFields,
@@ -140,9 +219,7 @@ const toDescriptor = async (
       ...base,
       kind: "rule",
       type: (type === "preference" ? "preference" : "rule") as "rule" | "preference",
-      scope: Array.isArray(data.scope)
-        ? data.scope.filter((item): item is RuleDescriptor["scope"][number] => typeof item === "string")
-        : ["*"],
+      activation: normalizeRuleActivation(data.activation, name, sourceFile),
       content,
     };
     warnOnDescriptorIdentityMismatch("rule", descriptor.name, sourceFile);
@@ -153,10 +230,7 @@ const toDescriptor = async (
     const descriptor: ToolDescriptor = {
       ...base,
       kind: "tool",
-      sideEffect:
-        data.sideEffect === "write" || data.sideEffect === "irreversible"
-          ? data.sideEffect
-          : "readonly",
+      sideEffect: normalizeSideEffect(data.sideEffect, "tool", name, sourceFile),
       idempotent: data.idempotent !== false,
       requiresApproval: data.requiresApproval === true,
       timeout: typeof data.timeout === "number" ? data.timeout : 30_000,
@@ -178,10 +252,7 @@ const toDescriptor = async (
     const descriptor: AgentDescriptor = {
       ...base,
       kind: "agent",
-      sideEffect:
-        data.sideEffect === "write" || data.sideEffect === "irreversible"
-          ? data.sideEffect
-          : "readonly",
+      sideEffect: normalizeSideEffect(data.sideEffect, "agent", name, sourceFile),
       idempotent: data.idempotent !== false,
       requiresApproval: data.requiresApproval === true,
       timeout: typeof data.timeout === "number" ? data.timeout : 120_000,

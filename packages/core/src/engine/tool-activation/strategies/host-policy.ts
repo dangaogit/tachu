@@ -5,8 +5,8 @@ import type {
   ToolCandidateStrategy,
 } from "../types";
 
-export class IntentTurnPolicyToolStrategy implements ToolCandidateStrategy {
-  readonly name = "intent-turn-policy";
+export class HostPolicyToolStrategy implements ToolCandidateStrategy {
+  readonly name = "host-policy";
 
   async score(ctx: ToolActivationContext): Promise<ToolCandidateContribution[]> {
     const policy: TurnPolicy | undefined = ctx.turnPolicy;
@@ -17,8 +17,8 @@ export class IntentTurnPolicyToolStrategy implements ToolCandidateStrategy {
       contributions.push({
         toolName,
         score: 0,
-        reason: "intent-turn-policy:exclude",
-        exclude: { reason: "intent-turn-policy:exclude" },
+        reason: "host-policy:exclude",
+        exclude: { reason: "host-policy:exclude" },
       });
     }
     const visible = new Set(ctx.agentVisibleTools.map((tool) => tool.name));
@@ -27,8 +27,8 @@ export class IntentTurnPolicyToolStrategy implements ToolCandidateStrategy {
       contributions.push({
         toolName,
         score: 1,
-        reason: "intent-turn-policy:include",
-        promote: { reason: "intent-turn-policy:include" },
+        reason: "host-policy:include",
+        promote: { reason: "host-policy:include" },
       });
     }
     return contributions;

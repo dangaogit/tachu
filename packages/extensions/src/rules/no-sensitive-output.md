@@ -3,7 +3,8 @@ kind: rule
 name: no-sensitive-output
 description: 禁止在输出中包含敏感信息
 type: rule
-scope: [output]
+activation:
+  mode: always
 tags: [security]
 version: 1.0.0
 ---

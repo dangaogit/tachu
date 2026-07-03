@@ -12,9 +12,7 @@ const tokenizer: Tokenizer = {
 describe("DefaultPromptAssembler", () => {
  test("assembles 11 segments in stable order", async () => {
     const assembler = new DefaultPromptAssembler();
-    const result = await assembler.assemble({
-      phase: "preLLM",
-      model: "dev-large",
+    const result = await assembler.assemble({      model: "dev-large",
       tokenizer,
       modelCapabilities: {
         supportedModalities: ["text"],
@@ -29,7 +27,7 @@ describe("DefaultPromptAssembler", () => {
           name: "r1",
           description: "rule desc",
           type: "rule",
-          scope: ["*"],
+          activation: { mode: "always" },
           content: "must be safe",
         },
         {
@@ -37,7 +35,7 @@ describe("DefaultPromptAssembler", () => {
           name: "p1",
           description: "pref desc",
           type: "preference",
-          scope: ["preLLM"],
+          activation: { mode: "always" },
           content: "prefer concise answer",
         },
       ],
@@ -104,9 +102,7 @@ describe("DefaultPromptAssembler", () => {
  test("applies trim strategy in contract order", async () => {
     const assembler = new DefaultPromptAssembler();
     const compressed: string[] = [];
-    const result = await assembler.assemble({
-      phase: "preLLM",
-      model: "dev-small",
+    const result = await assembler.assemble({      model: "dev-small",
       tokenizer,
       modelCapabilities: {
         supportedModalities: ["text"],
@@ -125,7 +121,7 @@ describe("DefaultPromptAssembler", () => {
           name: "hard-rule",
           description: "must follow",
           type: "rule",
-          scope: ["*"],
+          activation: { mode: "always" },
           content: "always do this",
         },
       ],
@@ -167,9 +163,7 @@ describe("DefaultPromptAssembler", () => {
  // P2 ζ：assembler 必须按 envelope.trimOrder 顺序执行裁剪。
  test("trimOrder 优先于内置顺序（history 在第一位则先裁 history）", async () => {
     const assembler = new DefaultPromptAssembler();
-    const result = await assembler.assemble({
-      phase: "preLLM",
-      model: "dev",
+    const result = await assembler.assemble({      model: "dev",
       tokenizer,
       modelCapabilities: {
         supportedModalities: ["text"],
@@ -206,9 +200,7 @@ describe("DefaultPromptAssembler", () => {
 
  test("trimOrder 中未识别 token 静默跳过并记录 appliedCuts", async () => {
     const assembler = new DefaultPromptAssembler();
-    const result = await assembler.assemble({
-      phase: "preLLM",
-      model: "dev",
+    const result = await assembler.assemble({      model: "dev",
       tokenizer,
       modelCapabilities: {
         supportedModalities: ["text"],
@@ -241,9 +233,7 @@ describe("DefaultPromptAssembler", () => {
 
  test("当 history 末尾就是 currentInput（session 已 append）时，不重复 push 末尾 user", async () => {
     const assembler = new DefaultPromptAssembler();
-    const result = await assembler.assemble({
-      phase: "preLLM",
-      model: "dev-large",
+    const result = await assembler.assemble({      model: "dev-large",
       tokenizer,
       modelCapabilities: {
         supportedModalities: ["text"],
@@ -273,9 +263,7 @@ describe("DefaultPromptAssembler", () => {
  test("用户连发两次相同内容（历史已含 N-1 轮的同字面 user + assistant + 本轮 user）→ 历史那条不被误吞", async () => {
     const assembler = new DefaultPromptAssembler();
     const ts = Date.now();
-    const result = await assembler.assemble({
-      phase: "preLLM",
-      model: "dev-large",
+    const result = await assembler.assemble({      model: "dev-large",
       tokenizer,
       modelCapabilities: {
         supportedModalities: ["text"],
@@ -307,9 +295,7 @@ describe("DefaultPromptAssembler", () => {
  test("throws ValidationError.promptTooLarge when all trims still exceed limit", async () => {
     const assembler = new DefaultPromptAssembler();
     await expect(
-      assembler.assemble({
-        phase: "preLLM",
-        model: "dev-small",
+      assembler.assemble({        model: "dev-small",
         tokenizer,
         modelCapabilities: {
           supportedModalities: ["text"],
@@ -326,6 +312,136 @@ describe("DefaultPromptAssembler", () => {
         recalledEntries: [],
       }),
     ).rejects.toBeInstanceOf(ValidationError);
+  });
+});
+
+describe("DefaultPromptAssembler rule activation", () => {
+  const baseParams = (activeRules: import("../types").RuleDescriptor[]) => ({
+    model: "dev",
+    tokenizer,
+    modelCapabilities: {
+      supportedModalities: ["text"],
+      maxContextTokens: 8_192,
+      supportsStreaming: true,
+      supportsFunctionCalling: true,
+    },
+    currentInput: { content: "q", metadata: { modality: "text" as const, size: 1 } },
+    activeRules,
+    activeSkills: [],
+    availableTools: [],
+    contextWindow: { entries: [], tokenCount: 0, limit: 4_000 },
+    recalledEntries: [],
+    reserveOutputTokens: 512,
+  });
+
+  const systemTextOf = (messages: import("../types").Message[]): string => {
+    const content = messages[0]?.content ?? "";
+    return typeof content === "string"
+      ? content
+      : content.map((part) => (part.type === "text" ? part.text : "")).join("");
+  };
+
+  test("activation always: 恒注入 prompt", async () => {
+    const assembler = new DefaultPromptAssembler();
+    const result = await assembler.assemble(
+      baseParams([
+        {
+          kind: "rule",
+          name: "always-rule",
+          description: "d",
+          type: "rule",
+          activation: { mode: "always" },
+          content: "ALWAYS-RULE-MARKER",
+        },
+      ]),
+    );
+    expect(systemTextOf(result.messages)).toContain("ALWAYS-RULE-MARKER");
+  });
+
+  test("activation manual: 未被点名时不注入", async () => {
+    const assembler = new DefaultPromptAssembler();
+    const result = await assembler.assemble(
+      baseParams([
+        {
+          kind: "rule",
+          name: "manual-rule",
+          description: "d",
+          type: "rule",
+          activation: { mode: "manual" },
+          content: "MANUAL-RULE-MARKER",
+        },
+      ]),
+    );
+    expect(systemTextOf(result.messages)).not.toContain("MANUAL-RULE-MARKER");
+  });
+
+  test("activation manual: 命中 explicitRuleNames 时注入", async () => {
+    const assembler = new DefaultPromptAssembler();
+    const result = await assembler.assemble({
+      ...baseParams([
+        {
+          kind: "rule",
+          name: "manual-rule",
+          description: "d",
+          type: "rule",
+          activation: { mode: "manual" },
+          content: "MANUAL-RULE-MARKER",
+        },
+      ]),
+      explicitRuleNames: ["manual-rule"],
+    });
+    expect(systemTextOf(result.messages)).toContain("MANUAL-RULE-MARKER");
+  });
+
+  const pathRule = (): import("../types").RuleDescriptor => ({
+    kind: "rule",
+    name: "path-rule",
+    description: "d",
+    type: "rule",
+    activation: { mode: "path", globs: ["src/**/*.ts"] },
+    content: "PATH-RULE-MARKER",
+  });
+
+  test("activation path: 无匹配文件时不注入", async () => {
+    const assembler = new DefaultPromptAssembler();
+    const result = await assembler.assemble({
+      ...baseParams([pathRule()]),
+      contextFilePaths: ["docs/readme.md"],
+    });
+    expect(systemTextOf(result.messages)).not.toContain("PATH-RULE-MARKER");
+  });
+
+  test("activation path: 命中 glob 的文件在上下文时注入", async () => {
+    const assembler = new DefaultPromptAssembler();
+    const result = await assembler.assemble({
+      ...baseParams([pathRule()]),
+      contextFilePaths: ["src/engine/engine.ts"],
+    });
+    expect(systemTextOf(result.messages)).toContain("PATH-RULE-MARKER");
+  });
+
+  const semanticRule = (): import("../types").RuleDescriptor => ({
+    kind: "rule",
+    name: "semantic-rule",
+    description: "d",
+    type: "rule",
+    activation: { mode: "semantic" },
+    content: "SEMANTIC-RULE-MARKER",
+  });
+
+  test("activation semantic: 缺省无活跃集时 fail-closed 不注入", async () => {
+    const assembler = new DefaultPromptAssembler();
+    const result = await assembler.assemble(baseParams([semanticRule()]));
+    expect(systemTextOf(result.messages)).not.toContain("SEMANTIC-RULE-MARKER");
+  });
+
+  test("activation semantic: 命中 semanticActiveRuleNames 时注入", async () => {
+    const assembler = new DefaultPromptAssembler();
+    const result = await assembler.assemble({
+      ...baseParams([semanticRule()]),
+      semanticActiveRuleNames: ["semantic-rule"],
+    });
+    expect(systemTextOf(result.messages)).toContain("SEMANTIC-RULE-MARKER");
   });
 });
 

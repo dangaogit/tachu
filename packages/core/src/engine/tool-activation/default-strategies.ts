@@ -1,5 +1,5 @@
 import type { ToolCandidateStrategy } from "./types";
-import { IntentTurnPolicyToolStrategy } from "./strategies/intent-turn-policy";
+import { HostPolicyToolStrategy } from "./strategies/host-policy";
 import { NameMatchToolCandidateStrategy } from "./strategies/name-match";
 import { DescriptorEmbeddingToolCandidateStrategy } from "./strategies/descriptor-embedding";
 import { HostRuleToolCandidateStrategy, type ToolPolicySource } from "./strategies/host-rule";
@@ -10,7 +10,7 @@ import { HostRuleToolCandidateStrategy, type ToolPolicySource } from "./strategi
  * Order is deterministic and documented:
  * 1. HostRule — host policy (allow/deny). Runs first so deny can
  * short-circuit downstream contributions.
- * 2. IntentTurnPolicy — turn-level include/exclude from intent.
+ * 2. HostPolicy — deterministic turn-level include/exclude from host gating.
  * 3. NameMatch — explicit name / displayName / tag mentions. Cheap.
  * 4. DescriptorEmbed — semantic activation via host-supplied SemanticIndex.
  *
@@ -25,7 +25,7 @@ export const createDefaultToolCandidateStrategies = (options?: {
   if (options?.policySource !== undefined) {
     strategies.push(new HostRuleToolCandidateStrategy(options.policySource));
   }
-  strategies.push(new IntentTurnPolicyToolStrategy());
+  strategies.push(new HostPolicyToolStrategy());
   strategies.push(new NameMatchToolCandidateStrategy());
   strategies.push(
     new DescriptorEmbeddingToolCandidateStrategy(

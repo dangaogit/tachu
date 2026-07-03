@@ -267,10 +267,10 @@ describe("DefaultToolActivator", () => {
     expect(typeof result.perStrategyMs["s1"]).toBe("number");
   });
 
-  it("intent turn policy exclude wins over include promote", async () => {
+  it("host policy exclude wins over include promote", async () => {
     const tools = [makeTool("image.qwen"), makeTool("search")];
-    const { IntentTurnPolicyToolStrategy } = await import("./strategies/intent-turn-policy");
-    const strategy = new IntentTurnPolicyToolStrategy();
+    const { HostPolicyToolStrategy } = await import("./strategies/host-policy");
+    const strategy = new HostPolicyToolStrategy();
     const { ctx, activator } = makeCtx(tools, [strategy], {
       turnPolicy: {
         excludeTools: ["image.qwen"],

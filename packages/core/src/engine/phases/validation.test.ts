@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 
 import { InMemoryRuntimeState } from "../../modules/runtime-state";
+import { DefaultHookRegistry } from "../../modules/hooks";
+import { DefaultObservabilityEmitter } from "../../modules/observability";
 import type {
   EngineConfig,
   ExecutionContext,
@@ -12,6 +14,7 @@ import type { ExecutionPhaseOutput } from "./execution";
 import type { CandidateAnswerPhaseOutput } from "./candidate-answer";
 import type { PhaseEnvironment } from "./index";
 import { runValidationPhase } from "./validation";
+import { ValidationRuleRegistry } from "./validation";
 
 const buildEnv = (): PhaseEnvironment =>
   ({
@@ -323,5 +326,55 @@ describe("runValidationPhase", () => {
       reason: "claim_unsupported",
     });
     expect(result.validation.passed).toBe(false);
+  });
+
+  test("turnStop finding hooks surface deterministic and semantic findings with the same outcome reducer", async () => {
+    const env = buildEnv();
+    const hooks = new DefaultHookRegistry(new DefaultObservabilityEmitter());
+    hooks.register("turnStop", async () => ({
+      type: "finding",
+      findings: [
+        {
+          ruleId: "deterministic.test.warning",
+          kind: "deterministic",
+          severity: "warning",
+          code: "deterministic_warning",
+          message: "deterministic warning",
+        },
+      ],
+    }));
+    hooks.register("turnStop", async () => ({
+      type: "finding",
+      findings: [
+        {
+          ruleId: "semantic.test.error",
+          kind: "semantic",
+          severity: "error",
+          code: "semantic_error",
+          message: "semantic error",
+          userVisibleMessage: "semantic degraded",
+        },
+      ],
+    }));
+    (env as unknown as { hooks: DefaultHookRegistry }).hooks = hooks;
+
+    const result = await runValidationPhase(
+      buildState({
+        steps: [{ name: "task-a", status: "completed" }],
+        taskResults: { "task-a": "ok" },
+      }),
+      env,
+      new ValidationRuleRegistry(),
+    );
+
+    expect(result.validation.findings?.map((finding) => finding.kind)).toEqual([
+      "deterministic",
+      "semantic",
+    ]);
+    expect(result.validation.outcome).toEqual({
+      kind: "degrade",
+      reason: "semantic_error",
+      userVisibleReason: "semantic degraded",
+    });
   });
 });

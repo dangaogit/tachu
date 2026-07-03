@@ -114,8 +114,8 @@ describe("engine flow integration", () => {
     }
 
     expect(streamChunks.length).toBeGreaterThan(0);
-    expect(events.some((event) => event.type === "phase_enter")).toBe(true);
-    expect(events.some((event) => event.type === "phase_exit")).toBe(true);
+    expect(events.some((event) => event.type === "loop_step_enter")).toBe(true);
+    expect(events.some((event) => event.type === "loop_step_exit")).toBe(true);
     expect(sessions.listSessions().length).toBe(1);
 
     await engine.dispose();

@@ -17,7 +17,7 @@ describe("registry lifecycle integration", () => {
       name: "runtime-rule",
       description: "runtime added rule",
       type: "preference",
-      scope: ["*"],
+      activation: { mode: "always" },
       content: "请保持输出简洁",
     });
 

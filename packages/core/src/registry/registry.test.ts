@@ -27,7 +27,7 @@ describe("DescriptorRegistry", () => {
       description: "ensure safe output",
       version: "1.0.0",
       type: "rule",
-      scope: ["turnStop"],
+      activation: { mode: "manual" },
       content: "never output secrets",
       tags: ["security"],
       trigger: { type: "semantic" },
@@ -89,7 +89,7 @@ describe("DescriptorRegistry", () => {
       description: "rule 1",
       version: "1.0.0",
       type: "rule",
-      scope: ["*"],
+      activation: { mode: "always" },
       content: "rule",
     });
     await expect(
@@ -99,7 +99,7 @@ describe("DescriptorRegistry", () => {
         description: "rule 1 duplicate",
         version: "1.0.0",
         type: "rule",
-        scope: ["*"],
+        activation: { mode: "always" },
         content: "rule",
       }),
     ).rejects.toBeInstanceOf(RegistryError);
@@ -196,7 +196,7 @@ describe("DescriptorRegistry", () => {
         description: "bad",
         version: "latest",
         type: "rule",
-        scope: ["*"],
+        activation: { mode: "always" },
         content: "rule",
       }),
     ).rejects.toBeInstanceOf(RegistryError);
@@ -211,7 +211,7 @@ describe("DescriptorRegistry", () => {
         description: "legacy",
         deprecated: true,
         type: "rule",
-        scope: ["*"],
+        activation: { mode: "always" },
         content: "legacy rule",
       }),
     ).rejects.toBeInstanceOf(RegistryError);

@@ -11,6 +11,7 @@ import type {
 } from "../types";
 import type { ContextWindow, MemoryEntry } from "../modules/memory";
 import type { ModelCapabilities } from "../modules/provider";
+import { createActivation, createRuleActivationProfile } from "../engine/activation";
 import type { Tokenizer } from "./tokenizer";
 import { renderActiveSkills } from "./render-skills";
 import { stripTrailingCurrentTurn } from "./turn-tail";
@@ -28,7 +29,6 @@ export interface TrimmedSkillRecord {
  * Prompt 组装参数。
  */
 export interface AssembleParams {
-  phase: RuleDescriptor["scope"][number];
   model: string;
   tokenizer: Tokenizer;
   modelCapabilities: ModelCapabilities;
@@ -48,6 +48,18 @@ export interface AssembleParams {
   finalOutputConstraint?: string;
   reserveOutputTokens?: number;
   systemInstruction?: string;
+  /**
+   * manual-activation 规则的显式点名集合;仅这些名字对应的 `manual` 规则会注入。
+   */
+  explicitRuleNames?: readonly string[];
+  /**
+   * 本轮上下文中的文件路径,供 `path`-activation 规则与其 globs 匹配。
+   */
+  contextFilePaths?: readonly string[];
+  /**
+   * 调用方判定为语义相关的规则名集合,供 `semantic`-activation 规则注入。
+   */
+  semanticActiveRuleNames?: readonly string[];
   onCompressContext?: () => Promise<void>;
  /**
  * 来自 ContextBudgetBroker 的裁剪优先级序列。
@@ -100,11 +112,26 @@ const isMessageContentParts = (value: unknown): value is MessageContentPart[] =>
         (p as MessageContentPart).type === "file"),
   );
 
-const filterRulesByPhase = (
+const ruleActivation = createActivation({
+  profiles: {
+    rule: createRuleActivationProfile(),
+  },
+});
+
+const activateRules = async (
   rules: RuleDescriptor[],
-  phase: RuleDescriptor["scope"][number],
-): RuleDescriptor[] =>
-  rules.filter((rule) => rule.scope.includes("*") || rule.scope.includes(phase));
+  params: Pick<AssembleParams, "explicitRuleNames" | "contextFilePaths" | "semanticActiveRuleNames">,
+): Promise<RuleDescriptor[]> => {
+  const result = await ruleActivation.activate("rule", {
+    registry: {
+      list: () => rules,
+    },
+    explicitNames: new Set(params.explicitRuleNames ?? []),
+    contextFilePaths: params.contextFilePaths ?? [],
+    semanticActiveNames: new Set(params.semanticActiveRuleNames ?? []),
+  });
+  return result.active;
+};
 
 const toToolDefinition = (tool: ToolDescriptor): ToolDefinition => ({
   name: tool.name,
@@ -280,7 +307,7 @@ export class DefaultPromptAssembler implements PromptAssembler {
     const skillBudget = params.skillBudget ?? 0.8;
     const skillTokenLimit = Math.floor(limit * skillBudget);
 
-    const activeRules = filterRulesByPhase(params.activeRules, params.phase);
+    const activeRules = await activateRules(params.activeRules, params);
     let skillEntries = buildSkillEntries(params);
     let recallEntries = [...params.recalledEntries];
     let tools = [...params.availableTools];

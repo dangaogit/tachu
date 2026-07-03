@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-rc.12] - 2026-07-03
+
+Concept-alignment pass: after `RuleActivation` (rc.11) fixed the rule scope drift, this release generalizes the fix and removes the same class of drift across the other core concepts (unified activation seam, one guard seam, loop-spine observability, fail-closed loader, dead intent-LLM vocabulary).
+
+### Changed
+
+#### `@tachu/core` (BREAKING)
+
+- **Unified Descriptor Activation seam**: a shared activation core (`engine/activation/`) — `createActivation({ profiles }).activate(kind, turn)` — decides activation for every descriptor kind through one vocabulary `Activation = { mode: "always" } | { mode: "path"; globs } | { mode: "semantic" } | { mode: "manual" }`, with a single precedence invariant (`excludes > pins > path/always > semantic`), advisory-only `SemanticRecall`, and fail-closed missing inputs. The rule path is migrated onto it; `tool` / `skill` / `agent` each gain an `ActivationProfile` (`getActivation` + `PlacementAdapter` + optional `SemanticRecall`) that preserves existing behavior behind the seam (skill tiers/budget/sticky/promotion, tool topK/discovery/fallback, agent subagent-dispatch listing).
+- **One guard seam**: `Hook`, `Guardrail`, and `ValidationRule` are collapsed into a single `HookPoint` firing/registration surface with a typed decision union (`continue` / `mutate` at `preLLM`·`postLLM` / `guard` `pass|block|degrade|annotate` at `turnStart`·`turnStop` / `finding` at `turnStop` / `approve`·`deny` at `preToolUse`). The Engine Seatbelt (guards are fail-closed and cannot reformat) is enforced by the type; `ValidationRule` becomes a `turnStop` finding-guard. The standalone `Guardrail` / `ValidationRule` public interfaces are removed.
+- **Loop-spine observability**: the engine no longer emits `phase_enter` / `phase_exit`; observability is aligned to loop-step vocabulary and dead pipeline/intent references (`PlanningPhase`, `planner`, `Phase-8`) are removed. (The deeper structural phase→loop control-flow collapse remains staged.)
+- **Fail-closed descriptor loader**: unknown enum values now error at load instead of silently degrading — an invalid `tool`/`agent` `sideEffect` no longer falls back to the loosest `readonly`, an unknown skill `trigger.type` no longer silently becomes `semantic`, and an explicit unknown `kind` throws (rule `activation` was already fail-closed in rc.11).
+- **Dead intent-LLM vocabulary removed**: `IntentTurnPolicyLlmOutput` and the unused `llm` normalization input are deleted; `IntentTurnPolicyToolStrategy` is renamed to `HostPolicyToolStrategy` (turn policy is deterministic host gating, not an intent LLM).
+
 ## [1.0.0-rc.11] - 2026-07-03
 
 ### Changed

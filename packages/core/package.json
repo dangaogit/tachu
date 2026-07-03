@@ -1,6 +1,6 @@
 {
   "name": "@tachu/core",
-  "version": "1.0.0-rc.11",
+  "version": "1.0.0-rc.12",
   "description": "Agentic engine core (release candidate) — descriptor registry, deep single-loop execution engine (ADR-0006 loop-lifecycle harness surface), prompt assembler, task scheduler, safety & observability modules, with a built-in tool-use (agentic loop) sub-flow.",
   "type": "module",
   "main": "./dist/index.js",

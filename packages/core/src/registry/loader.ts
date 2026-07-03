@@ -54,17 +54,22 @@ const normalizeTrigger = (
   if (!raw || typeof raw !== "object") {
     return { type: "semantic" };
   }
-  const candidate = raw as { type?: string };
-  if (candidate.type === "always" || candidate.type === "explicit" || candidate.type === "semantic") {
-    return { type: candidate.type };
+  const triggerType = (raw as { type?: unknown }).type;
+  if (triggerType === undefined) {
+    return { type: "semantic" };
   }
-  if (candidate.type === "keyword" || candidate.type === "custom") {
+  if (triggerType === "always" || triggerType === "explicit" || triggerType === "semantic") {
+    return { type: triggerType };
+  }
+  if (triggerType === "keyword" || triggerType === "custom") {
     console.warn(
-      `[tachu] skill "${skillName}" (${filePath}): trigger.type "${candidate.type}" is deprecated, using semantic`,
+      `[tachu] skill "${skillName}" (${filePath}): trigger.type "${triggerType}" is deprecated, using semantic`,
     );
     return { type: "semantic" };
   }
-  return { type: "semantic" };
+  throw ValidationError.invalidConfig(
+    `skill "${skillName}" (${filePath}): 未知 trigger.type "${String(triggerType)}"（合法值：always/semantic/explicit）`,
+  );
 };
 
 /**
@@ -119,6 +124,23 @@ const requireString = (value: unknown, field: string): string => {
   return value;
 };
 
+const normalizeSideEffect = (
+  raw: unknown,
+  descriptorKind: "tool" | "agent",
+  descriptorName: string,
+  filePath?: string,
+): "readonly" | "write" | "irreversible" => {
+  if (raw === undefined) {
+    return "readonly";
+  }
+  if (raw === "readonly" || raw === "write" || raw === "irreversible") {
+    return raw;
+  }
+  throw ValidationError.invalidConfig(
+    `${descriptorKind} "${descriptorName}" (${filePath ?? "?"}): sideEffect 必须是 readonly/write/irreversible`,
+  );
+};
+
 const toDescriptor = async (
   data: Record<string, unknown>,
   content: string,
@@ -159,6 +181,17 @@ const toDescriptor = async (
     Object.entries(data).filter(([field]) => !knownFields.has(field)),
   );
   const name = requireString(data.name, "name");
+  if (
+    kind !== undefined &&
+    kind !== "rule" &&
+    kind !== "skill" &&
+    kind !== "tool" &&
+    kind !== "agent"
+  ) {
+    throw ValidationError.invalidConfig(
+      `descriptor "${name}" (${sourceFile ?? "?"}): 未知 kind "${kind}"（合法值：rule/skill/tool/agent）`,
+    );
+  }
   requireValidDescriptorNameFormat(name, sourceFile);
   const base = {
     ...extraFields,
@@ -197,10 +230,7 @@ const toDescriptor = async (
     const descriptor: ToolDescriptor = {
       ...base,
       kind: "tool",
-      sideEffect:
-        data.sideEffect === "write" || data.sideEffect === "irreversible"
-          ? data.sideEffect
-          : "readonly",
+      sideEffect: normalizeSideEffect(data.sideEffect, "tool", name, sourceFile),
       idempotent: data.idempotent !== false,
       requiresApproval: data.requiresApproval === true,
       timeout: typeof data.timeout === "number" ? data.timeout : 30_000,
@@ -222,10 +252,7 @@ const toDescriptor = async (
     const descriptor: AgentDescriptor = {
       ...base,
       kind: "agent",
-      sideEffect:
-        data.sideEffect === "write" || data.sideEffect === "irreversible"
-          ? data.sideEffect
-          : "readonly",
+      sideEffect: normalizeSideEffect(data.sideEffect, "agent", name, sourceFile),
       idempotent: data.idempotent !== false,
       requiresApproval: data.requiresApproval === true,
       timeout: typeof data.timeout === "number" ? data.timeout : 120_000,

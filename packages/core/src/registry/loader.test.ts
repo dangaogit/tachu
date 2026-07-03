@@ -167,6 +167,181 @@ body`,
     await expect(loader.loadFromDirectory(root)).rejects.toBeInstanceOf(ValidationError);
   });
 
+  test("fail-closes when a tool declares an unknown sideEffect", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tachu-loader-bad-tool-side-effect-"));
+    await mkdir(join(root, "tools"), { recursive: true });
+    await writeFile(
+      join(root, "tools", "bad.md"),
+      `---
+kind: tool
+name: bad-tool
+description: d
+sideEffect: bogus
+execute: runBadTool
+---
+
+body`,
+      "utf8",
+    );
+    const loader = new RegistryLoader(new DescriptorRegistry());
+    await expect(loader.loadFromDirectory(root)).rejects.toThrow(
+      /tool "bad-tool" .*bad\.md.*sideEffect/,
+    );
+  });
+
+  test("loads a tool that declares a write sideEffect", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tachu-loader-write-tool-side-effect-"));
+    await mkdir(join(root, "tools"), { recursive: true });
+    await writeFile(
+      join(root, "tools", "write-tool.md"),
+      `---
+kind: tool
+name: write-tool
+description: d
+sideEffect: write
+execute: runWriteTool
+---
+
+body`,
+      "utf8",
+    );
+    const registry = new DescriptorRegistry();
+    const loader = new RegistryLoader(registry);
+    await loader.loadFromDirectory(root);
+    expect(registry.get("tool", "write-tool")?.sideEffect).toBe("write");
+  });
+
+  test("fail-closes when an agent declares an unknown sideEffect", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tachu-loader-bad-agent-side-effect-"));
+    await mkdir(join(root, "agents"), { recursive: true });
+    await writeFile(
+      join(root, "agents", "bad.md"),
+      `---
+kind: agent
+name: bad-agent
+description: d
+sideEffect: bogus
+---
+
+instructions`,
+      "utf8",
+    );
+    const loader = new RegistryLoader(new DescriptorRegistry());
+    await expect(loader.loadFromDirectory(root)).rejects.toThrow(
+      /agent "bad-agent" .*bad\.md.*sideEffect/,
+    );
+  });
+
+  test("fail-closes when a skill declares an unknown trigger type", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tachu-loader-bad-skill-trigger-"));
+    await mkdir(join(root, "skills"), { recursive: true });
+    await writeFile(
+      join(root, "skills", "bad.md"),
+      `---
+name: bad-skill
+description: d
+trigger:
+  type: typo
+---
+
+instructions`,
+      "utf8",
+    );
+    const loader = new RegistryLoader(new DescriptorRegistry());
+    await expect(loader.loadFromDirectory(root)).rejects.toThrow(
+      /skill "bad-skill" .*bad\.md.*trigger\.type/,
+    );
+  });
+
+  test("keeps keyword trigger type as a deprecated alias for semantic", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tachu-loader-keyword-skill-trigger-"));
+    await mkdir(join(root, "skills"), { recursive: true });
+    await writeFile(
+      join(root, "skills", "keyword-skill.md"),
+      `---
+name: keyword-skill
+description: d
+trigger:
+  type: keyword
+---
+
+instructions`,
+      "utf8",
+    );
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(" "));
+    };
+    try {
+      const registry = new DescriptorRegistry();
+      const loader = new RegistryLoader(registry);
+      await loader.loadFromDirectory(root);
+      expect(registry.get("skill", "keyword-skill")?.trigger).toEqual({ type: "semantic" });
+      expect(warnings.some((message) => message.includes('trigger.type "keyword"'))).toBe(true);
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
+  test("defaults a skill with no trigger to semantic", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tachu-loader-missing-skill-trigger-"));
+    await mkdir(join(root, "skills"), { recursive: true });
+    await writeFile(
+      join(root, "skills", "missing-trigger.md"),
+      `---
+name: missing-trigger
+description: d
+---
+
+instructions`,
+      "utf8",
+    );
+    const registry = new DescriptorRegistry();
+    const loader = new RegistryLoader(registry);
+    await loader.loadFromDirectory(root);
+    expect(registry.get("skill", "missing-trigger")?.trigger).toEqual({ type: "semantic" });
+  });
+
+  test("fail-closes when a descriptor declares an unknown kind", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tachu-loader-bad-kind-"));
+    await writeFile(
+      join(root, "bad-kind.md"),
+      `---
+kind: rulez
+name: bad-kind
+description: d
+execute: runBadKind
+---
+
+body`,
+      "utf8",
+    );
+    const loader = new RegistryLoader(new DescriptorRegistry());
+    await expect(loader.loadFromDirectory(root)).rejects.toThrow(
+      /descriptor "bad-kind" .*bad-kind\.md.*kind/,
+    );
+  });
+
+  test("infers descriptor kind when kind is absent", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tachu-loader-infer-kind-"));
+    await writeFile(
+      join(root, "inferred-tool.md"),
+      `---
+name: inferred-tool
+description: d
+execute: runInferredTool
+---
+
+body`,
+      "utf8",
+    );
+    const registry = new DescriptorRegistry();
+    const loader = new RegistryLoader(registry);
+    await loader.loadFromDirectory(root);
+    expect(registry.get("tool", "inferred-tool")?.kind).toBe("tool");
+  });
+
   test("rejects invalid frontmatter structure", async () => {
     const root = await mkdtemp(join(tmpdir(), "tachu-loader-invalid-"));
     await writeFile(

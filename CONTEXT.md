@@ -138,12 +138,20 @@ _Avoid_: raw caller-beware passthrough, letting a mutation hook bypass the post-
 A `RuleDescriptor` carries an `activation` that answers *when the rule text is injected into the prompt* — `always | manual | semantic | { path, globs }` — mirroring industry rule systems (Cursor/Copilot/Continue/Cline). A rule's only product is prompt text; its terminal is always the prompt. Output-**format** rules use `always` (present every step → shape the Terminal Draft directly).
 _Avoid_: treating a rule's scope as a lifecycle stage; expressing block/annotate/validate via rules (those belong to HookPoint/Guardrail/ValidationRule); the retired pipeline-phase or loop-lifecycle scope names on a rule (safety/intent/planning/execution/validation/output, turnStart/turnStop)
 
+**Descriptor Activation**:
+The one shared axis answering *whether / when a registered descriptor (rule / skill / tool / subagent) becomes active for a turn* — a single vocabulary across all four kinds: `always | { path, globs } | semantic | manual`. Two planes (**Dual-Plane Matching**): `always` / `path` / `manual` are **deterministic** and authoritative; `semantic` is **advisory** **Descriptor Recall** (ranking only). Hard exclude / pin always overrides recall; missing runtime inputs (explicit names, context file paths, recall set) **fail-closed** (not active). Generalizes **Rule Activation** to every kind and reconciles the skill trigger value `explicit` into `manual`. _(Target ubiquitous language unifying today's separate rule `activation`, skill `trigger`, and the tool/skill activators; implementation lands per the activation deepening plan.)_
+_Avoid_: a per-kind activation vocabulary (skill `explicit` vs rule `manual` for the same @-mention); giving activation a lifecycle / phase meaning; letting advisory recall override a deterministic gate; an untyped escape hatch that smuggles mode/kind as strings (keep the `Activation` union exhaustively typed)
+
+**Placement Adapter**:
+The per-kind seam behind the shared **Descriptor Activation** core. It takes the kind-agnostic activation decision and *places* the active descriptors where that kind belongs: skill → T0/T1 tiers + token budget + sticky + promotion; tool → topK visible menu + lazy schema; rule → hard/soft prompt section; subagent → exposed as the `dispatch_agent` callable. Kind-specific knobs (budget, topK, tokenizer, sticky manager) are the adapter's own and never leak into the shared activation interface.
+_Avoid_: pushing budget / sticky / topK into the shared activation interface; a god-module that runs every kind through skill's budget/sticky; a placement adapter that re-decides activation
+
 **Per-Step Compaction**:
 Context-window management performed inside the loop: each step re-checks the context budget and auto-compacts the conversation when it approaches the window (tool outputs accumulate as the loop runs). Fires `preCompact`. Replaces the single pre-loop budget decision. The hard budget (token/time/tool cumulative cut-off) stays turn-level.
 _Avoid_: one-shot pre-loop context decision as the only guard; conflating hard budget with context compaction
 
 **Layered System Prompt**:
-The single loop's system prompt, composed by merging layers: engine base meta-framework + host project instructions (e.g. `CUBE.md`) + agent persona (e.g. `agent.md`) + Active Skills' instructions + `turnStart`/`preLLM`-scoped rules. This is where a turn's tool/skill *guidance* lives (the loop reads it and self-selects) — there is no pre-turn LLM emitting a routing manifest. Mirrors Claude Code's `CLAUDE.md` model.
+The single loop's system prompt, composed by merging layers: engine base meta-framework + host project instructions (e.g. `CUBE.md`) + agent persona (e.g. `agent.md`) + Active Skills' instructions + `always`/`path`-activated rules. This is where a turn's tool/skill *guidance* lives (the loop reads it and self-selects) — there is no pre-turn LLM emitting a routing manifest. Mirrors Claude Code's `CLAUDE.md` model.
 _Avoid_: a pre-turn intent classifier deciding tools/skills; an LLM-authored Turn Policy manifest
 
 **Deterministic Tool/Skill Gating**:
@@ -151,8 +159,8 @@ The "menu vs ordering" split. The loop LLM *decides what to use* (ordering) amon
 _Avoid_: relying on the loop LLM to obey a prompt for hard gating; an LLM guess in place of deterministic gating
 
 **Subagent Dispatch**:
-Spawning a sub-agent from the loop via a built-in Task-style tool for a decomposable **read** subtask, reusing the existing Agent runtime (isolated context via `agentRunId`, its own budget, the same tool-use loop). Governed by the Single-Writer Rule; returns a summary only; `maxDepth` defaults to forbidding nested spawn (depth-1).
-_Avoid_: pre-loop planning-style fan-out; subagents that write; returning the sub-loop's full transcript
+Spawning a sub-agent from the loop via a built-in Task-style tool for a decomposable **read** subtask, reusing the existing Agent runtime (isolated context via `agentRunId`, its own budget, the same tool-use loop). Governed by the Single-Writer Rule; returns a summary only; `maxDepth` defaults to forbidding nested spawn (depth-1). An agent has **two roles**: as a *subagent* it participates in **Descriptor Activation** (`semantic` via its `description`, `manual` by name) and is placed as the `dispatch_agent` callable; as the *main-agent persona* it is instead the `always` base of the **Layered System Prompt**, not an activation candidate.
+_Avoid_: pre-loop planning-style fan-out; subagents that write; returning the sub-loop's full transcript; conflating the always-on main-agent persona with an activated subagent candidate
 
 **Single-Writer Rule**:
 Only the main loop writes; subagents are read/explore-only (their allowed-tools are deterministically filtered to exclude write tools). Prevents conflicting concurrent decisions when work is decomposed across agents.

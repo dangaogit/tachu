@@ -83,7 +83,7 @@ NODE_ENV=production bun run --filter '@tachu/web-fetch-server' start
 | `WEB_FETCH_BROWSER_RECYCLE_AFTER` | number | `500` | 渲染 N 次后回收 Browser |
 | `WEB_FETCH_BROWSER_RECYCLE_INTERVAL_MS` | number | `1800000` | 定时回收间隔 |
 | `WEB_FETCH_STEALTH` | boolean | `false` | 服务级 stealth 默认 |
-| `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` | string | *(空)* | Chromium 路径覆写；仓库 Dockerfile 当前设为 `/ms-playwright/chromium-1217/chrome-linux/chrome` |
+| `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` | string | *(空)* | Chromium 路径覆写；仓库 Dockerfile 当前设为 `/ms-playwright/chromium-1228/chrome-linux/chrome` |
 | `WEB_FETCH_UA_POOL` | string | *(空)* | 逗号分隔 UA 池 |
 
 ### 4.5 安全

@@ -20,7 +20,7 @@ RUN bun install --frozen-lockfile \
 # -----------------------------------------------------------------------------
 # Runner: Playwright Jammy image ships Chromium under /ms-playwright; Bun is installed.
 # -----------------------------------------------------------------------------
-FROM mcr.microsoft.com/playwright:v1.59.1-jammy AS runner
+FROM mcr.microsoft.com/playwright:v1.61.1-jammy AS runner
 
 USER root
 
@@ -54,8 +54,8 @@ ENV WEB_FETCH_HOST=0.0.0.0
 ENV WEB_FETCH_PORT=8787
 ENV WEB_FETCH_LOG_FORMAT=jsonl
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-# Playwright v1.59.1 bundles Chromium revision 1217 (see playwright-core browsers.json).
-ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/ms-playwright/chromium-1217/chrome-linux/chrome
+# Playwright v1.61.1 bundles Chromium revision 1228 (see playwright-core browsers.json).
+ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/ms-playwright/chromium-1228/chrome-linux/chrome
 
 EXPOSE 8787
 

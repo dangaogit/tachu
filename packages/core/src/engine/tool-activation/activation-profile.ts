@@ -12,8 +12,12 @@ import {
   type ExecutionSubject,
 } from "../../types/context";
 import type { ToolDescriptor } from "../../types/descriptor";
-import type { TurnPolicy } from "../../types/turn-policy";
-import { DefaultToolActivator } from "./activator";
+import type { GatingPolicy } from "../../types/gating-policy";
+import {
+  scoreToolStrategies,
+  selectVisibleTools,
+  type ScoredToolContributions,
+} from "./activator";
 import { createDefaultToolCandidateStrategies } from "./default-strategies";
 import type { ToolPolicySource } from "./strategies/host-rule";
 import type {
@@ -30,7 +34,7 @@ export interface ToolActivationProfileDeps {
   policySource?: ToolPolicySource | undefined;
   embeddingMinScore?: number | undefined;
   semanticRetrieval?: SemanticRetrievalFacade | undefined;
-  turnPolicy?: TurnValue<TurnPolicy> | undefined;
+  gatingPolicy?: TurnValue<GatingPolicy> | undefined;
   discoveryExpansion?: TurnValue<DiscoveryExpansionConfig> | undefined;
   disableAllStrategies?: TurnValue<boolean> | undefined;
   subject?: TurnValue<ExecutionSubject> | undefined;
@@ -84,7 +88,7 @@ const contextFor = (
 ): ToolActivationContext => {
   const subject = resolveTurnValue(deps.subject, turn);
   const disableAllStrategies = resolveTurnValue(deps.disableAllStrategies, turn);
-  const turnPolicy = resolveTurnValue(deps.turnPolicy, turn);
+  const gatingPolicy = resolveTurnValue(deps.gatingPolicy, turn);
   const discoveryExpansion = resolveTurnValue(deps.discoveryExpansion, turn);
   return {
     query: turn.query ?? "",
@@ -101,40 +105,9 @@ const contextFor = (
       : {}),
     ...(subject !== undefined ? { subject } : {}),
     ...(disableAllStrategies !== undefined ? { disableAllStrategies } : {}),
-    ...(turnPolicy !== undefined ? { turnPolicy } : {}),
+    ...(gatingPolicy !== undefined ? { gatingPolicy } : {}),
     ...(discoveryExpansion !== undefined ? { discoveryExpansion } : {}),
   };
-};
-
-const scoreStrategies = async (
-  ctx: ToolActivationContext,
-  strategies: readonly ToolCandidateStrategy[],
-): Promise<Array<ToolCandidateContribution & { strategy: string }>> => {
-  if (ctx.disableAllStrategies === true || strategies.length === 0) {
-    return [];
-  }
-  const raw: Array<ToolCandidateContribution & { strategy: string }> = [];
-  await Promise.all(
-    strategies.map(async (strategy) => {
-      try {
-        const contributions = await strategy.score(ctx);
-        for (const contribution of contributions) {
-          raw.push({ ...contribution, strategy: strategy.name });
-        }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        ctx.observability.emit({
-          timestamp: Date.now(),
-          correlation: ctx.correlation,
-          subject: ctx.subject,
-          phase: "planning",
-          type: "tool_activation_strategy_failed",
-          payload: { strategy: strategy.name, error: message },
-        });
-      }
-    }),
-  );
-  return raw;
 };
 
 const recallHitsFromContributions = (
@@ -180,26 +153,43 @@ const recallHitsFromContributions = (
     }));
 };
 
+/**
+ * 工具激活 Profile（A 概念对齐：tool 接入统一激活 seam）。
+ *
+ * 决策层由统一 core 的 `semanticRecall` 承担：策略**只跑一次**产出候选贡献，
+ * 缓存到 per-turn WeakMap；`placement` 复用缓存的贡献做 merge/topK/回落/discovery
+ * 选择，绝不把策略（含向量检索）跑第二遍。`DefaultToolActivator` 的选择逻辑
+ * 已抽为 `selectVisibleTools`，成为本 placement 的内部实现。
+ */
 export const createToolActivationProfile = (
   deps: ToolActivationProfileDeps = {},
-): ActivationProfile<"tool"> => ({
-  getActivation: () => ({ mode: "semantic" }),
-  semanticRecall: {
-    async recall(_kind, turn) {
-      const ctx = contextFor(deps, turn);
-      const contributions = await scoreStrategies(ctx, strategiesFor(deps));
-      return recallHitsFromContributions(contributions, ctx.agentVisibleTools);
+): ActivationProfile<"tool"> => {
+  const scoredByTurn = new WeakMap<ActivationTurn<"tool">, ScoredToolContributions>();
+  const scoreForTurn = async (
+    turn: ActivationTurn<"tool">,
+  ): Promise<{ ctx: ToolActivationContext; scored: ScoredToolContributions }> => {
+    const ctx = contextFor(deps, turn);
+    const cached = scoredByTurn.get(turn);
+    if (cached !== undefined) {
+      return { ctx, scored: cached };
+    }
+    const scored = await scoreToolStrategies(ctx, strategiesFor(deps));
+    scoredByTurn.set(turn, scored);
+    return { ctx, scored };
+  };
+  return {
+    getActivation: () => ({ mode: "semantic" }),
+    semanticRecall: {
+      async recall(_kind, turn) {
+        const { ctx, scored } = await scoreForTurn(turn);
+        return recallHitsFromContributions(scored.raw, ctx.agentVisibleTools);
+      },
     },
-  },
-  placement: {
-    async place({ turn }) {
-      const activatorOptions =
-        deps.topK === undefined
-          ? { strategies: strategiesFor(deps) }
-          : { strategies: strategiesFor(deps), topK: deps.topK };
-      const activator = new DefaultToolActivator(activatorOptions);
-      const result = await activator.activate(contextFor(deps, turn));
-      return result.visibleTools;
+    placement: {
+      async place({ turn }) {
+        const { ctx, scored } = await scoreForTurn(turn);
+        return selectVisibleTools(ctx, scored, deps.topK ?? undefined).visibleTools;
+      },
     },
-  },
-});
+  };
+};

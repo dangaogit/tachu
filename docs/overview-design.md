@@ -76,7 +76,7 @@ graph TD
   name: 唯一标识
   description: 自然语言描述（用于语义发现）
   tags: 标签（用于过滤和分类）
-  trigger: 激活条件
+  activation: 激活条件（四类共用：always/manual/semantic/path）
   requires: 显式依赖引用
   ```
 
@@ -329,7 +329,7 @@ turnStart（pre-guard，恒 fail-closed，见「loop-lifecycle 挂载面」）
   └── pass / degrade / annotate → 携带说明前缀继续
   ↓
 tool-routing（确定性预处理，取代原 intent 分类 / precheck / planning / graph-check 四个 phase）
-  ├── turnPolicy 规范化（只消费显式 scope / 已 pre-seed 的 metadata，不做模型猜测）
+  ├── gatingPolicy 规范化（只消费显式 scope / 已 pre-seed 的 metadata，不做模型猜测）
   ├── 工具集通过 ToolActivator.visibleTools 确定性收窄
   ├── 显式 @agent 提及 → agent-batch 快路径（与主干 loop 并行的独立确定性能力）
   └── 其余情况 → 构造单个 tool-use 任务，交给唯一主干 loop（零匹配工具时 loop 仍会执行，
@@ -401,7 +401,7 @@ Plan 不是核心抽象；ADR-0006 塌陷深单 loop 后也**不再有「规划�
 
 - 同一 session 新消息到达时 last-message-wins，自动停止当前执行
 - 硬预算（token / time / tool 累计）熔断保持 turn 级累计；context-window 决策（trim/compress/degrade）改为 per-step 复检 + 超阈值自动 compact（`preCompact`）
-- observability 的 `loop_step_enter`/`loop_step_exit` 标记 6 个 `EnginePhase` 宏观边界（StreamChunk 层仍保留 `phase-enter`/`phase-exit`）；`tool-use` loop 内部用扁平 per-step 事件（`tool_loop_step_*` / `tool_call_*` / `llm_call_*` / `hook_fired`）+ `parentStepId` 关联
+- observability 的 `loop_step_enter`/`loop_step_exit` 标记 6 个 `EnginePhase` 宏观边界（内部 stage taxonomy；StreamChunk 层对外只发 loop-lifecycle 的 `lifecycle` chunk：`turnStart`/`turnStop`，不再暴露 `phase-enter`/`phase-exit`）；`tool-use` loop 内部用扁平 per-step 事件（`tool_loop_step_*` / `tool_call_*` / `llm_call_*` / `hook_fired`）+ `parentStepId` 关联
 
 ### 关键流程特性
 

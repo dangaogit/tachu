@@ -16,7 +16,7 @@ describe("descriptor type guards", () => {
         deprecated: false,
         deprecatedMessage: "use tool-2",
         tags: ["a", "b"],
-        trigger: { type: "always" },
+        activation: { mode: "always" },
       }),
     ).toBe(true);
   });

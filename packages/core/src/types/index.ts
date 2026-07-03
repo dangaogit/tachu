@@ -11,6 +11,6 @@ export * from "./resource";
 export * from "./result";
 export * from "./scope";
 export * from "./evidence";
-export * from "./turn-policy";
+export * from "./gating-policy";
 export * from "./multimodal-resolver";
 

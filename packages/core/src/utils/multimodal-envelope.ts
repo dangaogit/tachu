@@ -101,7 +101,7 @@ export function buildMultimodalInputEnvelope(
 }
 
 /**
- * Pre-seed {@link InputEnvelope} with turnPolicy.includeTools ().
+ * Pre-seed {@link InputEnvelope} with gatingPolicy.includeTools ().
  * Host supplies concrete tool names; core does not hardcode domain tools.
  */
 export function buildIncludeToolsInputEnvelope(
@@ -116,7 +116,7 @@ export function buildIncludeToolsInputEnvelope(
       modality: "text",
       source,
       size: t.length,
-      turnPolicy: {
+      gatingPolicy: {
         excludeTools: [],
         includeTools: [...includeTools],
         explicitSkills: [],

@@ -1,13 +1,13 @@
 import { ValidationError } from "../../errors";
-import type { TurnPolicy } from "../../types/turn-policy";
+import type { GatingPolicy } from "../../types/gating-policy";
 import type { Tokenizer } from "../../prompt/tokenizer";
 import type { AdapterCallContext } from "../../types";
 import { engineEventFromAdapterContext } from "../turn-outcome";
-import { AlwaysTriggerPinningStrategy } from "./strategies/always-trigger";
+import { AlwaysActivationPinningStrategy } from "./strategies/always-activation";
 import { ExplicitSkillPinningStrategy } from "./strategies/explicit-skill-pinning";
 import { SnapshotRefsPinningStrategy } from "./strategies/snapshot-refs";
 import { StickyPinningStrategy } from "./strategies/sticky-pinning";
-import { TurnPolicyPinningStrategy } from "./strategies/turn-policy-pinning";
+import { GatingPolicyPinningStrategy } from "./strategies/gating-policy-pinning";
 import {
   countCandidateSkillTokens,
   countPinnedSkillTokens,
@@ -31,7 +31,7 @@ import type {
 interface MergedPinned {
   skillName: string;
   sources: ActivationSource[];
-  reasonKind: "snapshot-ref" | "always" | "sticky" | "promote" | "explicit" | "intent-pin";
+  reasonKind: "snapshot-ref" | "always" | "sticky" | "promote" | "explicit" | "gating-pin";
   stickyAddedTurn?: number;
 }
 
@@ -78,8 +78,8 @@ const mergePinnedContributions = (
             ? "snapshot-ref"
             : contribution.reason === "explicit-skill-mention"
               ? "explicit"
-              : contribution.reason === "intent-turn-policy:pin"
-                ? "intent-pin"
+              : contribution.reason === "gating-policy:pin"
+                ? "gating-pin"
                 : contribution.reason === "always"
                   ? "always"
                   : contribution.reason.startsWith("promote:")
@@ -93,25 +93,25 @@ const mergePinnedContributions = (
   return [...merged.values()];
 };
 
-const applyTurnPolicySkillFilter = (
+const applyGatingPolicySkillFilter = (
   mergedPinned: MergedPinned[],
   mergedCandidates: MergedCandidate[],
-  turnPolicy: TurnPolicy | undefined,
+  gatingPolicy: GatingPolicy | undefined,
   emitWarning: (reason: string, details: Record<string, unknown>) => void,
 ): { pinned: MergedPinned[]; candidates: MergedCandidate[] } => {
-  if (!turnPolicy) {
+  if (!gatingPolicy) {
     return { pinned: mergedPinned, candidates: mergedCandidates };
   }
-  const explicit = new Set(turnPolicy.explicitSkills);
-  const exclude = new Set(turnPolicy.excludeSkills);
+  const explicit = new Set(gatingPolicy.explicitSkills);
+  const exclude = new Set(gatingPolicy.excludeSkills);
   for (const skillName of explicit) {
     if (exclude.has(skillName)) {
-      emitWarning("turn-policy:explicit-overrides-exclude", { skillName });
+      emitWarning("gating-policy:explicit-overrides-exclude", { skillName });
     }
   }
-  for (const skillName of turnPolicy.pinSkills) {
+  for (const skillName of gatingPolicy.pinSkills) {
     if (exclude.has(skillName) && !explicit.has(skillName)) {
-      emitWarning("turn-policy:skill-conflict", { skillName });
+      emitWarning("gating-policy:skill-conflict", { skillName });
     }
   }
   const keepSkill = (skillName: string): boolean =>
@@ -252,10 +252,10 @@ export class DefaultSkillActivator implements SkillActivator {
     mergedPinned = [...mergedPinned, ...promoted];
     mergedCandidates = remainingCandidates;
 
-    const filtered = applyTurnPolicySkillFilter(
+    const filtered = applyGatingPolicySkillFilter(
       mergedPinned,
       mergedCandidates,
-      ctx.turnPolicy,
+      ctx.gatingPolicy,
       (reason, details) => {
         ctx.observability.emit(
           engineEventFromAdapterContext(this.adapterContext, {
@@ -297,7 +297,7 @@ export class DefaultSkillActivator implements SkillActivator {
 
     const allSkills = ctx.registry.list("skill");
     const alwaysSkillNames = new Set(
-      allSkills.filter((skill) => skill.trigger?.type === "always").map((skill) => skill.name),
+      allSkills.filter((skill) => skill.activation.mode === "always").map((skill) => skill.name),
     );
     const stickySkillNames = new Set(stickyList.active.map((entry) => entry.skillName));
 
@@ -414,8 +414,8 @@ export class DefaultSkillActivator implements SkillActivator {
         excluded.push({ name: skill.name, reason: "deprecated" });
         continue;
       }
-      if (skill.trigger?.type === "explicit") {
-        excluded.push({ name: skill.name, reason: "explicit-trigger-not-matched" });
+      if (skill.activation.mode === "manual") {
+        excluded.push({ name: skill.name, reason: "manual-not-matched" });
       }
     }
 
@@ -482,10 +482,19 @@ export const createDefaultSkillActivator = (
   params: DefaultSkillActivatorParams,
 ): DefaultSkillActivator => new DefaultSkillActivator(params);
 
+/**
+ * 旧默认 pinning 策略栈（snapshot-refs / explicit / gating-pin / always-activation
+ * / sticky）。
+ *
+ * A 概念对齐后，**生产路径**（`resolveRunSkills`）已改走统一激活 seam：前四类
+ * pinning 的决策收敛进通用激活模型（由 `DecisionPinningStrategy` 依据 core 决策
+ * 复原），sticky 作为 skill 专属 placement 保留。本工厂保留为**可选库工具**
+ * （host 可直接驱动 `DefaultSkillActivator` 时复用），不在默认生产装配中使用。
+ */
 export const createDefaultPinningStrategies = (): PinningStrategy[] => [
   new SnapshotRefsPinningStrategy(),
   new ExplicitSkillPinningStrategy(),
-  new TurnPolicyPinningStrategy(),
-  new AlwaysTriggerPinningStrategy(),
+  new GatingPolicyPinningStrategy(),
+  new AlwaysActivationPinningStrategy(),
   new StickyPinningStrategy(),
 ];

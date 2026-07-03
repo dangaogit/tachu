@@ -85,7 +85,7 @@ interface BaseDescriptor {
   deprecated?: boolean;      // 治理标记：是否已废弃
   deprecatedMessage?: string; // deprecated=true 时必须提供迁移提示
   tags?: string[];           // 标签（过滤和分类）
-  trigger?: TriggerCondition; // 激活条件
+  activation?: Activation;   // 激活条件（四类共用；rule/skill 由 loader 解析，tool/agent 由 profile 提供固定不变式）
   requires?: DependencyRef[]; // 显式依赖引用
 }
 ```
@@ -97,16 +97,23 @@ interface BaseDescriptor {
 - 建议业务扩展字段使用 `x-<vendor>-<field>` 或命名空间块（如 `x-acme: { ... }`）避免与未来核心字段碰撞。
 - 版本解析规则：`get(kind, name)` 返回 latest（稳定版优先；若无稳定版则取最高 pre-release）；显式 `get(kind, name, version)` 走精确匹配。
 
-#### TriggerCondition
+#### Activation
+
+四类描述符**共用的唯一激活词汇**。取代已废弃的 `trigger`（always/semantic/explicit）——
+后者只有 skill 读取、且与 `activation` 概念重复，是概念漂移的来源。rule/skill 由 loader 从
+frontmatter `activation` 解析；tool/agent 通常省略本字段，由各自的 `ActivationProfile`
+提供固定不变式（tool = `semantic` 发现、agent = `always` 可见）。统一经 `engine/activation`
+深模块消费。
 
 ```typescript
-type TriggerCondition =
-  | { type: 'always' }                    // 始终激活
-  | { type: 'keyword'; keywords: string[] } // 关键词匹配
-  | { type: 'semantic'; threshold: number }  // 语义相似度阈值
-  | { type: 'explicit' }                   // 仅显式引用时激活
-  | { type: 'custom'; handler: string }     // 自定义判定（引用已注册的判定函数名）
+type Activation =
+  | { mode: 'always' }                       // 始终激活（对应 Cursor alwaysApply）
+  | { mode: 'manual' }                       // 仅显式点名时激活（@rule / UI 勾选）
+  | { mode: 'semantic' }                     // 由语义发现判定后激活（缺省 fail-closed）
+  | { mode: 'path'; globs: readonly string[] }; // 命中 globs 文件出现在上下文时激活
 ```
+
+未知 `mode` / path 缺 `globs` 在 loader 加载期 **fail-closed** 显式报错，绝不静默降级。
 
 #### DependencyRef
 
@@ -239,7 +246,7 @@ interface AgentDescriptor extends BaseDescriptor {
 
 **降级策略**：当无可用的向量化能力注册时，语义发现面自动降级为全量扫描模式：
 
-- 遍历所有已注册描述符，基于 `description` / `tags` / `trigger` 做文本匹配
+- 遍历所有已注册描述符，基于 `description` / `tags` / `activation` 做文本匹配
 - 同时从输入上下文中提取意图信号（如用户直接指定了一个未注册的技能名称，引擎需能识别出该意图并给出明确反馈）
 - 降级对上层透明，不影响后续确定性闸门逻辑
 
@@ -398,7 +405,7 @@ interface Artifact {
 
 ### 6.4 流式输出协议
 
-> **ADR-0006 更新**：`plan-preview` 的 `phase` 字段随 `planning` 塌陷进 `tool-routing`（§7.2）而由 `'planning'` 改为 `'tool-routing'`；`delta` 的生产者从已删除的 `direct-answer` Sub-flow 改为唯一主干 `tool-use` loop；新增一组 loop-lifecycle 专属 chunk（`phase-enter`/`phase-exit`/`reasoning-delta`/`tool-loop-*`/`tool-call-*`/`usage`），供 CLI/SDK 对 loop 内部进展做细粒度渲染。以下为当前真实类型（`packages/core/src/types/io.ts`）：
+> **ADR-0006 更新**：`plan-preview` 的 `phase` 字段随 `planning` 塌陷进 `tool-routing`（§7.2）而由 `'planning'` 改为 `'tool-routing'`；`delta` 的生产者从已删除的 `direct-answer` Sub-flow 改为唯一主干 `tool-use` loop；对外只暴露 loop-lifecycle 词汇 —— 用 `LifecycleChunk`（`turnStart`/`turnStop`，键为 `HookPoint`）标记轮次边界（取代已内部化的 `phase-enter`/`phase-exit`），loop 内部细粒度进展由 `reasoning-delta`/`tool-loop-*`/`tool-call-*`/`usage` 承载。以下为当前真实类型（`packages/core/src/types/io.ts`）：
 
 ```typescript
 type StreamChunkPayload =
@@ -407,8 +414,7 @@ type StreamChunkPayload =
   | { type: 'artifact';     artifact: Artifact }
   | { type: 'error';        error: EngineError }
   | { type: 'plan-preview'; phase: 'tool-routing'; route: ExecutionRoute }
-  | PhaseEnterChunk        // { type: 'phase-enter'; phase: EnginePhase }
-  | PhaseExitChunk         // { type: 'phase-exit';  phase: EnginePhase }
+  | LifecycleChunk         // { type: 'lifecycle'; point: HookPoint; status: 'enter'|'exit' }
   | ReasoningDeltaChunk    // loop 内 LLM 推理增量（可选，供支持 reasoning 的模型使用）
   | ToolLoopStepChunk      // 一步 loop 迭代开始
   | ToolLoopDeltaChunk     // loop 内 LLM 文本增量
@@ -426,8 +432,8 @@ type StreamChunk = StreamChunkPayload & StreamEnvelope; // StreamEnvelope 附带
 
 | `type` | 触发时机 | 生产者 | 消费提示 |
 | --- | --- | --- | --- |
-| `progress` | 每个 `EnginePhase` 进入时 / 关键里程碑 | Engine 主循环 | UI 显示阶段提示，不影响最终输出 |
-| `phase-enter`/`phase-exit` | 6 个 `EnginePhase`（session/safety/tool-routing/execution/validation/output）边界 | Engine 主循环 | 结构化阶段边界事件，`progress` 的类型安全替代 |
+| `progress` | loop 内部关键里程碑（tool-use / tool-routing 子流程） | Engine / 子流程 | UI 显示进度提示，不影响最终输出 |
+| `lifecycle` | 轮次边界里程碑（`turnStart` 在 setup+guard 后、`turnStop` 包裹 post-guard 验证），键为 `HookPoint` | Engine 主循环 | 结构化轮次边界事件；对外只用 loop-lifecycle 词汇，不泄漏内部 `EnginePhase` |
 | `plan-preview` | `tool-routing` 确定性阶段产出单步 Plan 后 | `phases/tool-routing.ts` | UI 可在执行前先展示 Plan；Plan 模式下消费完即可结束 |
 | `delta`/`tool-loop-delta` | loop 内 LLM 产出文本增量时 | `subflows/tool-use.ts` | UI 增量渲染 |
 | `tool-loop-step`/`tool-loop-step-end` | loop 每步迭代的开始/结束 | `subflows/tool-use.ts` | UI 展示 loop 进度（第几步/共几步） |
@@ -459,7 +465,7 @@ type StreamChunk = StreamChunkPayload & StreamEnvelope; // StreamEnvelope 附带
 
 **`tool-routing` 不含 LLM 调用**，一次性顶替原 `intent` 分类 + `precheck` 前置校验 + `planning` 的 simple/complex 路由分支 + `graph-check` 依赖图校验：
 
-1. **turnPolicy 规范化**：只消费 `scope` / 已 pre-seed 的 `input.metadata.turnPolicy`（如 CLI 显式指定），不再有 `llm` 分量——hard enforcement（工具 allow/deny、技能 pin/exclude）仅由 host 显式 / config / agent snapshot 驱动，不做模型猜测。
+1. **gatingPolicy 规范化**：只消费 `scope` / 已 pre-seed 的 `input.metadata.gatingPolicy`（如 CLI 显式指定），不再有 `llm` 分量——hard enforcement（工具 allow/deny、技能 pin/exclude）仅由 host 显式 / config / agent snapshot 驱动，不做模型猜测。
 2. **工具收窄**：调用 `ToolActivator.activate()` 产出 `visibleTools`（相关性收窄，而非全量 registry），供 loop 默认工具集使用（见 §7.11）。
 3. **路由分流**（`ToolRoutingPhaseOutput`）：
    - 显式 `@agent` 提及 → 确定性 agent-batch 任务（与 complexity 分类无关的独立能力，ADR-0006 未要求删除）；
@@ -1130,7 +1136,7 @@ type EventType =
   | 'tool_loop_failure_recovery_injected';
 ```
 
-**rc.12 可观测性对齐**：`Engine.emitPhaseStart` / `emitPhaseEnd` 在 observability 层发 `loop_step_enter`/`loop_step_exit`（取代 `phase_enter`/`phase_exit`），StreamChunk 层仍 yield 结构化 `phase-enter`/`phase-exit` 供 CLI 消费。`tool-use` loop 内部复用扁平 per-step 事件：`tool_loop_step_start`/`tool_loop_step_end`、`tool_call_start`/`tool_call_end`、`llm_call_start`/`llm_call_end`、`hook_fired`（每次 9 个 loop-lifecycle HookPoint 触发，见 §9.8）。这些事件通过 `parentStepId` 相互关联。
+**rc.12 可观测性对齐**：`Engine.emitPhaseStart` / `emitPhaseEnd` 在 observability 层发 `loop_step_enter`/`loop_step_exit`（取代 `phase_enter`/`phase_exit`，内部 stage taxonomy）。StreamChunk 层对外只 yield loop-lifecycle 的 `lifecycle` chunk（`turnStart`/`turnStop`）供 CLI 消费，不再暴露 `phase-enter`/`phase-exit` 或 `EnginePhase`。`tool-use` loop 内部复用扁平 per-step 事件：`tool_loop_step_start`/`tool_loop_step_end`、`tool_call_start`/`tool_call_end`、`llm_call_start`/`llm_call_end`、`hook_fired`（每次 9 个 loop-lifecycle HookPoint 触发，见 §9.8）。这些事件通过 `parentStepId` 相互关联。
 
 **双通道消费**：
 

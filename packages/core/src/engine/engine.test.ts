@@ -276,10 +276,9 @@ describe("Engine", () => {
     expect(chunkTypes.filter((type) => type === "tool-call-end")).toHaveLength(1);
   });
 
- test("runStream emits structured phase-enter / phase-exit around loop-spine boundaries", async () => {
+ test("runStream emits loop-lifecycle milestones (turnStart/turnStop) around the deep loop", async () => {
     const engine = new Engine(config);
-    const phaseEnters: string[] = [];
-    const phaseExits: { phase: string; ok: boolean }[] = [];
+    const lifecycle: { point: string; status: string; ok: boolean | undefined }[] = [];
     for await (const chunk of engine.runStream(
       { content: "ping", metadata: { modality: "text", size: 4 } },
       {
@@ -294,25 +293,19 @@ describe("Engine", () => {
         scopes: ["*"],
       },
     )) {
-      if (chunk.type === "phase-enter") {
-        phaseEnters.push(chunk.phase);
-      } else if (chunk.type === "phase-exit") {
-        phaseExits.push({ phase: chunk.phase, ok: chunk.ok });
+      if (chunk.type === "lifecycle") {
+        lifecycle.push({ point: chunk.point, status: chunk.status, ok: chunk.ok });
       } else if (chunk.type === "error") {
         throw chunk.error;
       }
     }
- // loop 主干边界全部进入且全部以 ok=true 退出
-    expect(phaseEnters).toEqual([
-      "session",
-      "safety",
-      "tool-routing",
-      "execution",
-      "validation",
-      "output",
+ // 对外只暴露 loop-lifecycle 词汇（不再泄漏内部 6 阶段名）：turnStart 里程碑
+ // 在 setup+guard 后，turnStop 里程碑（enter/exit）包裹 post-guard 验证。
+    expect(lifecycle).toEqual([
+      { point: "turnStart", status: "enter", ok: true },
+      { point: "turnStop", status: "enter", ok: true },
+      { point: "turnStop", status: "exit", ok: true },
     ]);
-    expect(phaseExits.map((p) => p.phase)).toEqual(phaseEnters);
-    expect(phaseExits.every((p) => p.ok === true)).toBe(true);
     await engine.dispose();
   });
 
@@ -347,7 +340,7 @@ describe("Engine", () => {
         scopes: ["*"],
       },
     )) {
-      if (chunk.type === "progress" && chunk.phase === "execution") {
+      if (chunk.type === "lifecycle" && chunk.point === "turnStart") {
         engine.cancel("s-cancel");
       }
       if (chunk.type === "error") {
@@ -1166,39 +1159,36 @@ describe("Engine", () => {
           type: chunk.type,
           content: (chunk as { content?: string }).content ?? "",
         });
-      } else if (chunk.type === "phase-enter" || chunk.type === "phase-exit") {
-        chunks.push({ type: chunk.type, phase: chunk.phase });
+      } else if (chunk.type === "lifecycle") {
+        chunks.push({ type: `lifecycle:${chunk.point}:${chunk.status}` });
       } else {
         chunks.push({ type: chunk.type });
       }
     }
 
-    const execExitIndex = chunks.findIndex(
-      (chunk) => chunk.type === "phase-exit" && chunk.phase === "execution",
-    );
-    const validationEnterIndex = chunks.findIndex(
-      (chunk) => chunk.type === "phase-enter" && chunk.phase === "validation",
+ // 深单 loop 折叠后不再对外暴露 phase 边界；用 `turnStop enter` 里程碑作为
+ // "loop 已结束、进入 post-guard" 的公共分界。terminalDraft 的流式内容必须在
+ // 此之前吐出（loop 内部），且此后不应再有新的流式文本（candidate-answer 不再
+ // 发起二次 LLM 重写）。
+    const turnStopEnterIndex = chunks.findIndex(
+      (chunk) => chunk.type === "lifecycle:turnStop:enter",
     );
     const isStreamedText = (chunk: (typeof chunks)[number]): boolean =>
       chunk.type === "delta" || chunk.type === "tool-loop-delta";
-    const deltasBeforeExecExit = chunks
-      .slice(0, execExitIndex)
+    const deltasBeforeTurnStop = chunks
+      .slice(0, turnStopEnterIndex)
       .filter(isStreamedText)
       .map((chunk) => chunk.content ?? "")
       .join("");
-    const deltasAfterExecExit = chunks
-      .slice(execExitIndex + 1, validationEnterIndex)
+    const deltasAfterTurnStop = chunks
+      .slice(turnStopEnterIndex + 1)
       .filter(isStreamedText)
       .map((chunk) => chunk.content ?? "")
       .join("");
 
-    expect(execExitIndex).toBeGreaterThanOrEqual(0);
-    expect(validationEnterIndex).toBeGreaterThan(execExitIndex);
- // terminalDraft 的流式内容在 loop 内部（execution 阶段）就已经吐出，
- // candidate-answer 不再发起第二次 LLM 调用来重写它，因此 execution → validation
- // 之间不应再出现任何新的 delta 内容。
-    expect(deltasBeforeExecExit).toContain("tool loop terminal draft");
-    expect(deltasAfterExecExit).toBe("");
+    expect(turnStopEnterIndex).toBeGreaterThanOrEqual(0);
+    expect(deltasBeforeTurnStop).toContain("tool loop terminal draft");
+    expect(deltasAfterTurnStop).toBe("");
     expect(chatCalls).toBe(2);
 
     await engine.dispose();

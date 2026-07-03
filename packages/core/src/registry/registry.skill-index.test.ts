@@ -12,7 +12,7 @@ describe("DescriptorRegistry vector indexing", () => {
       name: "normal",
       description: "normal skill",
       instructions: "do work",
-      trigger: { type: "semantic" },
+      activation: { mode: "semantic" },
     });
     await registry.register({
       kind: "tool",

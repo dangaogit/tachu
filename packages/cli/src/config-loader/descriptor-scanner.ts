@@ -8,6 +8,7 @@ import {
   isSkillDirectoryForm,
   requireValidDescriptorNameFormat,
   warnOnDescriptorIdentityMismatch,
+  type Activation,
   type AnyDescriptor,
   type RuleActivation,
   type RuleDescriptor,
@@ -63,25 +64,45 @@ type DescriptorKind = "rule" | "skill" | "tool" | "agent";
 /**
  * 与 parseDescriptor 内部四类分支条件保持一致，仅用于在分支前先确定 kind，
  * 以便统一做 name 格式校验 / identity 一致性提示。
+ *
+ * **fail-closed**：显式 `kind` 非法值报错；未声明 `kind` 时若字段特征同时命中
+ * 多个 kind（如既有 `execute` 又有 `instructions`）报错，绝不静默归类
+ * （与 `@tachu/core` 的 loader 一致）。抛出的错误会被 `scanDescriptors` 逐文件
+ * 捕获为 warning 并跳过该描述符，而不会静默加载成错误的 kind。
  */
 function resolveDescriptorKind(data: Record<string, unknown>): DescriptorKind {
   const kind = typeof data.kind === "string" ? data.kind : undefined;
   const type = typeof data.type === "string" ? data.type : undefined;
-  if (kind === "rule" || type === "rule" || type === "preference") {
-    return "rule";
+  if (kind !== undefined) {
+    if (kind === "rule" || kind === "skill" || kind === "tool" || kind === "agent") {
+      return kind;
+    }
+    throw new DescriptorScanError(`未知 kind "${kind}"（合法值：rule/skill/tool/agent）`);
   }
-  if (kind === "tool" || "execute" in data || "inputSchema" in data) {
-    return "tool";
+  const signatureKinds: DescriptorKind[] = [];
+  if (type === "rule" || type === "preference") signatureKinds.push("rule");
+  if ("execute" in data || "inputSchema" in data) signatureKinds.push("tool");
+  if ("instructions" in data || "maxDepth" in data) signatureKinds.push("agent");
+  if (signatureKinds.length > 1) {
+    throw new DescriptorScanError(
+      `无法确定 kind——字段特征同时匹配 ${signatureKinds.join(
+        "/",
+      )}；请显式声明 kind（rule/skill/tool/agent），避免被静默归类`,
+    );
   }
-  if (kind === "agent" || "instructions" in data || "maxDepth" in data) {
-    return "agent";
-  }
-  return "skill";
+  return signatureKinds[0] ?? "skill";
 }
 
-function parseRuleActivation(raw: unknown): RuleActivation {
-  if (!raw || typeof raw !== "object") {
-    return { mode: "always" };
+/**
+ * 解析并 **fail-closed** 校验激活条件——未知 `mode` / path 缺 globs 一律报错
+ * （被 `scanDescriptors` 捕获为 warning 并跳过该描述符），绝不静默回落到最宽松档。
+ */
+function parseActivation(raw: unknown, defaultMode: "always" | "semantic"): Activation {
+  if (raw === undefined || raw === null) {
+    return { mode: defaultMode };
+  }
+  if (typeof raw !== "object") {
+    throw new DescriptorScanError(`activation 必须是对象（形如 { mode: "always" }）`);
   }
   const mode = (raw as { mode?: unknown }).mode;
   if (mode === "always" || mode === "manual" || mode === "semantic") {
@@ -96,8 +117,29 @@ function parseRuleActivation(raw: unknown): RuleActivation {
     ) {
       return { mode: "path", globs: [...globs] };
     }
+    throw new DescriptorScanError(`activation.mode="path" 必须带非空字符串数组 globs`);
   }
-  return { mode: "always" };
+  throw new DescriptorScanError(
+    `未知 activation.mode "${String(mode)}"（合法值：always/manual/semantic/path）`,
+  );
+}
+
+function parseRuleActivation(raw: unknown): RuleActivation {
+  return parseActivation(raw, "always");
+}
+
+/**
+ * 解析并 **fail-closed** 校验 sideEffect——未知值报错，绝不静默回落 `readonly`
+ * （最宽松档）。缺省 `readonly`。
+ */
+function parseSideEffect(raw: unknown): "readonly" | "write" | "irreversible" {
+  if (raw === undefined) {
+    return "readonly";
+  }
+  if (raw === "readonly" || raw === "write" || raw === "irreversible") {
+    return raw;
+  }
+  throw new DescriptorScanError(`sideEffect 必须是 readonly/write/irreversible`);
 }
 
 /**
@@ -184,10 +226,6 @@ async function parseDescriptor(
     tags: Array.isArray(data.tags)
       ? data.tags.filter((t): t is string => typeof t === "string")
       : undefined,
-    trigger:
-      data.trigger && typeof data.trigger === "object"
-        ? (data.trigger as AnyDescriptor["trigger"])
-        : undefined,
     requires: Array.isArray(data.requires)
       ? (data.requires as AnyDescriptor["requires"])
       : undefined,
@@ -210,10 +248,7 @@ async function parseDescriptor(
     const descriptor: ToolDescriptor = {
       ...base,
       kind: "tool",
-      sideEffect:
-        data.sideEffect === "write" || data.sideEffect === "irreversible"
-          ? data.sideEffect
-          : "readonly",
+      sideEffect: parseSideEffect(data.sideEffect),
       idempotent: data.idempotent !== false,
       requiresApproval: data.requiresApproval === true,
       timeout: typeof data.timeout === "number" ? data.timeout : 30_000,
@@ -230,10 +265,7 @@ async function parseDescriptor(
     const descriptor: AgentDescriptor = {
       ...base,
       kind: "agent",
-      sideEffect:
-        data.sideEffect === "write" || data.sideEffect === "irreversible"
-          ? data.sideEffect
-          : "readonly",
+      sideEffect: parseSideEffect(data.sideEffect),
       idempotent: data.idempotent !== false,
       requiresApproval: data.requiresApproval === true,
       timeout: typeof data.timeout === "number" ? data.timeout : 120_000,
@@ -253,6 +285,7 @@ async function parseDescriptor(
   const descriptor: SkillDescriptor = {
     ...base,
     kind: "skill",
+    activation: parseActivation(data.activation, "semantic"),
     instructions: content,
     resources,
     license: typeof data.license === "string" ? data.license : undefined,

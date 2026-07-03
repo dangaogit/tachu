@@ -1,8 +1,8 @@
 import type { InputEnvelope } from "../types/io";
 import type { SessionScope } from "../types/scope";
-import type { TurnPolicy } from "../types/turn-policy";
+import type { GatingPolicy } from "../types/gating-policy";
 
-export const emptyTurnPolicy = (): TurnPolicy => ({
+export const emptyGatingPolicy = (): GatingPolicy => ({
   excludeTools: [],
   includeTools: [],
   explicitSkills: [],
@@ -33,9 +33,9 @@ const filterKnownNames = (
   return names.filter((name) => knownNames.has(name));
 };
 
-export const readTurnPolicy = (input: InputEnvelope): TurnPolicy => {
-  const policy = input.metadata?.turnPolicy;
-  if (!policy) return emptyTurnPolicy();
+export const readGatingPolicy = (input: InputEnvelope): GatingPolicy => {
+  const policy = input.metadata?.gatingPolicy;
+  if (!policy) return emptyGatingPolicy();
   return {
     excludeTools: [...policy.excludeTools],
     includeTools: [...policy.includeTools],
@@ -46,18 +46,18 @@ export const readTurnPolicy = (input: InputEnvelope): TurnPolicy => {
   };
 };
 
-export interface NormalizeTurnPolicyOptions {
+export interface NormalizeGatingPolicyOptions {
   scope?: SessionScope | undefined;
   knownToolNames?: ReadonlySet<string> | undefined;
   knownSkillNames?: ReadonlySet<string> | undefined;
  /** Pre-seeded deterministic host policy (e.g. CLI includeTools). */
-  preseed?: TurnPolicy | undefined;
+  preseed?: GatingPolicy | undefined;
 }
 
 const mergeStringLists = (...lists: Array<readonly string[] | undefined>): string[] =>
   dedupeNames(lists.flatMap((list) => list ?? []));
 
-export const normalizeTurnPolicy = (options: NormalizeTurnPolicyOptions): TurnPolicy => {
+export const normalizeGatingPolicy = (options: NormalizeGatingPolicyOptions): GatingPolicy => {
   const { scope, knownToolNames, knownSkillNames, preseed } = options;
   const explicitSkills = filterKnownNames(
     dedupeNames(scope?.explicitSkillNames),
@@ -91,13 +91,13 @@ export const normalizeTurnPolicy = (options: NormalizeTurnPolicyOptions): TurnPo
   };
 };
 
-export const withTurnPolicyMetadata = (
+export const withGatingPolicyMetadata = (
   input: InputEnvelope,
-  policy: TurnPolicy,
+  policy: GatingPolicy,
 ): InputEnvelope => ({
   ...input,
   metadata: {
     ...input.metadata,
-    turnPolicy: policy,
+    gatingPolicy: policy,
   },
 });

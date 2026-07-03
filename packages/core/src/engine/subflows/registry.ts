@@ -6,7 +6,7 @@ import type {
   StreamChunk,
   ToolCallRecord,
 } from "../../types";
-import type { TurnPolicy } from "../../types/turn-policy";
+import type { GatingPolicy } from "../../types/gating-policy";
 import type { AdapterCallContext } from "../../types/context";
 import type { MultimodalResolver } from "../../types/multimodal-resolver";
 import type { MemorySystem } from "../../modules/memory";
@@ -151,7 +151,7 @@ export interface InternalSubflowContext {
     Array<{ name: string; score: number; description: string }>
   >;
   /** normalized turn policy for tool-use tail constraints. */
-  turnPolicy?: TurnPolicy;
+  gatingPolicy?: GatingPolicy;
   /**
    * loop-lifecycle Hook 注册中心(ADR-0006 D2)。仅 `tool-use` 消费,驱动
    * `preLLM`/`postLLM`/`preToolUse`/`postToolUse`/`preCompact` 的真实 fire 位。
@@ -267,7 +267,7 @@ export class InternalSubflowRegistry {
           : {}),
         ...(ctx.stickyManager !== undefined ? { stickyManager: ctx.stickyManager } : {}),
         ...(ctx.searchSkills !== undefined ? { searchSkills: ctx.searchSkills } : {}),
-        ...(ctx.turnPolicy !== undefined ? { turnPolicy: ctx.turnPolicy } : {}),
+        ...(ctx.gatingPolicy !== undefined ? { gatingPolicy: ctx.gatingPolicy } : {}),
         ...(ctx.hooks !== undefined ? { hooks: ctx.hooks } : {}),
         ...(ctx.dispatchAgent !== undefined ? { dispatchAgent: ctx.dispatchAgent } : {}),
         ...(ctx.agentDispatchDepth !== undefined

@@ -1,6 +1,7 @@
 import { RegistryError } from "../errors";
 import { compare as compareSemver, prerelease, valid as validSemver } from "semver";
 import type {
+  Activation,
   AgentDescriptor,
   AnyDescriptor,
   DependencyRef,
@@ -8,7 +9,6 @@ import type {
   RuleDescriptor,
   SkillDescriptor,
   ToolDescriptor,
-  TriggerCondition,
 } from "../types";
 import { topologicalSort } from "../utils";
 import type { VectorStore } from "../vector";
@@ -20,7 +20,7 @@ type DescriptorKind = keyof DescriptorMap;
  */
 export interface RegistryQuery {
   tags?: string[];
-  trigger?: TriggerCondition["type"];
+  activation?: Activation["mode"];
 }
 
 /**
@@ -80,7 +80,7 @@ export interface Registry {
  */
   list<K extends DescriptorKind>(kind?: K): K extends undefined ? AnyDescriptor[] : DescriptorMap[K][];
  /**
- * 按标签与 trigger 条件查询描述符。
+ * 按标签与 activation 条件查询描述符。
  *
  * @param query 查询条件
  * @returns 匹配结果
@@ -217,8 +217,9 @@ export class DescriptorRegistry implements Registry {
         !query.tags ||
         query.tags.length === 0 ||
         query.tags.some((tag) => descriptor.tags?.includes(tag));
-      const triggerMatched = !query.trigger || descriptor.trigger?.type === query.trigger;
-      return tagMatched && triggerMatched;
+      const activationMatched =
+        !query.activation || descriptor.activation?.mode === query.activation;
+      return tagMatched && activationMatched;
     });
   }
 

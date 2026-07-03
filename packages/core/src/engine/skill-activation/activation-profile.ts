@@ -168,17 +168,7 @@ export const createSkillActivationProfile = (
   >();
 
   return {
-    getActivation: (skill) => {
-      switch (skill.trigger?.type) {
-        case "always":
-          return { mode: "always" };
-        case "explicit":
-          return { mode: "manual" };
-        case "semantic":
-        case undefined:
-          return { mode: "semantic" };
-      }
-    },
+    getActivation: (skill) => skill.activation,
     placement: {
       place: async ({ turn, decisions }) => {
         const ctx = createActivationContext(deps, turn);
@@ -200,10 +190,16 @@ export const createSkillActivationProfile = (
             : {}),
         });
         const result = await activator.activate(ctx);
-        return [
-          ...result.pinned.map((item) => item.skill),
-          ...result.candidates.map((item) => item.skill),
-        ];
+        return {
+          active: [
+            ...result.pinned.map((item) => item.skill),
+            ...result.candidates.map((item) => item.skill),
+          ],
+ // A 概念对齐：把 skill 激活的富结果（pinned/candidate 分层、budget、
+ // always/sticky 集合、per-candidate 分数）透传给调用方（`resolveRunSkills`），
+ // 使 skill 也经统一 seam 激活而不丢失其对外契约。
+          detail: result,
+        };
       },
     },
     semanticRecall: {

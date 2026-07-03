@@ -3,13 +3,13 @@ import { dirname, join } from "node:path";
 import matter from "gray-matter";
 import { ValidationError } from "../errors";
 import type {
+  Activation,
   AgentDescriptor,
   AnyDescriptor,
   RuleActivation,
   RuleDescriptor,
   SkillDescriptor,
   ToolDescriptor,
-  TriggerCondition,
 } from "../types";
 import {
   isSkillDirectoryForm,
@@ -46,53 +46,27 @@ const listMarkdownFiles = async (root: string): Promise<string[]> => {
   return files;
 };
 
-const normalizeTrigger = (
-  raw: unknown,
-  skillName: string,
-  filePath: string,
-): TriggerCondition => {
-  if (!raw || typeof raw !== "object") {
-    return { type: "semantic" };
-  }
-  const triggerType = (raw as { type?: unknown }).type;
-  if (triggerType === undefined) {
-    return { type: "semantic" };
-  }
-  if (triggerType === "always" || triggerType === "explicit" || triggerType === "semantic") {
-    return { type: triggerType };
-  }
-  if (triggerType === "keyword" || triggerType === "custom") {
-    console.warn(
-      `[tachu] skill "${skillName}" (${filePath}): trigger.type "${triggerType}" is deprecated, using semantic`,
-    );
-    return { type: "semantic" };
-  }
-  throw ValidationError.invalidConfig(
-    `skill "${skillName}" (${filePath}): 未知 trigger.type "${String(triggerType)}"（合法值：always/semantic/explicit）`,
-  );
-};
-
 /**
- * 解析并 **fail-closed** 校验 rule 的激活条件(activation)。
+ * 解析并 **fail-closed** 校验激活条件(activation)——四类描述符共用。
  *
- * - 未声明 → 默认 `{ mode: "always" }`(未限定的规则默认总是注入)。
+ * - 未声明 → `{ mode: defaultMode }`。
  * - `always` / `manual` / `semantic` → 原样返回。
  * - `path` → 必须带非空字符串数组 `globs`,否则报错。
  * - 其它一律报错(旧的 `turnStart`/`preLLM`/`turnStop`/`*` 生命周期式 scope
  *   已废弃;误用会在加载期显式失败,而非静默丢弃)。
  */
-const normalizeRuleActivation = (
+const normalizeActivation = (
   raw: unknown,
-  ruleName: string,
-  filePath?: string,
-): RuleActivation => {
-  const where = filePath ?? "?";
+  name: string,
+  where: string,
+  defaultMode: Extract<Activation["mode"], "always" | "semantic">,
+): Activation => {
   if (raw === undefined || raw === null) {
-    return { mode: "always" };
+    return { mode: defaultMode };
   }
   if (typeof raw !== "object") {
     throw ValidationError.invalidConfig(
-      `rule "${ruleName}" (${where}): activation 必须是对象（形如 { mode: "always" }）`,
+      `"${name}" (${where}): activation 必须是对象（形如 { mode: "always" }）`,
     );
   }
   const mode = (raw as { mode?: unknown }).mode;
@@ -107,15 +81,24 @@ const normalizeRuleActivation = (
       !globs.every((g): g is string => typeof g === "string" && g.length > 0)
     ) {
       throw ValidationError.invalidConfig(
-        `rule "${ruleName}" (${where}): activation.mode="path" 必须带非空字符串数组 globs`,
+        `"${name}" (${where}): activation.mode="path" 必须带非空字符串数组 globs`,
       );
     }
     return { mode: "path", globs: [...globs] };
   }
   throw ValidationError.invalidConfig(
-    `rule "${ruleName}" (${where}): 未知 activation.mode "${String(mode)}"（合法值：always/manual/semantic/path）`,
+    `"${name}" (${where}): 未知 activation.mode "${String(mode)}"（合法值：always/manual/semantic/path）`,
   );
 };
+
+/**
+ * Rule 激活：未声明默认 `always`（未限定的规则默认总是注入）。
+ */
+const normalizeRuleActivation = (
+  raw: unknown,
+  ruleName: string,
+  filePath?: string,
+): RuleActivation => normalizeActivation(raw, ruleName, filePath ?? "?", "always");
 
 const requireString = (value: unknown, field: string): string => {
   if (typeof value !== "string" || value.length === 0) {
@@ -156,7 +139,6 @@ const toDescriptor = async (
     "deprecated",
     "deprecatedMessage",
     "tags",
-    "trigger",
     "requires",
     "kind",
     "type",
@@ -192,6 +174,19 @@ const toDescriptor = async (
       `descriptor "${name}" (${sourceFile ?? "?"}): 未知 kind "${kind}"（合法值：rule/skill/tool/agent）`,
     );
   }
+  if (kind === undefined) {
+    const signatureKinds: string[] = [];
+    if (type === "rule" || type === "preference") signatureKinds.push("rule");
+    if ("execute" in data || "inputSchema" in data) signatureKinds.push("tool");
+    if ("instructions" in data || "maxDepth" in data) signatureKinds.push("agent");
+    if (signatureKinds.length > 1) {
+      throw ValidationError.invalidConfig(
+        `descriptor "${name}" (${sourceFile ?? "?"}): 无法确定 kind——字段特征同时匹配 ${signatureKinds.join(
+          "/",
+        )}；请显式声明 kind（rule/skill/tool/agent），避免被静默归类`,
+      );
+    }
+  }
   requireValidDescriptorNameFormat(name, sourceFile);
   const base = {
     ...extraFields,
@@ -205,10 +200,6 @@ const toDescriptor = async (
     tags: Array.isArray(data.tags)
       ? data.tags.filter((item): item is string => typeof item === "string")
       : undefined,
-    trigger:
-      data.trigger && typeof data.trigger === "object"
-        ? (data.trigger as AnyDescriptor["trigger"])
-        : undefined,
     requires: Array.isArray(data.requires)
       ? (data.requires as AnyDescriptor["requires"])
       : undefined,
@@ -267,7 +258,6 @@ const toDescriptor = async (
   }
 
   const skillName = base.name;
-  const trigger = normalizeTrigger(data.trigger, skillName, sourceFile ?? skillName);
   const sourceDir = sourceFile !== undefined ? dirname(sourceFile) : undefined;
   const resources =
     sourceFile !== undefined && sourceDir !== undefined && isSkillDirectoryForm(sourceFile)
@@ -276,7 +266,7 @@ const toDescriptor = async (
   const descriptor: SkillDescriptor = {
     ...base,
     kind: "skill",
-    trigger,
+    activation: normalizeActivation(data.activation, skillName, sourceFile ?? skillName, "semantic"),
     instructions: content,
     resources,
     ...(sourceDir !== undefined ? { sourceDir } : {}),

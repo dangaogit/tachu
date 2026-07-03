@@ -7,14 +7,6 @@ export interface DependencyRef {
 }
 
 /**
- * 描述符触发条件。
- */
-export type TriggerCondition =
-  | { type: "always" }
-  | { type: "semantic" }
-  | { type: "explicit" };
-
-/**
  * 四类描述符共享的最小公共元信息。
  */
 export interface BaseDescriptor {
@@ -25,16 +17,23 @@ export interface BaseDescriptor {
   deprecated?: boolean | undefined;
   deprecatedMessage?: string | undefined;
   tags?: string[] | undefined;
-  trigger?: TriggerCondition | undefined;
+ /**
+  * 激活轴——四类描述符**共用的唯一激活词汇**（{@link Activation}）。
+  *
+  * rule/skill 由 loader 从 frontmatter `activation` 解析得到；tool/agent 通常
+  * 省略本字段，由各自的 `ActivationProfile` 提供固定不变式（tool = `semantic`
+  * 发现、agent = `always` 可见）。统一经 `engine/activation` 深模块消费。
+  */
+  activation?: Activation | undefined;
   requires?: DependencyRef[] | undefined;
 }
 
 /**
- * Rule 激活条件——回答「规则正文**何时**被注入 prompt」,即激活轴。
+ * 激活条件——回答「描述符**何时**生效」,即激活轴（四类共用）。
  *
- * 关键约束:Rule 的唯一产物是 prompt 文本,终点永远是 prompt。它**不是**
+ * rule 的产物是 prompt 文本;skill 的产物是 instructions 注入。它**不是**
  * 生命周期挂载点:block / annotate / validate / modify 这类阶段动作属于
- * `HookPoint` / `Guardrail` / `ValidationRule`,由它们承担,绝不由 Rule 表达。
+ * `HookPoint` / `Guardrail` / `ValidationRule`,由它们承担,绝不由激活轴表达。
  * (旧的 `turnStart`/`preLLM`/`turnStop` 生命周期式 scope 已废弃——那是把
  * rule 与 hook 混为一谈。)
  *
@@ -87,6 +86,11 @@ export interface SkillResource {
  */
 export interface SkillDescriptor extends BaseDescriptor {
   kind: "skill";
+ /**
+  * 激活轴（{@link Activation}）——由 loader 从 frontmatter `activation` 解析,
+  * 缺省 `semantic`。
+  */
+  activation: Activation;
   instructions: string;
   resources?: SkillResource[] | undefined;
  /** Loader 写入的 SKILL.md 所在目录（供 read_skill_resource 解析路径）。 */

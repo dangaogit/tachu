@@ -2,7 +2,7 @@ import type { ContextWindow } from "../../modules/memory";
 import type { ObservabilityEmitter } from "../../modules/observability";
 import type { SkillDescriptor } from "../../types";
 import type { InputEnvelope } from "../../types";
-import type { TurnPolicy } from "../../types/turn-policy";
+import type { GatingPolicy } from "../../types/gating-policy";
 import type { SemanticRetrievalFacade } from "../../semantic-retrieval";
 import type { ExecutionCorrelation, ExecutionSubject } from "../../types/context";
 import type { StickyManager } from "./sticky";
@@ -34,8 +34,8 @@ export interface ActivationContext {
  /** Correlation passed through to facade `AdapterCallContext`. */
   correlation?: ExecutionCorrelation;
   subject?: ExecutionSubject | undefined;
- /** Normalized turn policy from intent. */
-  turnPolicy?: TurnPolicy;
+ /** Deterministic host gating policy for this turn. */
+  gatingPolicy?: GatingPolicy;
 }
 
 export interface PinnedContribution {
@@ -62,7 +62,7 @@ export interface CandidateStrategy {
 
 export type ExcludedReason =
   | "deprecated"
-  | "explicit-trigger-not-matched"
+  | "manual-not-matched"
   | "below-topK"
   | "budget-trimmed-t1"
   | "budget-trimmed-sticky";

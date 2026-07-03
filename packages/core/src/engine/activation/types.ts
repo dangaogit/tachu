@@ -48,13 +48,23 @@ export interface ActivationDecision<K extends DescriptorKind = DescriptorKind> {
   reasons: readonly string[];
 }
 
+/**
+ * Placement 产出。可以只返回排定后的描述符数组，或额外附带一个 kind 专属的
+ * 富信息 `detail`（如 skill 的 pinned/candidate 分层、always/sticky 集合、
+ * 相似度表）——`detail` 会透传到 {@link ActivationResult.detail}，供调用方
+ * （如 `resolveRunSkills`）重建其对外契约，而不必让通用 core 感知 kind 细节。
+ */
+export type PlacementOutput<K extends DescriptorKind> =
+  | DescriptorMap[K][]
+  | { active: DescriptorMap[K][]; detail?: unknown };
+
 export interface PlacementAdapter<K extends DescriptorKind> {
   place(input: {
     kind: K;
     turn: ActivationTurn<K>;
     decisions: readonly ActivationDecision<K>[];
     activeDescriptors: readonly DescriptorMap[K][];
-  }): DescriptorMap[K][] | Promise<DescriptorMap[K][]>;
+  }): PlacementOutput<K> | Promise<PlacementOutput<K>>;
 }
 
 export interface SemanticRecallHit {
@@ -82,4 +92,9 @@ export interface ActivationResult<K extends DescriptorKind = DescriptorKind> {
   active: DescriptorMap[K][];
   decisions: readonly ActivationDecision<K>[];
   trace: ActivationTrace;
+ /**
+  * Kind 专属富信息，由 PlacementAdapter 选择性回传（见 {@link PlacementOutput}）。
+  * 通用 core 不解释其结构；调用方按各自 kind 断言使用。
+  */
+  detail?: unknown;
 }

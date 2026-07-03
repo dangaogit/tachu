@@ -42,7 +42,7 @@ As of `0.2.0`, the engine no longer runs a 9-phase homogeneous pipeline. The for
 
 `tool-routing` (`packages/core/src/engine/phases/tool-routing.ts`) is **purely deterministic** — no LLM call, no `simple`/`complex` classification:
 
-1. **`turnPolicy` normalization** — consumes only `SessionScope` and any pre-seeded `input.metadata.turnPolicy` (e.g. explicit CLI flags). Tool allow/deny and skill pin/exclude are **hard enforcement** driven by host/config/agent snapshot only — never guessed by a model.
+1. **`gatingPolicy` normalization** — consumes only `SessionScope` and any pre-seeded `input.metadata.gatingPolicy` (e.g. explicit CLI flags). Tool allow/deny and skill pin/exclude are **hard enforcement** driven by host/config/agent snapshot only — never guessed by a model.
 2. **Tool-set narrowing** — when a `ToolActivator` is configured, `visibleTools` deterministically narrows the candidate tool set (relevance scoring + name matching + discovery expansion) instead of exposing the full registry.
 3. **Routing branch** (independent of any removed complexity classification):
    - Explicit `@agent` mention → an `agent-batch` task (`TaskNode.type === "agent"`).
@@ -111,6 +111,8 @@ These 6 values are the full `EnginePhase` union (`packages/core/src/types/io.ts`
 - **No classification lane** — there is no `simple`/`complex` split anywhere; every request goes through the same 6 phases and the same loop.
 - **`turnStart` / `turnStop` guardrails** — pre-guard and post-guard checkpoints wrap the loop (see below), both fail-closed.
 - **Last-message-wins** — a new request on the same session cancels the current execution via `AbortController`.
+
+> **Interface aligns with runtime (concept-alignment decision).** The deep `tool-use` loop is the execution *spine*; the 6 phases are a deliberately-retained **internal orchestration skeleton** (setup → guard → validation → output), not a competing mental model. They are never leaked as public API — `EnginePhase` / `runXxxPhase` / `PhaseEnvironment` are internal (see "Phase-by-phase implementation") — and the **only** public turn-boundary vocabulary is loop-lifecycle: `turnStart` / `turnStop` plus the 9 HookPoints, all firing at real loop boundaries (`tool-use.ts`), not phase edges. Descriptor **activation** likewise uses the loop-agnostic `activation` axis (`always` / `manual` / `semantic` / `path`), never a phase name. This closes the earlier narrative-vs-runtime split where loop-lifecycle vocabulary was advertised while phase boundaries actually fired, which was the soil for concepts (e.g. the retired `RuleScope`) drifting into lifecycle-shaped fields.
 
 ### Loop-lifecycle: 9 HookPoints, two semantics
 
@@ -185,7 +187,7 @@ Implementation entry points: orchestrator in `packages/core/src/engine/engine.ts
 
 ### Phase-by-phase implementation
 
-Each subsection maps to a **deep module** in `@tachu/core`. Every phase emits `loop_step_enter` / `loop_step_exit` observability events (and structured `phase-enter` / `phase-exit` StreamChunks) and updates `RuntimeState.currentPhase`. Fine-grained progress inside the loop uses separate, flatter per-step events (`tool_loop_step_*` / `tool_call_*` / `llm_call_*` / `hook_fired`) rather than phase boundaries.
+Each subsection maps to a **deep module** in `@tachu/core`. These phase step functions and their `PhaseEnvironment` are **internal** to `@tachu/core` — they are not part of the public API; hosts drive the engine through `Engine.runStream` + loop-lifecycle hooks, never by calling phase functions directly. Every step emits `loop_step_enter` / `loop_step_exit` observability events and updates `RuntimeState.currentPhase` (internal stage taxonomy). The **public** stream exposes only loop-lifecycle vocabulary: coarse `lifecycle` chunks (`turnStart` / `turnStop`, keyed by `HookPoint`) mark turn boundaries, while fine-grained progress inside the loop uses flatter per-step chunks/events (`tool-loop-step` / `tool-call-*` / `tool_loop_step_*` / `llm_call_*` / `hook_fired`). There are no `phase-enter` / `phase-exit` chunks and no `EnginePhase` values on the public stream.
 
 #### Phase 1 — Session
 

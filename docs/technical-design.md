@@ -164,7 +164,7 @@ cli/src/
 name: unique-name
 description: 自然语言描述（用于语义发现）
 tags: [tag1, tag2]
-trigger: { type: always }
+activation: { mode: always }   # 激活条件（always/manual/semantic/path）
 requires:
   - { kind: tool, name: read-file }
 # ...各类型专属字段
@@ -408,13 +408,13 @@ type PhaseHandler<TIn, TOut> = (input: TIn, ctx: PhaseContext) => Promise<TOut>;
 
 - 阶段间数据通过明确的输入/输出类型传递，不共享可变状态
 - **6-phase 主干（ADR-0006 落地）**：`EnginePhase`（`packages/core/src/types/io.ts`）收敛为 `session → safety → tool-routing → execution → validation → output`。所有请求统一走这 6 个阶段——不再有独立的 `intent` / `precheck` / `planning` / `graph-check` 四个 phase，也不再有 `simple`/`complex` 分类与"简单请求跳过中间阶段"的快速通道；`intent.ts` / `precheck.ts` / `planning.ts` / `graph-check.ts` / `direct-answer.ts` 及其孤儿测试均已物理删除
-- 每个阶段前后仍由 `Engine.emitPhaseStart` / `emitPhaseEnd` 发出结构化 `phase-enter` / `phase-exit` StreamChunk；observability 层对应发 `loop_step_enter` / `loop_step_exit`（取代旧的 `phase_enter` / `phase_exit`，语义仍为 6 个 `EnginePhase` 宏观边界；详见 §5.7）
+- 每个内部循环步前后由 `Engine.emitPhaseStart` / `emitPhaseEnd` 在 observability 层发 `loop_step_enter` / `loop_step_exit`（内部 stage taxonomy，6 个 `EnginePhase` 宏观边界；详见 §5.7）。**对外流式契约不再暴露 phase 词汇**：`EnginePhase` 与 `runXxxPhase` / `PhaseEnvironment` 已从 `@tachu/core` 公共 API 内部化；公共流只发 loop-lifecycle 的 `lifecycle` chunk（`turnStart` / `turnStop`，键为 `HookPoint`）标记轮次边界
 
 #### tool-routing：确定性路由（取代意图分析 / 前置校验 / 任务拆分 / 依赖图校验）
 
 `runToolRoutingPhase`（`packages/core/src/engine/phases/tool-routing.ts`）用**确定性规则**一次性承担原四个 phase 的路由职责，不再有任何 LLM 分类步骤：
 
-1. **turnPolicy 规范化**：`normalizeTurnPolicy` 只消费 `SessionScope` 与已 pre-seed 的 `input.metadata.turnPolicy`（如 CLI 显式指定），不再有 LLM 分量——工具 allow/deny、技能 pin/exclude 等 hard enforcement 仅由 host 显式 / config / agent snapshot 驱动，不做模型猜测
+1. **gatingPolicy 规范化**：`normalizeGatingPolicy` 只消费 `SessionScope` 与已 pre-seed 的 `input.metadata.gatingPolicy`（如 CLI 显式指定），不再有 LLM 分量——工具 allow/deny、技能 pin/exclude 等 hard enforcement 仅由 host 显式 / config / agent snapshot 驱动，不做模型猜测
 2. **工具集合收窄**：有 `ToolActivator` 时用 `visibleTools` 确定性收窄本轮可见工具（相关性打分 + 名称匹配 + 发现工具展开），而非全量 `registry.list("tool")`
 3. **路由分支**（与旧 `complexity` 分类无关的独立能力）：
    - 显式 `@agent` 提及命中 → 构造 `agent-batch` 任务（`TaskNode.type === "agent"`）
@@ -641,7 +641,7 @@ CLI 默认注入 `@tachu/extensions` 提供的 `FsMemorySystem`，它组合一�
 
 - `ObservabilityEmitter` 默认实现：基于 EventEmitter 模式
 - `EngineEvent.type`（`packages/core/src/types/events.ts`）覆盖 `loop_step_enter` / `loop_step_exit`（6 个 `EnginePhase` 宏观边界；`phase_enter`/`phase_exit` 仍保留在类型 union 供旧消费端兼容，但引擎不再 emit）、`llm_call_start` / `llm_call_end`、`tool_call_start` / `tool_call_end`、`hook_fired`（每次 `HookRegistry.fire()` 无条件 emit 一次，携带 `subscriberCount`/`registrarCount`，即使当前无人挂载也留痕）、`tool_loop_step_start` / `tool_loop_step_end` / `tool_loop_failure_recovery_injected`、`context_budget`、`retry` / `degrade` / `handoff` / `provider_fallback` / `plan_switched`、`budget_warning` / `budget_exhausted`、`skill_activation*` / `memory_recall*` / `tool_activation*`、`warning` / `error` 等命名空间，均为 snake_case 扁平事件
-- 实时进度流：订阅 emitter，过滤后转为 `StreamChunk.progress` 推出；`Engine.emitPhaseStart` / `emitPhaseEnd` 额外 yield 结构化 `phase-enter` / `phase-exit` 顶层 StreamChunk，供下游按 `chunk.type` 做穷举式 switch，与 `progress` chunk 并存（不互斥）
+- 实时进度流：订阅 emitter，过滤后转为 `StreamChunk.progress` 推出；引擎在轮次边界额外 yield 结构化 `lifecycle` 顶层 StreamChunk（`turnStart` / `turnStop`，loop-lifecycle 词汇），供下游按 `chunk.type` + `point` 做穷举式 switch，与 `progress` chunk 并存（不互斥）。内部 phase 步函数不再对外泄漏为 StreamChunk
 - 结构化追踪：扩展库提供 OTel 适配，将 EngineEvent 映射为 OTel Span
 
 ### 5.8 Hooks

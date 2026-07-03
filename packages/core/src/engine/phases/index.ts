@@ -19,7 +19,7 @@ import type {
 } from "../../modules";
 import type { DescriptorRegistry } from "../../registry";
 import type { TaskScheduler } from "../scheduler";
-import type { ToolActivator } from "../tool-activation";
+import type { ToolActivator, ToolCandidateStrategy } from "../tool-activation";
 import type { SemanticRetrievalFacade } from "../../semantic-retrieval";
 import type { MultimodalResolver } from "../../types/multimodal-resolver";
 
@@ -72,6 +72,12 @@ export interface PhaseEnvironment {
   nextStreamId?: (() => string) | undefined;
   /** Tool candidate activator for tool-routing phase. */
   toolActivator?: ToolActivator;
+  /**
+   * Tool candidate strategies (A 概念对齐). tool-routing 用它经统一激活 seam
+   * （`activateDescriptors` + `createToolActivationProfile`）激活工具，与
+   * `toolActivator` 共享同一组策略。
+   */
+  toolStrategies?: ToolCandidateStrategy[];
   /** Policy-aware semantic retrieval. */
   semanticRetrieval?: SemanticRetrievalFacade;
   /** Session-level scope for per-run dynamic config. */

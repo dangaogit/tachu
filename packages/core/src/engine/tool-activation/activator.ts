@@ -21,6 +21,55 @@ interface MergedTool {
   excludeReason?: string | undefined;
 }
 
+export interface ScoredToolContributions {
+  raw: Array<ToolCandidateContribution & { strategy: string }>;
+  perStrategyMs: Record<string, number>;
+  trace: ToolActivationResult["trace"];
+}
+
+/**
+ * 运行工具候选策略并汇集贡献（A 概念对齐：激活的**打分/发现**层）。
+ *
+ * 与 {@link selectVisibleTools} 分离，使统一激活 seam 的 `semanticRecall` 只跑
+ * 一次策略、`placement` 复用其结果，避免把策略（含向量检索）跑两遍。
+ */
+export const scoreToolStrategies = async (
+  ctx: ToolActivationContext,
+  strategies: readonly ToolCandidateStrategy[],
+): Promise<ScoredToolContributions> => {
+  const perStrategyMs: Record<string, number> = {};
+  const trace: ToolActivationResult["trace"] = { strategyFailures: [] };
+  const raw: Array<ToolCandidateContribution & { strategy: string }> = [];
+  if (ctx.disableAllStrategies || strategies.length === 0) {
+    return { raw, perStrategyMs, trace };
+  }
+  await Promise.all(
+    strategies.map(async (strategy) => {
+      const t0 = performance.now();
+      try {
+        const contributions = await strategy.score(ctx);
+        perStrategyMs[strategy.name] = performance.now() - t0;
+        for (const c of contributions) {
+          raw.push({ ...c, strategy: strategy.name });
+        }
+      } catch (err) {
+        perStrategyMs[strategy.name] = performance.now() - t0;
+        const message = err instanceof Error ? err.message : String(err);
+        trace.strategyFailures.push({ strategy: strategy.name, error: message });
+        ctx.observability.emit({
+          timestamp: Date.now(),
+          correlation: ctx.correlation,
+          subject: ctx.subject,
+          phase: "planning",
+          type: "tool_activation_strategy_failed",
+          payload: { strategy: strategy.name, error: message },
+        });
+      }
+    }),
+  );
+  return { raw, perStrategyMs, trace };
+};
+
 const mergeContributions = (
   raw: Array<ToolCandidateContribution & { strategy: string }>,
 ): MergedTool[] => {
@@ -54,102 +103,62 @@ const mergeContributions = (
   return [...merged.values()];
 };
 
-export class DefaultToolActivator implements ToolActivator {
-  private readonly strategies: ToolCandidateStrategy[];
-  private readonly topK: number;
+/**
+ * 从已打分的候选贡献中**选择**可见工具集（A 概念对齐：激活的**选择/裁剪**层）。
+ *
+ * 承接 {@link scoreToolStrategies} 的产出，做 merge / promote / topK /
+ * 无命中回落全集 / discovery 兄弟展开 / 观测事件。与打分层分离后，统一激活
+ * seam 的 placement 可直接复用缓存的贡献，不必把策略再跑一遍。
+ */
+export const selectVisibleTools = (
+  ctx: ToolActivationContext,
+  scored: ScoredToolContributions,
+  topK: number = DEFAULT_TOP_K,
+): ToolActivationResult => {
+  const { raw, perStrategyMs, trace } = scored;
 
-  constructor(options: ToolActivatorOptions) {
-    this.strategies = options.strategies;
-    this.topK = options.topK ?? DEFAULT_TOP_K;
+ // 无策略运行（host 关闭策略 / 未配置策略）→ 直接返回全集，且不发观测事件，
+ // 与历史行为一致（区别于"策略跑了但零命中"的 fullSetFallback）。
+  if (Object.keys(perStrategyMs).length === 0 && raw.length === 0) {
+    return {
+      visibleTools: [...ctx.agentVisibleTools],
+      matchedToolNames: [],
+      fallbackUsed: false,
+      perStrategyMs,
+      trace,
+    };
   }
 
-  async activate(ctx: ToolActivationContext): Promise<ToolActivationResult> {
- // Bypass all strategies when host signals disable
-    if (ctx.disableAllStrategies) {
-      return {
-        visibleTools: [...ctx.agentVisibleTools],
-        matchedToolNames: [],
-        fallbackUsed: false,
-        perStrategyMs: {},
-        trace: { strategyFailures: [] },
-      };
-    }
+  const merged = mergeContributions(raw);
 
- // No strategies → return full visible set (backward-compatible)
-    if (this.strategies.length === 0) {
-      return {
-        visibleTools: [...ctx.agentVisibleTools],
-        matchedToolNames: [],
-        fallbackUsed: false,
-        perStrategyMs: {},
-        trace: { strategyFailures: [] },
-      };
-    }
-
-    const perStrategyMs: Record<string, number> = {};
-    const trace: ToolActivationResult["trace"] = { strategyFailures: [] };
-    const raw: Array<ToolCandidateContribution & { strategy: string }> = [];
-
- // Run all strategies in parallel
-    await Promise.all(
-      this.strategies.map(async (strategy) => {
-        const t0 = performance.now();
-        try {
-          const contributions = await strategy.score(ctx);
-          perStrategyMs[strategy.name] = performance.now() - t0;
-          for (const c of contributions) {
-            raw.push({ ...c, strategy: strategy.name });
-          }
-        } catch (err) {
-          perStrategyMs[strategy.name] = performance.now() - t0;
-          const message = err instanceof Error ? err.message : String(err);
-          trace.strategyFailures.push({ strategy: strategy.name, error: message });
-          ctx.observability.emit({
-            timestamp: Date.now(),
-            correlation: ctx.correlation,
-            subject: ctx.subject,
-            phase: "planning",
-            type: "tool_activation_strategy_failed",
-            payload: { strategy: strategy.name, error: message },
-          });
-        }
-      }),
-    );
-
-    const merged = mergeContributions(raw);
-
- // When no strategies produced contributions, fall back to the
- // full agent-visible set rather than hiding all tools. This preserves the
- // historical no-strategies behaviour when strategies are present but none
- // matched the current query (e.g. NameMatch with no explicit mentions and
- // no SemanticIndex injected).
-    if (merged.length === 0) {
-      ctx.observability.emit({
-        timestamp: Date.now(),
-        correlation: ctx.correlation,
-        subject: ctx.subject,
-        phase: "planning",
-        type: "tool_activation",
-        payload: {
-          visibleTools: ctx.agentVisibleTools.map((t) => t.name),
-          fallbackUsed: false,
-          perStrategyMs,
-          hits: [],
-          fullSetFallback: true,
-        },
-      });
-      return {
-        visibleTools: [...ctx.agentVisibleTools],
-        matchedToolNames: [],
+ // 策略跑了但零命中 → 回落到 agent 可见全集，而非隐藏所有工具。
+  if (merged.length === 0) {
+    ctx.observability.emit({
+      timestamp: Date.now(),
+      correlation: ctx.correlation,
+      subject: ctx.subject,
+      phase: "planning",
+      type: "tool_activation",
+      payload: {
+        visibleTools: ctx.agentVisibleTools.map((t) => t.name),
         fallbackUsed: false,
         perStrategyMs,
-        trace,
-      };
-    }
+        hits: [],
+        fullSetFallback: true,
+      },
+    });
+    return {
+      visibleTools: [...ctx.agentVisibleTools],
+      matchedToolNames: [],
+      fallbackUsed: false,
+      perStrategyMs,
+      trace,
+    };
+  }
 
-    const toolByName = new Map<string, ToolDescriptor>(
-      ctx.agentVisibleTools.map((t) => [t.name, t]),
-    );
+  const toolByName = new Map<string, ToolDescriptor>(
+    ctx.agentVisibleTools.map((t) => [t.name, t]),
+  );
 
     const promoted: MergedTool[] = [];
     const candidates: MergedTool[] = [];
@@ -165,7 +174,7 @@ export class DefaultToolActivator implements ToolActivator {
 
  // Sort non-promoted candidates by score descending, take topK
     candidates.sort((a, b) => b.score - a.score);
-    const topKItems = candidates.slice(0, this.topK);
+    const topKItems = candidates.slice(0, topK);
 
     const promotedSet = new Set(promoted.map((p) => p.toolName));
 
@@ -188,7 +197,7 @@ export class DefaultToolActivator implements ToolActivator {
  // 与 planning 对 toolNames 的展开保持一致（观测/路由一致性）。默认 / 未启用时为 no-op。
     if (ctx.discoveryExpansion?.enabled === true) {
       const universe = new Set(toolByName.keys());
-      const excludeSet = new Set<string>(ctx.turnPolicy?.excludeTools ?? []);
+      const excludeSet = new Set<string>(ctx.gatingPolicy?.excludeTools ?? []);
       const expanded = expandDiscoverySiblings(
         promoted.map((p) => p.toolName),
         ctx.discoveryExpansion,
@@ -231,5 +240,19 @@ export class DefaultToolActivator implements ToolActivator {
       perStrategyMs,
       trace,
     };
+};
+
+export class DefaultToolActivator implements ToolActivator {
+  private readonly strategies: ToolCandidateStrategy[];
+  private readonly topK: number;
+
+  constructor(options: ToolActivatorOptions) {
+    this.strategies = options.strategies;
+    this.topK = options.topK ?? DEFAULT_TOP_K;
+  }
+
+  async activate(ctx: ToolActivationContext): Promise<ToolActivationResult> {
+    const scored = await scoreToolStrategies(ctx, this.strategies);
+    return selectVisibleTools(ctx, scored, this.topK);
   }
 }

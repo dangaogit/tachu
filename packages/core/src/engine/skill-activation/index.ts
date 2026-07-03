@@ -5,7 +5,7 @@ export * from "./budget";
 export * from "./activator";
 export * from "./activation-profile";
 export * from "./strategies/snapshot-refs";
-export * from "./strategies/always-trigger";
+export * from "./strategies/always-activation";
 export * from "./strategies/sticky-pinning";
 export * from "./strategies/embedding-llm";
 export * from "./default-candidate-strategies";

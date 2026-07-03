@@ -163,6 +163,20 @@ export class InkStreamRenderer implements ChunkRenderer {
         this.push();
         break;
       }
+      case "lifecycle": {
+ // 深单 loop 脊柱的对外粗粒度里程碑（turnStart / turnStop）。
+        if (chunk.status === "enter") {
+          const label = chunk.point === "turnStop" ? "校验结果中…" : "开始处理…";
+          if (this.verbose) {
+            this.appendLog(`[lifecycle: ${chunk.point}] ${label}`);
+          } else {
+            this.state.statusLine = label;
+            this.state.agent = "thinking";
+          }
+          this.push();
+        }
+        break;
+      }
       case "artifact": {
         const artifactContent = chunk.artifact.content;
         const pathOrUrl =

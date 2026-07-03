@@ -31,7 +31,7 @@ export class KeywordCandidateStrategy implements CandidateStrategy {
     const query = ctx.query.toLowerCase();
     const contributions = [];
     for (const skill of ctx.registry.list("skill")) {
-      if (skill.deprecated === true || skill.trigger?.type === "explicit" || skill.trigger?.type === "always") {
+      if (skill.deprecated === true || skill.activation.mode === "manual" || skill.activation.mode === "always") {
         continue;
       }
       const needles = [skill.name, skill.displayName].filter(

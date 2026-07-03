@@ -140,12 +140,12 @@ describe("runToolRoutingPhase (ADR-0006 D1/D5 — 取代旧前置分类、计划
     expect((tasks[0]?.input as { toolNames?: unknown }).toolNames).toBeUndefined();
   });
 
-  test("includeTools(pre-seeded turnPolicy)→ tool-use 任务带 toolNames", async () => {
+  test("includeTools(pre-seeded gatingPolicy)→ tool-use 任务带 toolNames", async () => {
     const { env, events } = buildEnv({ toolNames: ["image.qwen", "currentDate"] });
     const state = buildState("draw a cat");
     state.input.metadata = {
       ...state.input.metadata,
-      turnPolicy: {
+      gatingPolicy: {
         excludeTools: [],
         includeTools: ["image.qwen"],
         explicitSkills: [],
@@ -162,7 +162,7 @@ describe("runToolRoutingPhase (ADR-0006 D1/D5 — 取代旧前置分类、计划
       (e) =>
         e.phase === "preLLM" &&
         e.type === "progress" &&
-        (e.payload as { reason?: string }).reason === "turn-policy-include",
+        (e.payload as { reason?: string }).reason === "gating-policy-include",
     );
     expect(decisionEvent).toBeDefined();
   });
@@ -180,7 +180,7 @@ describe("runToolRoutingPhase (ADR-0006 D1/D5 — 取代旧前置分类、计划
     const state = buildState("去年报警数据汇总");
     state.input.metadata = {
       ...state.input.metadata,
-      turnPolicy: {
+      gatingPolicy: {
         excludeTools: [],
         includeTools: ["query_database"],
         explicitSkills: [],
@@ -212,7 +212,7 @@ describe("runToolRoutingPhase (ADR-0006 D1/D5 — 取代旧前置分类、计划
     const state = buildState("去年报警数据汇总");
     state.input.metadata = {
       ...state.input.metadata,
-      turnPolicy: {
+      gatingPolicy: {
         excludeTools: ["list_databases"],
         includeTools: ["query_database"],
         explicitSkills: [],
@@ -234,7 +234,7 @@ describe("runToolRoutingPhase (ADR-0006 D1/D5 — 取代旧前置分类、计划
     const state = buildState("使用 image.qwen 工具画一只猫");
     state.input.metadata = {
       ...state.input.metadata,
-      turnPolicy: {
+      gatingPolicy: {
         excludeTools: [],
         includeTools: ["currentDate"],
         explicitSkills: [],
@@ -281,12 +281,12 @@ describe("runToolRoutingPhase (ADR-0006 D1/D5 — 取代旧前置分类、计划
     expect(__toolRoutingTesting.shouldLimitToRunShell("讲个笑话")).toBe(false);
   });
 
-  test("turnPolicy 规范化后被写回 input.metadata,供下游(engine.ts activeRunTurnPolicies)消费", async () => {
+  test("gatingPolicy 规范化后被写回 input.metadata,供下游(engine.ts activeRunTurnPolicies)消费", async () => {
     const { env } = buildEnv({ toolNames: ["image.qwen"] });
     const state = buildState("draw a cat");
     env.scope = { explicitSkillNames: ["chart-output"] };
     const { input } = await runToolRoutingPhase(state, env);
-    expect(input.metadata?.turnPolicy).toBeDefined();
-    expect(input.metadata?.turnPolicy?.explicitSkills).toEqual(["chart-output"]);
+    expect(input.metadata?.gatingPolicy).toBeDefined();
+    expect(input.metadata?.gatingPolicy?.explicitSkills).toEqual(["chart-output"]);
   });
 });

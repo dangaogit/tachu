@@ -75,6 +75,7 @@ describe("skill-activation R1-R12", () => {
       name: "chart-output",
       description: "charts",
       instructions: "draw charts",
+      activation: { mode: "semantic" },
     });
     const result = await createActivator([]).activate(
       buildContext({
@@ -95,7 +96,7 @@ describe("skill-activation R1-R12", () => {
       displayName: "图表生成",
       description: "可视化",
       instructions: "use echarts",
-      trigger: { type: "semantic" },
+      activation: { mode: "semantic" },
     });
     const result = await createActivator().activate(
       buildContext({
@@ -120,6 +121,7 @@ describe("skill-activation R1-R12", () => {
       name: "skill-x",
       description: "x",
       instructions: "do x",
+      activation: { mode: "semantic" },
     });
     await sessions.resolve("s1");
     await sessions.beginRun("s1", "r1");
@@ -162,6 +164,7 @@ describe("skill-activation R1-R12", () => {
       name: "expiring",
       description: "e",
       instructions: "e",
+      activation: { mode: "semantic" },
     });
     await stickyManager.mark({
       sessionId: "s1",
@@ -216,7 +219,7 @@ describe("skill-activation R1-R12", () => {
       name: "big-always",
       description: "always",
       instructions: "x".repeat(500),
-      trigger: { type: "always" },
+      activation: { mode: "always" },
     });
     await expect(
       createActivator([]).activate(
@@ -242,7 +245,7 @@ describe("skill-activation R1-R12", () => {
         displayName: scoreSeed,
         description: scoreSeed.repeat(20),
         instructions: "i",
-        trigger: { type: "semantic" },
+        activation: { mode: "semantic" },
       });
     }
 
@@ -274,6 +277,7 @@ describe("skill-activation R1-R12", () => {
       name: "pinned-snap",
       description: "p",
       instructions: "p",
+      activation: { mode: "semantic" },
     });
 
     class FailingStrategy implements PinningStrategy {
@@ -315,7 +319,7 @@ describe("skill-activation R1-R12", () => {
         name: `skill-${index}`,
         description: `d-${index}`,
         instructions: "i",
-        trigger: { type: "semantic" },
+        activation: { mode: "semantic" },
       });
     }
 
@@ -349,7 +353,7 @@ describe("skill-activation R1-R12", () => {
       name: "merged",
       description: "m",
       instructions: "m",
-      trigger: { type: "semantic" },
+      activation: { mode: "semantic" },
     });
 
     class LowStrategy implements CandidateStrategy {
@@ -380,7 +384,7 @@ describe("skill-activation R1-R12", () => {
       name: "promoted",
       description: "p",
       instructions: "promote me",
-      trigger: { type: "semantic" },
+      activation: { mode: "semantic" },
     });
 
     class PromoteStrategy implements CandidateStrategy {
@@ -415,7 +419,7 @@ describe("skill-activation R1-R12", () => {
       name: "chart-output",
       description: "charts echarts visualization",
       instructions: "use echarts",
-      trigger: { type: "semantic" },
+      activation: { mode: "semantic" },
     });
     const query = "随机生成几个图表";
     const semanticRetrieval: SemanticRetrievalFacade = {
@@ -475,6 +479,7 @@ describe("turn policy skill priority ()", () => {
       name: "chart-output",
       description: "charts",
       instructions: "use echarts",
+      activation: { mode: "semantic" },
     });
   };
 
@@ -484,7 +489,7 @@ describe("turn policy skill priority ()", () => {
     const result = await createActivator([]).activate(
       buildContext({
         registry,
-        turnPolicy: {
+        gatingPolicy: {
           excludeTools: [],
           includeTools: [],
           explicitSkills: ["chart-output"],
@@ -503,7 +508,7 @@ describe("turn policy skill priority ()", () => {
     const result = await createActivator([]).activate(
       buildContext({
         registry,
-        turnPolicy: {
+        gatingPolicy: {
           excludeTools: [],
           includeTools: [],
           explicitSkills: [],

@@ -13,7 +13,7 @@ describe("DescriptorRegistry", () => {
       description: "read file",
       version: "1.0.0",
       tags: ["fs", "io"],
-      trigger: { type: "always" },
+      activation: { mode: "always" },
       sideEffect: "readonly",
       idempotent: true,
       requiresApproval: false,
@@ -30,7 +30,6 @@ describe("DescriptorRegistry", () => {
       activation: { mode: "manual" },
       content: "never output secrets",
       tags: ["security"],
-      trigger: { type: "semantic" },
     });
 
     expect(registry.get("tool", "read-file")?.name).toBe("read-file");
@@ -40,7 +39,7 @@ describe("DescriptorRegistry", () => {
     expect(registry.list("rule")).toHaveLength(1);
     expect(registry.list().length).toBe(2);
     expect(registry.query({ tags: ["security"] })).toHaveLength(1);
-    expect(registry.query({ trigger: "always" })).toHaveLength(1);
+    expect(registry.query({ activation: "always" })).toHaveLength(1);
 
     await registry.unregister("tool", "read-file");
     expect(registry.get("tool", "read-file")).toBeNull();
@@ -158,6 +157,7 @@ describe("DescriptorRegistry", () => {
       description: "beta one",
       version: "2.0.0-beta.1",
       instructions: "plan",
+      activation: { mode: "semantic" },
     });
     await registry.register({
       kind: "skill",
@@ -165,6 +165,7 @@ describe("DescriptorRegistry", () => {
       description: "beta two",
       version: "2.0.0-beta.2",
       instructions: "plan",
+      activation: { mode: "semantic" },
     });
 
     expect(registry.get("skill", "planner")?.description).toBe("beta two");
@@ -273,6 +274,7 @@ describe("DescriptorRegistry", () => {
       name: "plan",
       description: "plan skill",
       instructions: "do plan",
+      activation: { mode: "semantic" },
       requires: [{ kind: "tool", name: "missing-tool" }],
     });
     expect(() => registry.validateDependencies()).toThrow(RegistryError);
@@ -283,6 +285,7 @@ describe("DescriptorRegistry", () => {
       name: "a",
       description: "a",
       instructions: "a",
+      activation: { mode: "semantic" },
       requires: [{ kind: "skill", name: "b" }],
     });
     await registry.register({
@@ -290,6 +293,7 @@ describe("DescriptorRegistry", () => {
       name: "b",
       description: "b",
       instructions: "b",
+      activation: { mode: "semantic" },
       requires: [{ kind: "skill", name: "a" }],
     });
     try {

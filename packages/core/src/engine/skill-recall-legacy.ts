@@ -30,7 +30,7 @@ export interface SkillRecallCandidateEvent {
   name: string;
   similarity: number;
   class: SkillRecallClass;
-  excludedReason?: "deprecated" | "explicit" | "trigger_always";
+  excludedReason?: "deprecated" | "explicit" | "activation_always";
 }
 
 export interface ResolvedSkillsForPrompt {

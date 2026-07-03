@@ -38,6 +38,7 @@ import type {
   GeneratedMedia,
   InputEnvelope,
   HookAction,
+  HookPoint,
   Message,
   ModelRoute,
   OutputMetadata,
@@ -72,9 +73,7 @@ import { decideTurnRetry } from "./turn-retry";
 import {
   InMemoryStickyManager,
   createDefaultCandidateStrategies,
-  createDefaultPinningStrategies,
   type CandidateStrategy,
-  type PinningStrategy,
   type StickyManager,
 } from "./skill-activation";
 import type { SemanticRetrievalFacade } from "../semantic-retrieval";
@@ -93,7 +92,7 @@ import type {
 } from "./agents";
 import type { EvidenceEntry } from "../types/evidence";
 import { DefaultToolUseExecutor, type ToolUseExecutor } from "./tool-use";
-import { readTurnPolicy } from "./turn-policy";
+import { readGatingPolicy } from "./gating-policy";
 import {
   DefaultContextBudgetBroker,
   type ContextBudgetBroker,
@@ -254,7 +253,6 @@ export interface EngineDependencies {
     request: ToolApprovalRequest,
   ) => Promise<ToolApprovalDecision>;
   stickyManager?: StickyManager;
-  pinningStrategies?: PinningStrategy[];
   candidateStrategies?: CandidateStrategy[];
  /**
  * Policy-aware semantic retrieval.
@@ -325,7 +323,7 @@ export class Engine {
  * 用 traceId 区分每一次具体执行，避免旧 trace 污染新 trace 的 prompt。
  */
   private readonly activeRunPrompts = new Map<string, AssembledPrompt>();
-  private readonly activeRunTurnPolicies = new Map<string, import("../types").TurnPolicy>();
+  private readonly activeRunTurnPolicies = new Map<string, import("../types").GatingPolicy>();
 
  /**
  * 活跃 runStream 的 usage 回流回调缓存，按 `traceId` 索引。
@@ -433,10 +431,15 @@ export class Engine {
     request: ToolApprovalRequest,
   ) => Promise<ToolApprovalDecision>;
   private readonly stickyManager: StickyManager;
-  private readonly pinningStrategies: PinningStrategy[];
   private readonly candidateStrategies: CandidateStrategy[];
   private readonly semanticRetrieval?: SemanticRetrievalFacade;
   private readonly toolActivator: ToolActivator;
+ /**
+  * 工具候选策略（A 概念对齐）：tool 激活经统一 seam（`activateDescriptors` +
+  * `createToolActivationProfile`）时由 tool-routing 从 `PhaseEnvironment` 取用，
+  * 与 `toolActivator` 共享同一组策略。
+  */
+  private readonly toolStrategies: ToolCandidateStrategy[];
   private readonly injectedAgentRuntime: AgentRuntimeAdapter | undefined;
  /**
  * 共享的 tool-use 执行器。
@@ -493,8 +496,6 @@ export class Engine {
         ttlTurns: this.config.runtime.stickyTtlTurns ?? 8,
         maxSlots: this.config.runtime.stickyMaxSlots ?? 3,
       });
-    this.pinningStrategies =
-      dependencies?.pinningStrategies ?? createDefaultPinningStrategies();
     if (dependencies?.semanticRetrievalFacade !== undefined) {
       this.semanticRetrieval = dependencies.semanticRetrievalFacade;
     }
@@ -502,9 +503,10 @@ export class Engine {
       ...createDefaultCandidateStrategies(),
       ...(dependencies?.candidateStrategies ?? []),
     ];
+    this.toolStrategies =
+      dependencies?.toolStrategies ?? createDefaultToolCandidateStrategies();
     this.toolActivator = new DefaultToolActivator({
-      strategies:
-        dependencies?.toolStrategies ?? createDefaultToolCandidateStrategies(),
+      strategies: this.toolStrategies,
     });
     this.injectedAgentRuntime = dependencies?.agentRuntime;
     this.toolUseExecutor = new DefaultToolUseExecutor();
@@ -1285,7 +1287,7 @@ export class Engine {
     return async (task, context, signal) => {
       if (task.type === "sub-flow" && internalSubflows.has(task.ref)) {
         const prebuiltPrompt = this.activeRunPrompts.get(context.correlation.traceId);
-        const turnPolicy = this.activeRunTurnPolicies.get(context.correlation.traceId);
+        const gatingPolicy = this.activeRunTurnPolicies.get(context.correlation.traceId);
         const onProviderUsage = this.activeRunUsageSinks.get(context.correlation.traceId);
         const emitUsageTelemetry =
           this.activeRunUsageTelemetrySinks.get(context.correlation.traceId);
@@ -1405,7 +1407,7 @@ export class Engine {
           ...(this.config.runtime.enableSearchSkillsTool === true
             ? { searchSkills: this.buildSearchSkillsHandler() }
             : {}),
-          ...(turnPolicy !== undefined ? { turnPolicy } : {}),
+          ...(gatingPolicy !== undefined ? { gatingPolicy } : {}),
         });
         return { ok: true, output };
       }
@@ -1644,6 +1646,7 @@ export class Engine {
       emitUsageTelemetry,
       nextStreamId,
       toolActivator: this.toolActivator,
+      toolStrategies: this.toolStrategies,
       ...(this.semanticRetrieval !== undefined
         ? { semanticRetrieval: this.semanticRetrieval }
         : {}),
@@ -1656,28 +1659,53 @@ export class Engine {
         : {}),
     };
 
-    const enterPhase = (phase: EnginePhase): Iterable<StreamChunk> => {
+    const enterPhase = (phase: EnginePhase): void => {
       const stepId = nextStreamId();
       phaseStepIds.set(phase, stepId);
       phaseEnv.currentPhaseStepId = stepId;
       this.activeRunCurrentPhaseStepIds.set(normalizedContext.correlation.traceId, stepId);
-      return this.emitPhaseStart(phase, normalizedContext, stepId);
+      this.emitPhaseStart(phase, normalizedContext);
     };
-    const exitPhase = (phase: EnginePhase): Iterable<StreamChunk> => {
-      const stepId = phaseStepIds.get(phase);
+    const exitPhase = (phase: EnginePhase): void => {
       phaseEnv.currentPhaseStepId = undefined;
       this.activeRunCurrentPhaseStepIds.delete(normalizedContext.correlation.traceId);
-      return this.emitPhaseEnd(phase, normalizedContext, stepId);
+      this.emitPhaseEnd(phase, normalizedContext);
     };
+ // 对外粗粒度轮次里程碑（ADR-0006 深单 loop 脊柱 + 概念对齐 C）：只用
+ // loop-lifecycle 词汇（HookPoint），不再泄漏内部 6 阶段名。loop 内部细粒度
+ // 进度由 tool-loop-* chunk 承载。
+    const emitLifecycle = (
+      point: HookPoint,
+      status: "enter" | "exit",
+    ): StreamChunk =>
+      withStreamEnvelope({ type: "lifecycle", point, status, ok: true }, normalizedContext);
 
     try {
  // turnStart guardrail 的 annotate/degrade 前缀说明(ADR-0006 D4)，
  // 待 runOutputPhase 返回后前缀拼接到最终 content，与 contextBudgetDegradeReason 同模式。
       let turnStartGuardAnnotation: string | undefined;
       let turnStartHookGuardAction: Extract<HookAction, { type: "guard" }> | undefined;
-// turnStart(ADR-0006 D2):一轮开始的 pre-guard 挂载点，提供真实 fire 位 +
-// free-mutation/deny 语义;`SafetyModule` baseline 归位为默认 guard(见下方
-// runSafetyPhase 之后的 turnStartGuardDecision 块,ADR-0006 D4)。
+
+ // Setup（session + safety）：确定性、无 LLM。先跑出会话上下文与 safety
+ // 基线，turnStart guard 再在其后 fire —— host 守卫此刻能看到完整 setup 上下文
+ // （session + violations），而非只有裸 input（概念对齐 C：fire 时机后移）。
+      enterPhase("session");
+      const sessionState = await runSessionPhase(input, normalizedContext, phaseEnv);
+      yield* flushPendingUsageTelemetry();
+      exitPhase("session");
+
+ // 取消旧的整轮短路探针。运行时取不到资源 → 在 Provider 边界
+ // 物化时做对话内部分降级（第一层）；缺 resolver 但有待物化引用 → 物化期
+ // fail-fast（第三层）。此处不再预探测、不再整轮降级。
+
+      enterPhase("safety");
+      const safetyState = await runSafetyPhase(sessionState.input, sessionState.context, phaseEnv);
+      yield* flushPendingUsageTelemetry();
+      exitPhase("safety");
+
+// turnStart(ADR-0006 D2 + 概念对齐 C):一轮开始的 pre-guard 挂载点，提供真实
+// fire 位 + free-mutation/deny 语义。fire 时机后移到 setup 之后 —— host 守卫的
+// event.data 现在带 session 上下文与 safety violations，而非只有裸 input。
       const turnStartAction = await this.hooks.fire("turnStart", {
         point: "turnStart",
         timestamp: Date.now(),
@@ -1685,7 +1713,11 @@ export class Engine {
         ...(normalizedContext.subject !== undefined
           ? { subject: normalizedContext.subject }
           : {}),
-        data: { input },
+        data: {
+          input: safetyState.input,
+          context: safetyState.context,
+          violations: safetyState.violations,
+        },
       });
       if (turnStartAction?.type === "deny") {
         throw EngineError.fromUnknown(
@@ -1707,24 +1739,10 @@ export class Engine {
       if (turnStartAction?.type === "guard") {
         turnStartHookGuardAction = turnStartAction;
       }
-      yield* enterPhase("session");
-      const sessionState = await runSessionPhase(input, normalizedContext, phaseEnv);
-      yield* flushPendingUsageTelemetry();
-      yield* exitPhase("session");
 
- // 取消旧的整轮短路探针。运行时取不到资源 → 在 Provider 边界
- // 物化时做对话内部分降级（第一层）；缺 resolver 但有待物化引用 → 物化期
- // fail-fast（第三层）。此处不再预探测、不再整轮降级。
-
-      yield* enterPhase("safety");
-      const safetyState = await runSafetyPhase(sessionState.input, sessionState.context, phaseEnv);
-      yield* flushPendingUsageTelemetry();
-      yield* exitPhase("safety");
-
-// turnStart guardrail(ADR-0006 D4):内置默认 guard = SafetyModule baseline +
-// business policy(scope=turnStart)。`builtin.safety-violations` 把此前
-// 计算后从未被消费的 `safetyState.violations` 映射为 annotate/degrade,
-// 不再静默丢弃;内置 safety guard 也归一为 HookAction.guard。
+// 内置默认 turnStart guard(ADR-0006 D4):SafetyModule baseline + business
+// policy(scope=turnStart)。`builtin.safety-violations` 把 `safetyState.violations`
+// 映射为 annotate/degrade,不再静默丢弃;与 host turnStart guard 一起 reduce。
       const turnStartGuardDecision = reduceGuardActions([
         createSafetyViolationsGuardAction(safetyState.violations),
         ...(turnStartHookGuardAction ? [turnStartHookGuardAction] : []),
@@ -1742,6 +1760,8 @@ export class Engine {
       } else if (turnStartGuardDecision.kind === "degrade") {
         turnStartGuardAnnotation = turnStartGuardDecision.userVisibleReason;
       }
+ // 对外里程碑：turnStart guard 通过 → 一轮正式进入执行脊柱。
+      yield emitLifecycle("turnStart", "enter");
 
 // Turn-level retry loop. ValidationPhase 输出 `outcome.kind === "retry"`
  // 时回到 tool-routing 重新执行；受 runtime.maxTurnRetries 与 decideTurnRetry 反死循环约束。
@@ -1770,21 +1790,21 @@ export class Engine {
         }
 
 // 深单 loop 塌陷(ADR-0006 D1):原 intent 分类步骤 + precheck 步骤的
-// LLM 猜测已删除,`runToolRoutingPhase` 用确定性规则(turnPolicy 规范化 +
+// LLM 猜测已删除,`runToolRoutingPhase` 用确定性规则(gatingPolicy 规范化 +
 // 显式 @agent/@tool 名称匹配 + visibleTools 收窄)一次性替代四个死 phase 点
 // (intent / precheck / planning / graph-check)。放在重试循环内部重新计算,
 // 使 `phaseEnv.previousAttempt`(由上一轮 validation 写入)在 retry 时仍能被
 // 观测事件消费,即便路由本身是确定性、结果不因重试而改变。
-      yield* enterPhase("tool-routing");
+      enterPhase("tool-routing");
       toolRoutingState = await runToolRoutingPhase(safetyState, phaseEnv);
       yield* flushPendingUsageTelemetry();
-      yield* exitPhase("tool-routing");
+      exitPhase("tool-routing");
 
- /** tool-routing 阶段写入 turnPolicy 等 metadata；装配 Prompt 须与之后各阶段共用同一条 input。 */
+ /** tool-routing 阶段写入 gatingPolicy 等 metadata；装配 Prompt 须与之后各阶段共用同一条 input。 */
       effectiveInput = toolRoutingState.input;
       this.activeRunTurnPolicies.set(
         normalizedContext.correlation.traceId,
-        readTurnPolicy(effectiveInput),
+        readGatingPolicy(effectiveInput),
       );
 
       if (this.config.runtime.planMode) {
@@ -1919,7 +1939,6 @@ export class Engine {
           tokenizer: this.tokenizer,
           maxContextTokens: promptMaxContextTokens,
           signal: activeSignal,
-          pinningStrategies: this.pinningStrategies,
           candidateStrategies: this.candidateStrategies,
           ...(this.semanticRetrieval !== undefined
             ? { semanticRetrieval: this.semanticRetrieval }
@@ -1974,7 +1993,7 @@ export class Engine {
         });
         this.activeRunPrompts.set(normalizedContext.correlation.traceId, assembled);
 
-      yield* enterPhase("execution");
+      enterPhase("execution");
 
       let executionState: Awaited<ReturnType<typeof runExecutionPhase>>;
       if (this.config.runtime.streamingOutput) {
@@ -2106,14 +2125,14 @@ export class Engine {
         }
       }
       yield* flushPendingUsageTelemetry();
-      yield* exitPhase("execution");
+      exitPhase("execution");
 
       const candidateState = await runCandidateAnswerPhase(executionState, phaseEnv);
 
  // 结果验证对所有请求统一执行(ADR-0006 塌陷为深单 loop 后，唯一路径是
  // `tool-use`；零工具调用的纯文本答复由 loop step-1 自然产出，validation
  // 退化为"步骤成功 → 通过"的确定性判断)。
-      yield* enterPhase("validation");
+      enterPhase("validation");
       validationState = await runValidationPhase(
         candidateState,
         phaseEnv,
@@ -2168,13 +2187,14 @@ export class Engine {
         }
       }
       yield* flushPendingUsageTelemetry();
-      yield* exitPhase("validation");
+      exitPhase("validation");
       } while (shouldRetryTurn);
 
 // turnStop(ADR-0006 D2/D4):一轮结束前的 post-guard 挂载点,恒最后跑、
-// fail-closed。默认 Result Validation guard 的归位是 Stage 3(C3b)的工作;
-// 本阶段先提供真实 fire 位 + deny(拒绝交付)/modify|replace(改写最终文案,
-// 如 degrade/annotate 类用法)的通用语义。
+// fail-closed。Result Validation 是其内置默认 guard；host turnStop guard 可
+// deny(拒绝交付)/degrade|annotate(改写最终文案)。对外以 lifecycle turnStop
+// enter/exit 里程碑包裹这段 post-guard。
+      yield emitLifecycle("turnStop", "enter");
       const turnStopAction = await this.hooks.fire("turnStop", {
         point: "turnStop",
         timestamp: Date.now(),
@@ -2217,7 +2237,8 @@ export class Engine {
           }
         }
       }
-      yield* enterPhase("output");
+      yield emitLifecycle("turnStop", "exit");
+      enterPhase("output");
       const usage = orchestrator.getUsage();
       const outputMetadata = applyTurnOutcome(
         {
@@ -2282,7 +2303,7 @@ export class Engine {
         },
       };
       yield* flushPendingUsageTelemetry();
-      yield* exitPhase("output");
+      exitPhase("output");
  // 关键顺序：先把本轮 assistant 回复落到 MemorySystem，再 yield done。
  // 否则消费方一拿到 done 就 break 出 for-await，async generator 不会推进到
  // append 调用，多轮上下文会断裂。
@@ -2401,11 +2422,15 @@ export class Engine {
     }
   }
 
-  private *emitPhaseStart(
-    phase: EnginePhase,
-    context: ExecutionContext,
-    stepId?: string,
-  ): Iterable<StreamChunk> {
+  /**
+   * 内部循环步（原 6 阶段）进入时的 **可观测遥测**。
+   *
+   * ADR-0006 深单 loop 化后，阶段边界不再作为公共流式契约对外泄漏；此处只保留
+   * `loop_step_enter` 观测事件（内部 stage 遥测 + `RuntimeState.currentPhase`
+   * 归因），不再 yield `phase-enter` / phase 名 `progress` chunk。对外的粗粒度
+   * 轮次里程碑改由 `lifecycle`（turnStart / turnStop）chunk 承载。
+   */
+  private emitPhaseStart(phase: EnginePhase, context: ExecutionContext): void {
     this.observability.emit(
       engineEventFromContext(context, {
         timestamp: Date.now(),
@@ -2414,32 +2439,10 @@ export class Engine {
         payload: {},
       }),
     );
- // 结构化 chunk：下游消费方通过 `chunk.type === 'phase-enter'` 做穷举式
- // switch，无需依赖 progress.message 后缀字符串。
-    yield withStreamEnvelope(
-      {
-        type: "phase-enter",
-        phase,
-        ...(stepId !== undefined ? { stepId } : {}),
-      },
-      context,
-    );
- // 兼容性 chunk：现有 CLI / 已知下游仍按 `progress` 渲染 phase 文案。
-    yield withStreamEnvelope(
-      {
-        type: "progress",
-        phase,
-        message: `${phase} started`,
-      },
-      context,
-    );
   }
 
-  private *emitPhaseEnd(
-    phase: EnginePhase,
-    context: ExecutionContext,
-    stepId?: string,
-  ): Iterable<StreamChunk> {
+  /** 内部循环步退出时的可观测遥测（对偶于 {@link emitPhaseStart}）。 */
+  private emitPhaseEnd(phase: EnginePhase, context: ExecutionContext): void {
     this.observability.emit(
       engineEventFromContext(context, {
         timestamp: Date.now(),
@@ -2447,23 +2450,6 @@ export class Engine {
         type: "loop_step_exit",
         payload: {},
       }),
-    );
-    yield withStreamEnvelope(
-      {
-        type: "phase-exit",
-        phase,
-        ...(stepId !== undefined ? { stepId } : {}),
-        ok: true,
-      },
-      context,
-    );
-    yield withStreamEnvelope(
-      {
-        type: "progress",
-        phase,
-        message: `${phase} finished`,
-      },
-      context,
     );
   }
 }

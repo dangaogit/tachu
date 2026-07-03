@@ -213,17 +213,20 @@ export const activateDescriptors = async <K extends DescriptorKind>(
   const activeDescriptors = decisions
     .filter((decision) => decision.active)
     .map((decision) => decision.descriptor);
-  const active = await profile.placement.place({
+  const placement = await profile.placement.place({
     kind,
     turn,
     decisions,
     activeDescriptors,
   });
+  const active = Array.isArray(placement) ? placement : placement.active;
+  const detail = Array.isArray(placement) ? undefined : placement.detail;
 
   return {
     kind,
     active,
     decisions,
     trace: recall.trace,
+    ...(detail !== undefined ? { detail } : {}),
   };
 };

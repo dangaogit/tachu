@@ -232,6 +232,24 @@ export class StreamRenderer implements ChunkRenderer {
         process.stdout.write(colorize(`──────────────────\n`, "blue"));
         break;
       }
+      case "lifecycle": {
+ // 深单 loop 脊柱的对外粗粒度里程碑（turnStart / turnStop）。loop 内部细粒度
+ // 进度由 tool-loop-* / progress chunk 承载，这里只标记轮次边界。
+        if (chunk.status !== "enter") {
+          break;
+        }
+        const label = chunk.point === "turnStop" ? "校验结果中…" : "开始处理…";
+        if (this.verbose) {
+          this.spinner.stop();
+          process.stdout.write(colorize(`[lifecycle: ${chunk.point}] ${label}\n`, "gray"));
+        } else {
+          this.spinner.update(colorize(label, "gray"));
+          if (!this.spinner["active"]) {
+            this.spinner.start(colorize(label, "gray"));
+          }
+        }
+        break;
+      }
       case "tool-loop-step": {
  // Agentic Loop 每一轮思考开始：非 verbose 模式下用 spinner 提示。
         this.spinner.stop();

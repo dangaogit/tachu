@@ -41,10 +41,10 @@ describe("multimodal-envelope", () => {
     ).toThrow(ValidationError);
   });
 
-  it("buildIncludeToolsInputEnvelope pre-seeds turnPolicy.includeTools", () => {
+  it("buildIncludeToolsInputEnvelope pre-seeds gatingPolicy.includeTools", () => {
     const env = buildIncludeToolsInputEnvelope("一只猫", ["image.qwen"], "test");
     expect(env.content).toBe("一只猫");
-    expect(env.metadata.turnPolicy?.includeTools).toEqual(["image.qwen"]);
+    expect(env.metadata.gatingPolicy?.includeTools).toEqual(["image.qwen"]);
     expect(env.metadata.modality).toBe("text");
   });
 

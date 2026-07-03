@@ -39,7 +39,7 @@ import type {
   ToolUseResultStep,
   ToolUseResultToolCall,
 } from "../../types";
-import type { TurnPolicy } from "../../types/turn-policy";
+import type { GatingPolicy } from "../../types/gating-policy";
 import type { AdapterCallContext, ExecutionCorrelation, ExecutionSubject } from "../../types/context";
 import type { TaskExecutor } from "../scheduler";
 import {
@@ -177,8 +177,8 @@ export interface ToolUseContext {
  * 「Task 工具不可在子 agent 内再次调用」的默认策略。
  */
   agentDispatchDepth?: number | undefined;
-  /** Normalized turn policy for soft tail constraints. */
-  turnPolicy?: TurnPolicy;
+  /** Normalized gating policy for soft tail constraints. */
+  gatingPolicy?: GatingPolicy;
   /**
    * loop-lifecycle Hook 注册中心(ADR-0006 D2)。
    *
@@ -369,7 +369,7 @@ const resolveToolUseRoute = (
   }
 };
 
-const buildTurnPolicyTailNote = (policy: TurnPolicy | undefined): string | null => {
+const buildGatingPolicyTailNote = (policy: GatingPolicy | undefined): string | null => {
   if (!policy) return null;
   const active =
     policy.excludeTools.length > 0 ||
@@ -389,8 +389,8 @@ const buildTurnPolicyTailNote = (policy: TurnPolicy | undefined): string | null 
   return note;
 };
 
-const appendTurnPolicyTail = (messages: Message[], policy: TurnPolicy | undefined): Message[] => {
-  const note = buildTurnPolicyTailNote(policy);
+const appendGatingPolicyTail = (messages: Message[], policy: GatingPolicy | undefined): Message[] => {
+  const note = buildGatingPolicyTailNote(policy);
   if (!note) return messages;
   return [...messages, { role: "system", content: note }];
 };
@@ -427,7 +427,7 @@ const buildInitialMessages = (
     if (input.hint && input.hint.length > 0) {
       messages.push({ role: "system", content: `补充指令（来自宿主）：${input.hint}` });
     }
-    return appendTurnPolicyTail(messages, ctx.turnPolicy);
+    return appendGatingPolicyTail(messages, ctx.gatingPolicy);
   }
   const base = ctx.prebuiltPrompt.messages.map((m) => ({ ...m }));
   const hasSystem = base.some((m) => m.role === "system");
@@ -441,7 +441,7 @@ const buildInitialMessages = (
   if (input.hint && input.hint.length > 0) {
     messages.push({ role: "system", content: `补充指令（来自宿主）：${input.hint}` });
   }
-  return appendTurnPolicyTail(messages, ctx.turnPolicy);
+  return appendGatingPolicyTail(messages, ctx.gatingPolicy);
 };
 
 /**
@@ -477,7 +477,7 @@ const buildFallbackMessages = async (
   if (input.hint && input.hint.length > 0) {
     messages.push({ role: "system", content: `补充指令（来自宿主）：${input.hint}` });
   }
-  return appendTurnPolicyTail(messages, ctx.turnPolicy);
+  return appendGatingPolicyTail(messages, ctx.gatingPolicy);
 };
 
 /**

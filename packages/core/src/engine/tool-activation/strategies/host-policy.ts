@@ -1,4 +1,4 @@
-import type { TurnPolicy } from "../../../types/turn-policy";
+import type { GatingPolicy } from "../../../types/gating-policy";
 import type {
   ToolActivationContext,
   ToolCandidateContribution,
@@ -9,7 +9,7 @@ export class HostPolicyToolStrategy implements ToolCandidateStrategy {
   readonly name = "host-policy";
 
   async score(ctx: ToolActivationContext): Promise<ToolCandidateContribution[]> {
-    const policy: TurnPolicy | undefined = ctx.turnPolicy;
+    const policy: GatingPolicy | undefined = ctx.gatingPolicy;
     if (!policy) return [];
 
     const contributions: ToolCandidateContribution[] = [];

@@ -2,13 +2,17 @@ import type { ExecutionRoute, TaskNode, ToolDescriptor } from "../../types";
 import type { SafetyPhaseOutput } from "./safety";
 import type { PhaseEnvironment } from "./index";
 import { engineEventFromContext } from "../turn-outcome";
-import { NameMatchToolCandidateStrategy } from "../tool-activation";
+import {
+  NameMatchToolCandidateStrategy,
+  createToolActivationProfile,
+} from "../tool-activation";
+import { createActivation } from "../activation";
 import { expandDiscoverySiblings } from "../tool-activation/discovery-expansion";
 import {
-  normalizeTurnPolicy,
-  readTurnPolicy,
-  withTurnPolicyMetadata,
-} from "../turn-policy";
+  normalizeGatingPolicy,
+  readGatingPolicy,
+  withGatingPolicyMetadata,
+} from "../gating-policy";
 import { PlanningError } from "../../errors";
 import { topologicalSort } from "../../utils";
 
@@ -24,8 +28,8 @@ import { topologicalSort } from "../../utils";
  * 例外:显式 @agent 提及仍走确定性的 agent-batch 快路径(与 complexity 分类无关,
  * 是独立的名称匹配能力,ADR-0006 未要求删除)。
  *
- * turnPolicy 规范化(原 `finalizeIntentPhase` 职责的确定性部分保留):
- * 只消费 `scope` / 已 pre-seed 的 `input.metadata.turnPolicy`(如 CLI 显式指定),
+ * gatingPolicy 规范化(原 `finalizeIntentPhase` 职责的确定性部分保留):
+ * 只消费 `scope` / 已 pre-seed 的 `input.metadata.gatingPolicy`(如 CLI 显式指定),
  * 不再有 `llm` 分量 —— hard enforcement(工具 allow/deny、技能 pin/exclude)
  * 仅由 host 显式 / config / agent snapshot 驱动,不做模型猜测。
  */
@@ -118,14 +122,14 @@ const collectKnownToolNames = (env: PhaseEnvironment): Set<string> =>
   new Set([
     ...listRegistryNames(env.registry, "tool"),
     ...(env.scope?.additionalTools ?? []).map((tool) => tool.name),
-    ...(env.scope?.intentAgentContext?.tools ?? []).map((tool) => tool.name),
+    ...(env.scope?.activationHints?.tools ?? []).map((tool) => tool.name),
   ]);
 
 const collectKnownSkillNames = (env: PhaseEnvironment): Set<string> =>
   new Set([
     ...listRegistryNames(env.registry, "skill"),
     ...(env.scope?.additionalSkills ?? []).map((skill) => skill.name),
-    ...(env.scope?.intentAgentContext?.skills ?? []).map((skill) => skill.name),
+    ...(env.scope?.activationHints?.skills ?? []).map((skill) => skill.name),
     ...(env.scope?.explicitSkillNames ?? []),
   ]);
 
@@ -191,35 +195,37 @@ export const runToolRoutingPhase = async (
     }));
   }
 
-// turnPolicy 规范化:只消费 scope / 已 pre-seed 的 metadata,不再有 LLM 分量
-// (ADR-0006 D1:turnPolicy-as-LLM-manifest 删除)。
-  const policy = normalizeTurnPolicy({
+// gatingPolicy 规范化:只消费 scope / 已 pre-seed 的 metadata,不再有 LLM 分量
+// (ADR-0006 D1:gatingPolicy-as-LLM-manifest 删除)。
+  const policy = normalizeGatingPolicy({
     scope: env.scope,
-    preseed: readTurnPolicy(state.input),
+    preseed: readGatingPolicy(state.input),
     knownToolNames: collectKnownToolNames(env),
     knownSkillNames: collectKnownSkillNames(env),
   });
   const effectiveState: SafetyPhaseOutput = {
     ...state,
-    input: withTurnPolicyMetadata(state.input, policy),
+    input: withGatingPolicyMetadata(state.input, policy),
   };
-  const turnPolicy = policy;
+  const gatingPolicy = policy;
 
   let visibleTools: ToolDescriptor[] | undefined;
-  if (env.toolActivator) {
-    const toolResult = await env.toolActivator.activate({
-      query: prompt,
-      agentVisibleTools: [
-        ...(env.scope?.additionalTools ?? []),
-        ...env.registry.list("tool"),
-      ],
-      registry: env.registry,
-      observability: env.observability,
-      signal: env.activeAbortSignal,
-      correlation: effectiveState.context.correlation,
-      subject: effectiveState.context.subject,
+ // A 概念对齐：tool 激活经统一激活 seam（`activateDescriptors` +
+ // `createToolActivationProfile`），与 rule/skill/agent 同形。旧
+ // `DefaultToolActivator` 的打分/选择逻辑已抽为 `scoreToolStrategies` /
+ // `selectVisibleTools`，成为本 Profile placement 的内部实现（策略只跑一次）。
+  if (env.toolStrategies !== undefined) {
+    const agentVisibleTools = [
+      ...(env.scope?.additionalTools ?? []),
+      ...env.registry.list("tool"),
+    ];
+    const profile = createToolActivationProfile({
+      strategies: env.toolStrategies,
+      gatingPolicy,
       disableAllStrategies: env.scope?.toolRoutingDisabled === true,
-      turnPolicy,
+      ...(effectiveState.context.subject !== undefined
+        ? { subject: effectiveState.context.subject }
+        : {}),
       ...(env.semanticRetrieval !== undefined
         ? { semanticRetrieval: env.semanticRetrieval }
         : {}),
@@ -227,7 +233,23 @@ export const runToolRoutingPhase = async (
         ? { discoveryExpansion: env.config.runtime.toolActivation.discoveryExpansion }
         : {}),
     });
-    visibleTools = toolResult.visibleTools;
+    const activation = await createActivation({ profiles: { tool: profile } }).activate(
+      "tool",
+      {
+        query: prompt,
+        registry: { list: (kind) => (kind === "tool" ? agentVisibleTools : []) },
+        observability: {
+          emit: (event: unknown) =>
+            env.observability.emit(event as Parameters<typeof env.observability.emit>[0]),
+        },
+        signal: env.activeAbortSignal,
+        correlation: effectiveState.context.correlation as unknown as Record<
+          string,
+          unknown
+        >,
+      },
+    );
+    visibleTools = activation.active;
   }
 
   const candidateTools = visibleTools ?? [
@@ -254,7 +276,7 @@ export const runToolRoutingPhase = async (
       ...promptExplicitToolNames,
     ]),
   ].filter((name) => candidateToolNames.includes(name));
-  const includeToolNames = turnPolicy.includeTools.filter((name) =>
+  const includeToolNames = gatingPolicy.includeTools.filter((name) =>
     candidateToolNames.includes(name),
   );
 
@@ -263,7 +285,7 @@ export const runToolRoutingPhase = async (
     ...(env.scope?.additionalTools ?? []).map((tool) => tool.name),
     ...env.registry.list("tool").map((tool) => tool.name),
   ]);
-  const excludeToolSet = new Set<string>(turnPolicy.excludeTools);
+  const excludeToolSet = new Set<string>(gatingPolicy.excludeTools);
   const applyDiscoveryExpansion = (names: string[]): string[] =>
     discoveryExpansion
       ? expandDiscoverySiblings(names, discoveryExpansion, registeredToolNames, excludeToolSet)
@@ -302,7 +324,7 @@ export const runToolRoutingPhase = async (
           explicitToolNames.length > 0
             ? "explicit-tool-mention"
             : includeToolNames.length > 0
-              ? "turn-policy-include"
+              ? "gating-policy-include"
               : "default",
       },
     }));

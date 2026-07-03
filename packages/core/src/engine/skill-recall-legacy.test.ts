@@ -42,21 +42,21 @@ describe("skill-recall-legacy", () => {
       name: "high-match",
       description: "typescript programming guide",
       instructions: "use strict types",
-      trigger: { type: "semantic" },
+      activation: { mode: "semantic" },
     });
     await registry.register({
       kind: "skill",
       name: "low-match",
       description: "cooking recipes",
       instructions: "bake bread",
-      trigger: { type: "semantic" },
+      activation: { mode: "semantic" },
     });
     await registry.register({
       kind: "skill",
       name: "always-skill",
       description: "global style",
       instructions: "be concise",
-      trigger: { type: "always" },
+      activation: { mode: "always" },
     });
 
     await sessions.resolve("s1");

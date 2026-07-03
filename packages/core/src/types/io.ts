@@ -1,7 +1,8 @@
 import type { EngineError } from "../errors/engine-error";
 import type { ExecutionCorrelation, ExecutionSubject } from "./context";
+import type { HookPoint } from "./hooks";
 import type { ExecutionRoute } from "./result";
-import type { TurnPolicy } from "./turn-policy";
+import type { GatingPolicy } from "./gating-policy";
 
 /**
  * 输入元信息。
@@ -9,9 +10,9 @@ import type { TurnPolicy } from "./turn-policy";
 export interface InputMetadata {
   modality?: string | undefined;
  /**
- * 本轮能力进退清单（ 阶段归一化后始终存在稳定形状。
+ * 本轮能力进退清单（确定性 host gating 归一化后始终存在稳定形状）。
  */
-  turnPolicy?: TurnPolicy | undefined;
+  gatingPolicy?: GatingPolicy | undefined;
   size?: number | undefined;
   source?: string | undefined;
   mimeType?: string | undefined;
@@ -361,7 +362,7 @@ export interface UsageChunk {
 }
 
 /**
- * 引擎 6 阶段（session / safety / tool-routing / execution / validation /
+ * 引擎内部循环步（session / safety / tool-routing / execution / validation /
  * output）枚举。
  *
  * ADR-0006 落地后，原 `intent / precheck / planning / graph-check` 四个死
@@ -371,9 +372,12 @@ export interface UsageChunk {
  * `postToolUse` 等 loop-lifecycle hook 点（见 `types/hooks.ts`）挂载，而非
  * 靠额外的分类 phase 猜测。
  *
- * 用于 `phase-enter` / `phase-exit` 顶层 StreamChunk 的结构化标签，替代
- * `progress` chunk 上靠 `message` 后缀（`"${phase} started"`）判 START/END
- * 的脆弱约定，便于下游消费方做穷举式 switch。
+ * **仅作内部 stage taxonomy**：可观测事件（`loop_step_enter/exit`、
+ * `RuntimeState.currentPhase` 归因）、`SafetyPolicy.scope` 过滤、`Evidence`
+ * 生产者标签复用它。它**不再**作为公共流式契约对外泄漏 —— 对外的粗粒度轮次
+ * 里程碑由 {@link LifecycleChunk}（`turnStart` / `turnStop`，loop-lifecycle
+ * 词汇）承载，`runXxxPhase` / `PhaseEnvironment` 也已从 `@tachu/core` 公共
+ * API 内部化。
  */
 export type EnginePhase =
   | "session"
@@ -384,30 +388,27 @@ export type EnginePhase =
   | "output";
 
 /**
- * 阶段进入事件：tachu engine 在每个 6 阶段开始时 yield 一次。
+ * 循环生命周期里程碑事件（ADR-0006 深单 loop 脊柱）。
  *
- * 与现有 `progress` chunk 的关系：
- * - `progress` 保留：现有 CLI / 旧消费方按 message 文案展示
- * - `phase-enter`：新结构化通道，供 SSE mapper / SDK 等通过 `chunk.type`
- * 做穷举式 switch，避免依赖文案后缀
- */
-export interface PhaseEnterChunk {
-  type: "phase-enter";
-  phase: EnginePhase;
-  stepId?: string | undefined;
-}
-
-/**
- * 阶段退出事件：tachu engine 在每个 6 阶段结束时 yield 一次。
+ * 取代旧的 `phase-enter` / `phase-exit`（曾把内部 6 阶段流水线名泄漏给流消费方）。
+ * 对外只暴露 **loop-lifecycle** 词汇（{@link HookPoint}），与引擎真正的轮次边界
+ * 一致：
+ * - `turnStart`：一轮开始的 pre-guard 里程碑（setup 完成、safety 归并后 fire）。
+ * - `turnStop`：一轮结束的 post-guard 里程碑（Result Validation 前后）。
  *
- * `ok=false` 仅在阶段函数抛错时由 `runStream` 的 catch 分支补发；正常完成时
- * `ok=true`。
+ * loop 内部的细粒度进度由 `tool-loop-step` / `tool-call-*` / `tool-loop-final`
+ * 等 chunk 承载；`lifecycle` 只标记粗粒度轮次边界。消费方应以 `chunk.type` +
+ * `point` 做穷举式 switch，未识别的 point 按 no-op 处理以便向前兼容。
+ *
+ * `ok=false` 仅在里程碑对应的守卫/步骤抛错时由 `runStream` 的 catch 分支补发；
+ * 正常完成时 `ok=true`。
  */
-export interface PhaseExitChunk {
-  type: "phase-exit";
-  phase: EnginePhase;
+export interface LifecycleChunk {
+  type: "lifecycle";
+  point: HookPoint;
+  status: "enter" | "exit";
   stepId?: string | undefined;
-  ok: boolean;
+  ok?: boolean | undefined;
   error?: {
     code?: string;
     message?: string;
@@ -449,8 +450,7 @@ export type StreamChunkPayload =
   | { type: "artifact"; artifact: Artifact }
   | { type: "error"; error: EngineError }
   | { type: "plan-preview"; phase: "tool-routing"; route: ExecutionRoute }
-  | PhaseEnterChunk
-  | PhaseExitChunk
+  | LifecycleChunk
   | ReasoningDeltaChunk
   | ToolLoopStepChunk
   | ToolLoopDeltaChunk

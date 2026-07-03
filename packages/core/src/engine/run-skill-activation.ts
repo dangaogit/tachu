@@ -6,15 +6,15 @@ import type { AdapterCallContext } from "../types/context";
 import type { ContextWindow } from "../modules/memory";
 import type { ObservabilityEmitter } from "../modules/observability";
 import type { SessionManager } from "../modules/session";
-import { readTurnPolicy } from "./turn-policy";
+import { readGatingPolicy } from "./gating-policy";
 import { engineEventFromAdapterContext } from "./turn-outcome";
+import { createActivation, type ActivationResult as SeamActivationResult } from "./activation";
 import {
   buildActivationQuery,
   computeActivationBudget,
-  createDefaultPinningStrategies,
-  DefaultSkillActivator,
+  createSkillActivationProfile,
+  type ActivationResult as SkillActivationResult,
   type CandidateStrategy,
-  type PinningStrategy,
   type StickyManager,
 } from "./skill-activation";
 
@@ -40,7 +40,6 @@ export interface ResolveRunSkillsParams {
   tokenizer: Tokenizer;
   maxContextTokens: number;
   reserveOutputTokens?: number;
-  pinningStrategies?: PinningStrategy[];
   candidateStrategies?: CandidateStrategy[];
  /** Policy-aware semantic retrieval. */
   semanticRetrieval?: SemanticRetrievalFacade;
@@ -83,43 +82,63 @@ export const resolveRunSkills = async (
     params.reserveOutputTokens ?? 4_096,
   );
 
-  const activator = new DefaultSkillActivator({
-    pinningStrategies: params.pinningStrategies ?? createDefaultPinningStrategies(),
-    candidateStrategies: params.candidateStrategies ?? [],
-    candidateTopK: params.config.runtime.candidateTopK ?? 20,
-    tokenizer: params.tokenizer,
-    adapterContext: params.adapterContext,
-  });
+ // A 概念对齐：skill 也经统一激活 seam（`activateDescriptors` +
+ // `createSkillActivationProfile`）激活，与 rule/tool/agent 同形。原先散落成 4 个
+ // pinning 策略（snapshot-refs / explicit / gating-pin / always-activation）的决策
+ // 收敛到通用激活模型：把 gatingPolicy + snapshot 折算为本轮的 explicit/pinned/
+ // excluded 输入，由 core 统一决策；sticky（TTL 状态）与 budget/tier（token 预算）
+ // 作为 skill 专属 placement 保留在 profile 内。富结果经 `result.detail` 回传。
+  const gatingPolicy = readGatingPolicy(params.currentInput);
+  const snapshotRefs = params.scope?.additionalSkills?.map((skill) => skill.name) ?? [];
+  const explicitNames = new Set(gatingPolicy.explicitSkills);
+  const pinnedNames = new Set([...snapshotRefs, ...gatingPolicy.pinSkills]);
+  const excludedNames = new Set(gatingPolicy.excludeSkills);
 
-  const activation = await activator.activate({
-    currentInput: params.currentInput,
-    contextWindow: params.contextWindow,
+  const profile = createSkillActivationProfile({
+    tokenizer: params.tokenizer,
+    stickyManager: params.stickyManager,
+    budget,
     sessionId: params.sessionId,
     currentTurn,
-    snapshotSkillRefs: params.scope?.additionalSkills?.map((skill) => skill.name) ?? [],
-    registry: params.registry,
-    stickyManager: params.stickyManager,
+    candidateStrategies: params.candidateStrategies ?? [],
+    candidateTopK: params.config.runtime.candidateTopK ?? 20,
+    observability: params.observability,
+    adapterContext: params.adapterContext,
     ...(params.semanticRetrieval !== undefined
       ? { semanticRetrieval: params.semanticRetrieval }
       : {}),
-    correlation: params.adapterContext.correlation,
-    ...(params.adapterContext.subject !== undefined
-      ? { subject: params.adapterContext.subject }
-      : {}),
-    observability: params.observability,
-    signal: params.signal,
-    budget,
-    query,
-    turnPolicy: readTurnPolicy(params.currentInput),
   });
 
+  const activation = (await createActivation({ profiles: { skill: profile } }).activate(
+    "skill",
+    {
+      query,
+      registry: { list: (kind) => params.registry.list(kind) },
+      explicitNames,
+      pinnedNames,
+      excludedNames,
+      observability: {
+        emit: (event: unknown) =>
+          params.observability.emit(
+            event as Parameters<typeof params.observability.emit>[0],
+          ),
+      },
+      signal: params.signal,
+      correlation: params.adapterContext.correlation as unknown as Record<string, unknown>,
+    },
+  )) as SeamActivationResult<"skill">;
+
+  const detail = activation.detail as SkillActivationResult | undefined;
+  const pinned = detail?.pinned ?? [];
+  const candidates = detail?.candidates ?? [];
+
   return {
-    activeSkills: activation.pinned.map((item) => item.skill),
-    availableSkills: activation.candidates.map((item) => item.skill),
+    activeSkills: pinned.map((item) => item.skill),
+    availableSkills: candidates.map((item) => item.skill),
     skillSimilarityMap: new Map(
-      activation.candidates.map((item) => [item.skill.name, item.score]),
+      candidates.map((item) => [item.skill.name, item.score]),
     ),
-    alwaysSkillNames: activation.alwaysSkillNames,
-    stickySkillNames: activation.stickySkillNames,
+    alwaysSkillNames: detail?.alwaysSkillNames ?? new Set<string>(),
+    stickySkillNames: detail?.stickySkillNames ?? new Set<string>(),
   };
 };

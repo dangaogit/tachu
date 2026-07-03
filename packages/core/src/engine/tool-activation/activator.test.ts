@@ -272,7 +272,7 @@ describe("DefaultToolActivator", () => {
     const { HostPolicyToolStrategy } = await import("./strategies/host-policy");
     const strategy = new HostPolicyToolStrategy();
     const { ctx, activator } = makeCtx(tools, [strategy], {
-      turnPolicy: {
+      gatingPolicy: {
         excludeTools: ["image.qwen"],
         includeTools: ["image.qwen"],
         explicitSkills: [],

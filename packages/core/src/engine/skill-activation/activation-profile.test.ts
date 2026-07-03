@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { SkillDescriptor } from "../../types";
+import type { Activation, SkillDescriptor } from "../../types";
 import type { Tokenizer } from "../../prompt/tokenizer";
 import type { SemanticRetrievalFacade } from "../../semantic-retrieval";
 import { DefaultObservabilityEmitter } from "../../modules/observability";
@@ -16,13 +16,13 @@ const tokenizer: Tokenizer = {
 
 const skill = (
   name: string,
-  trigger?: SkillDescriptor["trigger"],
+  activation: Activation = { mode: "semantic" },
 ): SkillDescriptor => ({
   kind: "skill",
   name,
   description: `${name} description`,
   instructions: `${name} instructions`,
-  ...(trigger !== undefined ? { trigger } : {}),
+  activation,
 });
 
 const activateSkills = async (
@@ -58,8 +58,8 @@ const activateSkills = async (
 describe("createSkillActivationProfile", () => {
   test("maps always to pinned activation and explicit to manual activation", async () => {
     const skills = [
-      skill("always-on", { type: "always" }),
-      skill("manual-only", { type: "explicit" }),
+      skill("always-on", { mode: "always" }),
+      skill("manual-only", { mode: "manual" }),
     ];
 
     const inactiveManual = await activateSkills(skills);
@@ -90,8 +90,8 @@ describe("createSkillActivationProfile", () => {
 
     const result = await activateSkills(
       [
-        skill("chart-output", { type: "semantic" }),
-        skill("other-skill", { type: "semantic" }),
+        skill("chart-output", { mode: "semantic" }),
+        skill("other-skill", { mode: "semantic" }),
       ],
       { semanticRetrieval },
     );
@@ -107,8 +107,8 @@ describe("createSkillActivationProfile", () => {
 
   test("activates semantic skills only when they are in semanticActiveNames", async () => {
     const skills = [
-      skill("semantic-one", { type: "semantic" }),
-      skill("semantic-two", { type: "semantic" }),
+      skill("semantic-one", { mode: "semantic" }),
+      skill("semantic-two", { mode: "semantic" }),
     ];
 
     const inactive = await activateSkills(skills);
@@ -176,11 +176,11 @@ describe("createSkillActivationProfile", () => {
           skill("sticky-old"),
           skill("sticky-new"),
           {
-            ...skill("candidate-low", { type: "semantic" }),
+            ...skill("candidate-low", { mode: "semantic" }),
             description: "low ".repeat(20),
           },
           {
-            ...skill("candidate-high", { type: "semantic" }),
+            ...skill("candidate-high", { mode: "semantic" }),
             description: "high",
           },
         ],
@@ -252,7 +252,7 @@ describe("createSkillActivationProfile", () => {
       registry: {
         list: () => [
           skill("sticky-skill"),
-          skill("promoted-skill", { type: "semantic" }),
+          skill("promoted-skill", { mode: "semantic" }),
         ],
       },
     });
@@ -274,7 +274,7 @@ describe("createSkillActivationProfile", () => {
       activateSkills(
         [
           {
-            ...skill("big-always", { type: "always" }),
+            ...skill("big-always", { mode: "always" }),
             instructions: "x".repeat(500),
           },
         ],
@@ -300,7 +300,7 @@ describe("createSkillActivationProfile", () => {
         registry: {
           list: () => [
             {
-              ...skill("big-always", { type: "always" }),
+              ...skill("big-always", { mode: "always" }),
               instructions: "x".repeat(500),
             },
           ],

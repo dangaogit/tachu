@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { emptyTurnPolicy, normalizeTurnPolicy, readTurnPolicy, withTurnPolicyMetadata } from "./turn-policy";
+import { emptyGatingPolicy, normalizeGatingPolicy, readGatingPolicy, withGatingPolicyMetadata } from "./gating-policy";
 
-describe("normalizeTurnPolicy", () => {
+describe("normalizeGatingPolicy", () => {
  test("scope explicitSkillNames → stable shell with explicitSkills", () => {
-    const policy = normalizeTurnPolicy({
+    const policy = normalizeGatingPolicy({
       scope: { explicitSkillNames: ["chart-output"] },
       knownSkillNames: new Set(["chart-output"]),
     });
@@ -18,7 +18,7 @@ describe("normalizeTurnPolicy", () => {
   });
 
  test("dedupes and ignores unknown registry names", () => {
-    const policy = normalizeTurnPolicy({
+    const policy = normalizeGatingPolicy({
       preseed: {
         excludeTools: ["image.qwen", "image.qwen", "unknown.tool"],
         includeTools: [],
@@ -38,13 +38,13 @@ describe("normalizeTurnPolicy", () => {
   });
 });
 
-describe("readTurnPolicy", () => {
+describe("readGatingPolicy", () => {
  test("returns empty shell when metadata missing", () => {
-    expect(readTurnPolicy({ content: "hi", metadata: {} })).toEqual(emptyTurnPolicy());
+    expect(readGatingPolicy({ content: "hi", metadata: {} })).toEqual(emptyGatingPolicy());
   });
 
- test("round-trips via withTurnPolicyMetadata", () => {
-    const policy = normalizeTurnPolicy({
+ test("round-trips via withGatingPolicyMetadata", () => {
+    const policy = normalizeGatingPolicy({
       preseed: {
         excludeTools: [],
         includeTools: ["image.qwen"],
@@ -55,7 +55,7 @@ describe("readTurnPolicy", () => {
       },
       knownToolNames: new Set(["image.qwen"]),
     });
-    const input = withTurnPolicyMetadata({ content: "draw", metadata: {} }, policy);
-    expect(readTurnPolicy(input).includeTools).toEqual(["image.qwen"]);
+    const input = withGatingPolicyMetadata({ content: "draw", metadata: {} }, policy);
+    expect(readGatingPolicy(input).includeTools).toEqual(["image.qwen"]);
   });
 });

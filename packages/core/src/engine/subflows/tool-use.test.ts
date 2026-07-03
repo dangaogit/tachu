@@ -820,6 +820,7 @@ describe("executeToolUse ( Agentic Loop)", () => {
           name: "reader-skill",
           description: "reads files",
           instructions: "read files",
+          activation: { mode: "semantic" },
           allowedTools: ["read-file"],
         },
       ],
@@ -860,6 +861,7 @@ describe("executeToolUse ( Agentic Loop)", () => {
           name: "git-workflow",
           description: "git helper",
           instructions: "help with git",
+          activation: { mode: "semantic" },
           allowedTools: ["run-shell(^git (status|diff)(\\b|$))"],
         },
       ],
@@ -898,6 +900,7 @@ describe("executeToolUse ( Agentic Loop)", () => {
           name: "git-workflow",
           description: "git helper",
           instructions: "help with git",
+          activation: { mode: "semantic" },
           allowedTools: ["run-shell(^git (status|diff)(\\b|$))"],
         },
       ],
@@ -1235,7 +1238,7 @@ describe("executeToolUse ( Agentic Loop)", () => {
     expectTerminalDraft(result, "已按你的要求放弃该操作。");
   });
 
- test("turn-policy tail note：includeTools 非空时追加发现指引", async () => {
+ test("gating-policy tail note：includeTools 非空时追加发现指引", async () => {
     const { adapter, calls } = createScriptedProvider([
       { content: "done.", finishReason: "stop", usage: noopUsage },
     ]);
@@ -1245,7 +1248,7 @@ describe("executeToolUse ( Agentic Loop)", () => {
       toolSet: [{ name: "query-db" }],
       taskExecutor: async () => ok({}),
     });
-    ctx.turnPolicy = {
+    ctx.gatingPolicy = {
       excludeTools: [],
       includeTools: ["query-db"],
       explicitSkills: [],
@@ -1260,7 +1263,7 @@ describe("executeToolUse ( Agentic Loop)", () => {
     expect(systems.some((c) => c.includes("discovery or listing tool"))).toBe(true);
   });
 
- test("turn-policy tail note：includeTools 为空时不追加发现指引（条件式）", async () => {
+ test("gating-policy tail note：includeTools 为空时不追加发现指引（条件式）", async () => {
     const { adapter, calls } = createScriptedProvider([
       { content: "done.", finishReason: "stop", usage: noopUsage },
     ]);
@@ -1270,7 +1273,7 @@ describe("executeToolUse ( Agentic Loop)", () => {
       toolSet: [{ name: "query-db" }],
       taskExecutor: async () => ok({}),
     });
-    ctx.turnPolicy = {
+    ctx.gatingPolicy = {
       excludeTools: [],
       includeTools: [],
       explicitSkills: [],

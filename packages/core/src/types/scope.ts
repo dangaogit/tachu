@@ -57,13 +57,13 @@ export interface SessionScope {
   toolRoutingDisabled?: boolean;
  /**
  * Per-turn agent context the host may inject for tool/skill activation hints
- * (e.g. persona summary and visible tool/skill menus). Not an intent-LLM input —
- * turn policy is deterministic host gating (see `HostPolicyToolStrategy`).
+ * (e.g. persona summary and visible tool/skill menus). Purely deterministic
+ * host gating input — there is no intent-LLM step (see `HostPolicyToolStrategy`).
  */
-  intentAgentContext?: {
+  activationHints?: {
     systemInstruction?: string;
     tools?: Array<{ name: string; description: string }>;
- /** Agent-visible skills for turn-policy hints (name + description + optional tags). */
+ /** Agent-visible skills for gating-policy hints (name + description + optional tags). */
     skills?: Array<{ name: string; description: string; tags?: string[] }>;
   };
  /**
@@ -73,7 +73,7 @@ export interface SessionScope {
   explicitToolNames?: string[];
   /**
    * Host-detected explicit skill invocation (e.g. `/chart-output`, @mention, UI pick).
-   * Copied to turnPolicy.explicitSkills during intent normalization; highest pin priority.
+   * Copied to gatingPolicy.explicitSkills during gating normalization; highest pin priority.
    */
   explicitSkillNames?: string[];
   /**

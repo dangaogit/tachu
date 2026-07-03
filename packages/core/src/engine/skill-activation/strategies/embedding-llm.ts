@@ -29,7 +29,7 @@ export class EmbeddingLlmCandidateStrategy implements CandidateStrategy {
       if (exclude.has(skill.name) || skill.deprecated === true) {
         return false;
       }
-      if (skill.trigger?.type === "explicit" || skill.trigger?.type === "always") {
+      if (skill.activation.mode === "manual" || skill.activation.mode === "always") {
         return false;
       }
       return true;

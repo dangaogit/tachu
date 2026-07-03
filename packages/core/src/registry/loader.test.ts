@@ -232,16 +232,16 @@ instructions`,
     );
   });
 
-  test("fail-closes when a skill declares an unknown trigger type", async () => {
-    const root = await mkdtemp(join(tmpdir(), "tachu-loader-bad-skill-trigger-"));
+  test("fail-closes when a skill declares an unknown activation mode", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tachu-loader-bad-skill-activation-"));
     await mkdir(join(root, "skills"), { recursive: true });
     await writeFile(
       join(root, "skills", "bad.md"),
       `---
 name: bad-skill
 description: d
-trigger:
-  type: typo
+activation:
+  mode: typo
 ---
 
 instructions`,
@@ -249,48 +249,17 @@ instructions`,
     );
     const loader = new RegistryLoader(new DescriptorRegistry());
     await expect(loader.loadFromDirectory(root)).rejects.toThrow(
-      /skill "bad-skill" .*bad\.md.*trigger\.type/,
+      /"bad-skill" .*bad\.md.*activation\.mode/,
     );
   });
 
-  test("keeps keyword trigger type as a deprecated alias for semantic", async () => {
-    const root = await mkdtemp(join(tmpdir(), "tachu-loader-keyword-skill-trigger-"));
+  test("defaults a skill with no activation to semantic", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tachu-loader-missing-skill-activation-"));
     await mkdir(join(root, "skills"), { recursive: true });
     await writeFile(
-      join(root, "skills", "keyword-skill.md"),
+      join(root, "skills", "missing-activation.md"),
       `---
-name: keyword-skill
-description: d
-trigger:
-  type: keyword
----
-
-instructions`,
-      "utf8",
-    );
-    const warnings: string[] = [];
-    const originalWarn = console.warn;
-    console.warn = (...args: unknown[]) => {
-      warnings.push(args.map(String).join(" "));
-    };
-    try {
-      const registry = new DescriptorRegistry();
-      const loader = new RegistryLoader(registry);
-      await loader.loadFromDirectory(root);
-      expect(registry.get("skill", "keyword-skill")?.trigger).toEqual({ type: "semantic" });
-      expect(warnings.some((message) => message.includes('trigger.type "keyword"'))).toBe(true);
-    } finally {
-      console.warn = originalWarn;
-    }
-  });
-
-  test("defaults a skill with no trigger to semantic", async () => {
-    const root = await mkdtemp(join(tmpdir(), "tachu-loader-missing-skill-trigger-"));
-    await mkdir(join(root, "skills"), { recursive: true });
-    await writeFile(
-      join(root, "skills", "missing-trigger.md"),
-      `---
-name: missing-trigger
+name: missing-activation
 description: d
 ---
 
@@ -300,7 +269,7 @@ instructions`,
     const registry = new DescriptorRegistry();
     const loader = new RegistryLoader(registry);
     await loader.loadFromDirectory(root);
-    expect(registry.get("skill", "missing-trigger")?.trigger).toEqual({ type: "semantic" });
+    expect(registry.get("skill", "missing-activation")?.activation).toEqual({ mode: "semantic" });
   });
 
   test("fail-closes when a descriptor declares an unknown kind", async () => {
@@ -340,6 +309,26 @@ body`,
     const loader = new RegistryLoader(registry);
     await loader.loadFromDirectory(root);
     expect(registry.get("tool", "inferred-tool")?.kind).toBe("tool");
+  });
+
+  test("fail-closes when kind is absent and field signatures are ambiguous", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tachu-loader-ambiguous-kind-"));
+    await writeFile(
+      join(root, "ambiguous.md"),
+      `---
+name: ambiguous-desc
+description: has both tool and agent signatures
+execute: runAmbiguous
+maxDepth: 2
+---
+
+body`,
+      "utf8",
+    );
+    const loader = new RegistryLoader(new DescriptorRegistry());
+    await expect(loader.loadFromDirectory(root)).rejects.toThrow(
+      /descriptor "ambiguous-desc" .*无法确定 kind.*tool\/agent/,
+    );
   });
 
   test("rejects invalid frontmatter structure", async () => {

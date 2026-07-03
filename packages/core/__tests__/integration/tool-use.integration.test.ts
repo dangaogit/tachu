@@ -229,8 +229,9 @@ const echoToolDescriptor: ToolDescriptor = {
 
 /**
  * 校验 StreamChunk 序列中 tool-call-start / tool-call-end 按 callId 严格配对，
- * 且在 `phase-exit`（execution）与首个 `done` 之前不得残留未闭合的 callId；
- * 所有 `tool-call-end` 必须出现在 `done` 之前。
+ * 且在 `lifecycle`（turnStop enter，即 loop 结束、进入 post-guard 的公共分界）
+ * 与首个 `done` 之前不得残留未闭合的 callId；所有 `tool-call-end` 必须出现在
+ * `done` 之前。
  */
 const assertToolCallStreamChunksWellFormed = (chunks: StreamChunk[]): void => {
   const open = new Map<string, string>();
@@ -239,7 +240,7 @@ const assertToolCallStreamChunksWellFormed = (chunks: StreamChunk[]): void => {
 
   for (let i = 0; i < chunks.length; i++) {
     const c = chunks[i]!;
-    if (c.type === "phase-exit" && c.phase === "execution") {
+    if (c.type === "lifecycle" && c.point === "turnStop" && c.status === "enter") {
       expect(open.size).toBe(0);
     }
     if (c.type === "tool-call-start") {
@@ -566,7 +567,7 @@ describe("engine integration: tool-use agentic loop", () => {
     await engine.dispose();
   });
 
- test("同一轮 LLM 内两次工具调用（同名不同 callId）→ 每个 callId 在 execution phase-exit 与 done 前均有对偶 end", async () => {
+ test("同一轮 LLM 内两次工具调用（同名不同 callId）→ 每个 callId 在 turnStop 里程碑与 done 前均有对偶 end", async () => {
     const provider = new ScriptedMockProvider([
       {
         content: "",
@@ -655,14 +656,14 @@ describe("engine integration: tool-use agentic loop", () => {
     const endBIndex = chunks.findIndex(
       (c) => c.type === "tool-call-end" && c.callId === "call-echo-b",
     );
-    const execExitIndex = chunks.findIndex(
-      (c) => c.type === "phase-exit" && c.phase === "execution",
+    const loopDoneIndex = chunks.findIndex(
+      (c) => c.type === "lifecycle" && c.point === "turnStop" && c.status === "enter",
     );
     expect(endAIndex).toBeGreaterThanOrEqual(0);
     expect(endBIndex).toBeGreaterThanOrEqual(0);
     expect(endBIndex).toBeLessThan(doneIndex);
     const lastToolEndIndex = Math.max(endAIndex, endBIndex);
-    expect(execExitIndex).toBeGreaterThan(lastToolEndIndex);
+    expect(loopDoneIndex).toBeGreaterThan(lastToolEndIndex);
 
     await engine.dispose();
   });

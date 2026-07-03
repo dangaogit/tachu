@@ -45,6 +45,7 @@ describe("DefaultPromptAssembler", () => {
           name: "plan-skill",
           description: "do planning",
           instructions: "steps and constraints",
+          activation: { mode: "semantic" },
         },
       ],
       availableTools: [
@@ -131,6 +132,7 @@ describe("DefaultPromptAssembler", () => {
           name: "s1",
           description: "skill 1",
           instructions: "x".repeat(400),
+          activation: { mode: "semantic" },
         },
       ],
       availableTools: [

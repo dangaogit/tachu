@@ -14,6 +14,7 @@ import type { ExecutionCorrelation, ExecutionSubject } from "./context";
 export type EventType =
   | "loop_step_enter"
   | "loop_step_exit"
+  /** @deprecated Engine no longer emits these; kept for backward-compatible event filters. */
   | "phase_enter"
   | "phase_exit"
   | "progress"

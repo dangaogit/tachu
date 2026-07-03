@@ -1,11 +1,11 @@
 import type { HookEvent, HookGuardDecision, HookPoint } from "./hooks";
 
 /**
- * 对称守卫 seam(ADR-0006 D4)。
+ * Guard 决策类型别名（`HookGuardDecision` 的 re-export）。
  *
- * 一个通用 guardrail 契约,挂 `turnStart`(pre-guard)与 `turnStop`(post-guard):
- * 单个 guard 干合规检查、内容策略、还是质量 validation,由宿主消费方决定,
- * core 不区分语义,只区分挂载点。
+ * rc.12 起 standalone `Guardrail` 公共接口已移除；pre/post guard 统一经
+ * `HookAction` 的 `{ type: "guard"; decision }` 表达。本文件保留别名供
+ * 内置 helper（`createSafetyViolationsGuardAction` 等）与测试引用。
  */
 export type GuardrailPoint = Extract<HookPoint, "turnStart" | "turnStop">;
 

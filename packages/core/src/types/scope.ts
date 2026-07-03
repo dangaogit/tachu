@@ -56,20 +56,14 @@ export interface SessionScope {
  */
   toolRoutingDisabled?: boolean;
  /**
- * Per-turn agent context injected into the intent classifier so it can make
- * context-aware complexity decisions without hardcoded domain patterns.
- *
- * - `systemInstruction`: brief agent persona / capability summary (≤300 chars used)
- * - `tools`: name + one-line description of each tool available to this agent
- *
- * When present, the intent LLM sees a "### Agent Context" section describing
- * what the agent can do, enabling it to recognise tool-query questions as "complex"
- * without relying on regex patterns.
+ * Per-turn agent context the host may inject for tool/skill activation hints
+ * (e.g. persona summary and visible tool/skill menus). Not an intent-LLM input —
+ * turn policy is deterministic host gating (see `HostPolicyToolStrategy`).
  */
   intentAgentContext?: {
     systemInstruction?: string;
     tools?: Array<{ name: string; description: string }>;
- /** Agent-visible skills for intent LLM turnPolicy output (name + description + optional tags). */
+ /** Agent-visible skills for turn-policy hints (name + description + optional tags). */
     skills?: Array<{ name: string; description: string; tags?: string[] }>;
   };
  /**

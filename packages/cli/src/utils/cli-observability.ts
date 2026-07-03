@@ -77,7 +77,12 @@ const pickColor = (
   if (type === "llm_call_end" || type === "tool_call_end") {
     return "green";
   }
-  if (type === "phase_enter" || type === "phase_exit") {
+  if (
+    type === "phase_enter" ||
+    type === "phase_exit" ||
+    type === "loop_step_enter" ||
+    type === "loop_step_exit"
+  ) {
     return "blue";
   }
   if (type === "provider_fallback" || type === "plan_switched" || type === "retry") {
@@ -138,6 +143,8 @@ const summarizePayload = (
       break;
     case "phase_enter":
     case "phase_exit":
+    case "loop_step_enter":
+    case "loop_step_exit":
  // 大多数 phase 不携带 payload；如果有则拼上。
       for (const [k, v] of Object.entries(payload)) push(k, v);
       break;

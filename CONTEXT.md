@@ -52,8 +52,8 @@ Structured manifest produced in the intent phase (`IntentResult.turnPolicy`, mir
 _Avoid_: Intent hint, soft prompt-only routing, engine-side chart/image heuristics, root-level `textToImage`, LLM-authored explicitSkills
 
 **Explicit Skill Mention**:
-A skill the user manually invoked in the current turn (for example a `/command`, `@mention`, or UI selection). Host parses it into `SessionScope.explicitSkillNames` before intent; intent normalization copies the list to `Turn Policy.explicitSkills`. The intent classifier may see these names in a read-only **User explicit selections** prompt section so it can emit complementary pin/exclude lists without contradicting user choices; enforcement still comes from scope copy, not from LLM echo. Explicit skills force T0 pin and override `excludeSkills`; they outrank intent `pinSkills`.
-_Avoid_: Treating Agent snapshot skills as user explicit mention, letting the intent LLM be the source of truth for explicit skills
+A skill the user manually invoked in the current turn (for example a `/command`, `@mention`, or UI selection). Host parses it into `SessionScope.explicitSkillNames`; turn-policy normalization copies the list to `Turn Policy.explicitSkills`. Explicit skills force T0 pin and override `excludeSkills`; they outrank intent `pinSkills`.
+_Avoid_: Treating Agent snapshot skills as user explicit mention
 
 **Skill Turn Policy Priority**:
 When resolving active skills for a turn: Explicit Skill Mention beats `excludeSkills`, which beats `pinSkills`, which beats Agent snapshot refs, always-trigger, sticky, and retrieval candidates.

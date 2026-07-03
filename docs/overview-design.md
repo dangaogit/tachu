@@ -278,7 +278,7 @@ input → process → output
 
 > **流水线同构原则（ADR-0006 塌陷版）**：一个**深单 agentic loop 是唯一主干 spine**。所有请求：`turnStart` 前置守卫 → 确定性预处理（`tool-routing`）→ 进入同一个 `tool-use` loop；loop 内 LLM 自主决定调用工具、派发子代理，还是直接给出终答。「无工具的纯回答」由 loop step-1 无 `tool_call` 自然承接，不再有独立的 `direct-answer` 子流程或独立的 `intent`/`planning` 分类 phase。
 >
-> 横切能力（Rules / Hooks / Guardrail / 预算 / 可观测性）不再挂在 phase 名前后，而是统一挂在 **loop-lifecycle 事件**上；这保证了它们在所有请求上具备一致覆盖，且不再有"定义了却从不触发"的死挂载面。
+> 横切能力（Rules / Hooks / guard seam / 预算 / 可观测性）不再挂在 phase 名前后，而是统一挂在 **loop-lifecycle 事件**上；这保证了它们在所有请求上具备一致覆盖，且不再有"定义了却从不触发"的死挂载面。
 
 ```mermaid
 graph TD
@@ -324,7 +324,7 @@ graph TD
   ↓
 turnStart（pre-guard，恒 fail-closed，见「loop-lifecycle 挂载面」）
   ├── 内置默认 guard：SafetyModule baseline（前置安全检查产出的 violations → annotate/degrade/block）
-  ├── 业务可通过 EngineDependencies.guardrails.turnStart 追加 guard（合规 / 内容策略 / 自定义门禁）
+  ├── 业务可通过 hooks.register("turnStart", ...) 追加 guard（合规 / 内容策略 / 自定义门禁）
   ├── block → 中止整轮
   └── pass / degrade / annotate → 携带说明前缀继续
   ↓
@@ -350,7 +350,7 @@ execution：tool-use 深单 Agentic Loop（唯一主干 spine）
   ↓
 turnStop（post-guard，恒最后跑、fail-closed，见「loop-lifecycle 挂载面」）
   ├── 内置默认 guard：Result Validation（evidence/claims → deliver/retry/degrade）
-  ├── 业务可通过 EngineDependencies.guardrails.turnStop 追加 guard
+  ├── 业务可通过 hooks.register("turnStop", ...) 追加 guard
   ├── block → 拒绝交付
   └── pass / degrade / annotate → 携带说明前缀继续
   ↓
@@ -378,16 +378,9 @@ Plan 不是核心抽象；ADR-0006 塌陷深单 loop 后也**不再有「规划�
 
 多阶段流水线塌陷为深单 loop 后（ADR-0006），横切能力从"挂在 phase 名前后"归位到"挂在 loop 生命周期事件上"，覆盖面不减反增——9 个 `HookPoint` 均有真实 fire 位（不再有旧版 14 个点里 13 个从未触发的死点）。
 
-**对称守卫 seam（Guardrail）**：一个通用 `Guardrail` 契约同时承载 pre-guard（`turnStart`）与 post-guard（`turnStop`）；单个 guard 是做合规检查、内容策略还是质量校验由宿主消费方决定，core 只区分挂载点、不区分语义。处置结果恒 **fail-closed**，四态：
+**统一 guard seam（HookAction）**：pre-guard（`turnStart`）与 post-guard（`turnStop`）经同一 `HookRegistry` 面表达。Handler 返回 `{ type: "guard"; decision: pass | block | degrade | annotate }`（fail-closed）或 `{ type: "finding"; findings }`（ValidationRule 产出）。内置默认：`turnStart` = SafetyModule baseline；`turnStop` = Result Validation。宿主通过 `hooks.register("turnStart" | "turnStop", ...)` 追加 guard（`EngineDependencies.guardrails` 已移除）。
 
-- `pass`：放行，无附加处置
-- `block`：拒付——`turnStart` 场景中止整轮；`turnStop` 场景拒绝交付候选答案
-- `degrade`：放行但降级说明，`userVisibleReason` 前缀拼进最终 `candidateAnswer.content`
-- `annotate`：放行但附加简短前缀说明，不改写正文其余部分
-
-刻意不提供"静默重排版"语义——想改格式是显式 transform，不是 guard 的职责。内置默认 guard：`turnStart` = `SafetyModule` baseline（前置安全检查产出的 violations 映射为 annotate/degrade/block）+ 业务通过 `EngineDependencies.guardrails.turnStart` 追加的策略；`turnStop` = Result Validation（evidence/claims → deliver/retry/degrade）。
-
-**Rule 激活轴与生命周期挂载面正交**：Rule 的唯一产物是注入 prompt 的文本，`RuleDescriptor.activation` 只回答「规则正文**何时**进 prompt」（`always` / `manual` / `semantic` / `path`），终点永远是 prompt。`block`/`annotate`/`validate` 这类阶段动作属于本节的对称 Guardrail seam 与 `HookPoint`，由它们承担——**Rule 不是生命周期挂载点**，不要把 rule 与 hook 混为一谈。输出格式类约束用 `always` 规则常驻 system prompt（每步都在 → 直接塑形 `terminalDraft`）；`turnStart`/`turnStop` 的准入与质量把关交给 Guardrail / `ValidationRule`，不写成 rule。该激活模型对齐业界 rule 系统（Cursor / Copilot / Continue / Cline）。
+**Rule 激活轴与生命周期挂载面正交**：Rule 的唯一产物是注入 prompt 的文本，`RuleDescriptor.activation` 只回答「规则正文**何时**进 prompt」（`always` / `manual` / `semantic` / `path`），终点永远是 prompt。`block`/`annotate`/`validate` 这类阶段动作属于上节的统一 guard seam 与 `HookPoint`，由它们承担——**Rule 不是生命周期挂载点**。输出格式类约束用 `always` 规则常驻 system prompt；`turnStart`/`turnStop` 的准入与质量把关交给 guard hook，不写成 rule。
 
 **subagent 派发（Single-Writer Rule）**：loop 内 LLM 可通过内置 Task-style 工具 `dispatch_agent` 自决派发只读子代理，复用既有 Agent runtime（`agentRunId` history-scope 隔离、`decideSubAgentBudget`、同一 `toolUseExecutor`），零新增架构面：
 
@@ -408,15 +401,15 @@ Plan 不是核心抽象；ADR-0006 塌陷深单 loop 后也**不再有「规划�
 
 - 同一 session 新消息到达时 last-message-wins，自动停止当前执行
 - 硬预算（token / time / tool 累计）熔断保持 turn 级累计；context-window 决策（trim/compress/degrade）改为 per-step 复检 + 超阈值自动 compact（`preCompact`）
-- observability 的 `phase_enter`/`phase_exit` 保留，但语义从"14 个 phase 各自的进入/退出"收窄为仅标记 6 个 `EnginePhase` 的宏观边界；`tool-use` loop 内部不再重新发明子阶段事件，改用扁平 per-step 事件（`tool_loop_step_*` / `tool_call_*` / `llm_call_*` / `hook_fired`）+ `parentStepId` 关联
+- observability 的 `loop_step_enter`/`loop_step_exit` 标记 6 个 `EnginePhase` 宏观边界（StreamChunk 层仍保留 `phase-enter`/`phase-exit`）；`tool-use` loop 内部用扁平 per-step 事件（`tool_loop_step_*` / `tool_call_*` / `llm_call_*` / `hook_fired`）+ `parentStepId` 关联
 
 ### 关键流程特性
 
 - **深单 loop 主干**：所有请求统一经 `turnStart` 守卫 → 确定性 `tool-routing` 预处理 → 进入同一个 `tool-use` Agentic Loop；不再有 simple/complex 分类，不再有独立 `intent`/`planning` phase
 - **无工具纯回答由 loop 承接**：零工具调用的纯文本答复由 loop step-1 无 `tool_call` 自然产出（`terminalDraft`），不再有独立的 `direct-answer` 子流程
 - **terminalDraft 即终答**：loop 终止消息在完整 `prebuiltPrompt`（persona + rules + active skills + memory + tools）下写就，直接作为候选答案正文，不再有独立的 final-answer 写手 LLM 重写它
-- **对称守卫 fail-closed**：`turnStart`/`turnStop` 两处 guardrail 恒 `pass/block/degrade/annotate`，`turnStop` 恒最后跑
-- **loop-lifecycle 覆盖面**：Rules（`turnStart`/`preLLM`/`turnStop`/`*`）、Hooks（9 个 `HookPoint`）、预算、可观测性对所有请求等效覆盖，无死挂载面
+- **对称 guard fail-closed**：`turnStart`/`turnStop` 经统一 `HookAction.guard` 表达 `pass/block/degrade/annotate`，`turnStop` 恒最后跑
+- **loop-lifecycle 覆盖面**：Rules（`activation` 轴）、Hooks（9 个 `HookPoint`）、预算、可观测性对所有请求等效覆盖，无死挂载面
 - **确定性工具路由**：`tool-routing` 用显式 @agent/@tool 名称匹配 + `ToolActivator.visibleTools` 收窄一次性替代原 intent 分类 + precheck + planning + graph-check 四个 phase
 - **subagent 安全阀**：loop 内可自决派发只读子代理（`dispatch_agent`），Single-Writer Rule + summary-only 契约 + maxDepth 默认 1
 - **per-step 上下文管理**：超阈值时 `preCompact` 自动压缩，长 loop 不再溢出 context window
@@ -856,7 +849,7 @@ MCP（Model Context Protocol）工具通过 **McpToolAdapter**
 
 ### 规则激活条件
 
-> **激活轴**：`RuleDescriptor.activation` 回答「规则正文**何时**被注入 prompt」，与业界 rule 系统（Cursor / Copilot / Continue / Cline）的激活模型对齐。它**不是**生命周期挂载点——`turnStart`/`turnStop` 的阶段动作（block/annotate/validate）属于 `HookPoint` / `Guardrail` / `ValidationRule`，不由 Rule 表达。缺省无活跃输入时 fail-closed 不注入；loader 对未知 `mode` 显式报错。
+> **激活轴**：`RuleDescriptor.activation` 回答「规则正文**何时**被注入 prompt」，与业界 rule 系统（Cursor / Copilot / Continue / Cline）的激活模型对齐。它**不是**生命周期挂载点——`turnStart`/`turnStop` 的阶段动作（block/annotate/validate）属于 `HookPoint` guard seam，不由 Rule 表达。缺省无活跃输入时 fail-closed 不注入；loader 对未知 `mode` 显式报错。
 
 | `activation.mode` | 含义 | 注入条件 |
 | ----------------- | ---- | -------- |

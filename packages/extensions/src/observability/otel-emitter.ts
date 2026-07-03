@@ -82,7 +82,7 @@ export class OtelEmitter implements ObservabilityEmitter {
   private emitToOtel(event: EngineEvent): void {
     const { correlation, subject } = event;
     const phaseKey = `${correlation.traceId}:${correlation.sessionId}:${event.phase}`;
-    if (event.type === "phase_enter") {
+    if (event.type === "phase_enter" || event.type === "loop_step_enter") {
       const span = this.options.tracer.startSpan(`phase:${event.phase}`, {
         attributes: {
           "engine.trace_id": correlation.traceId,
@@ -99,7 +99,7 @@ export class OtelEmitter implements ObservabilityEmitter {
       return;
     }
 
-    if (event.type === "phase_exit") {
+    if (event.type === "phase_exit" || event.type === "loop_step_exit") {
       const span = this.phaseSpans.get(phaseKey);
       if (span) {
         if (event.payload.error) {

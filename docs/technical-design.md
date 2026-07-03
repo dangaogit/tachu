@@ -183,7 +183,8 @@ Markdown 正文（内容 / 指令 / 规则文本）
 name: no-sensitive-output
 description: 禁止输出敏感信息
 type: rule
-scope: [output]
+activation:
+  mode: always
 tags: [security]
 ---
 
@@ -407,7 +408,7 @@ type PhaseHandler<TIn, TOut> = (input: TIn, ctx: PhaseContext) => Promise<TOut>;
 
 - 阶段间数据通过明确的输入/输出类型传递，不共享可变状态
 - **6-phase 主干（ADR-0006 落地）**：`EnginePhase`（`packages/core/src/types/io.ts`）收敛为 `session → safety → tool-routing → execution → validation → output`。所有请求统一走这 6 个阶段——不再有独立的 `intent` / `precheck` / `planning` / `graph-check` 四个 phase，也不再有 `simple`/`complex` 分类与"简单请求跳过中间阶段"的快速通道；`intent.ts` / `precheck.ts` / `planning.ts` / `graph-check.ts` / `direct-answer.ts` 及其孤儿测试均已物理删除
-- 每个阶段前后仍由 `Engine.emitPhaseStart` / `emitPhaseEnd` 发出结构化 `phase-enter` / `phase-exit` StreamChunk 与 `phase_enter` / `phase_exit` observability 事件（语义从"9 阶段边界"改为"6 阶段边界"，事件形状不变；详见 §5.7）
+- 每个阶段前后仍由 `Engine.emitPhaseStart` / `emitPhaseEnd` 发出结构化 `phase-enter` / `phase-exit` StreamChunk；observability 层对应发 `loop_step_enter` / `loop_step_exit`（取代旧的 `phase_enter` / `phase_exit`，语义仍为 6 个 `EnginePhase` 宏观边界；详见 §5.7）
 
 #### tool-routing：确定性路由（取代意图分析 / 前置校验 / 任务拆分 / 依赖图校验）
 
@@ -428,21 +429,21 @@ type PhaseHandler<TIn, TOut> = (input: TIn, ctx: PhaseContext) => Promise<TOut>;
 
 | HookPoint | fire 位 | 语义 |
 | --- | --- | --- |
-| `turnStart` | `engine.ts`（`runStream` 进入 `session` 阶段前） | pre-guard；`deny`/`abort` 短路整轮，`modify`/`replace` 可改写 `InputEnvelope` |
-| `preLLM` | `engine.ts`（`planMode` 下 tool-routing 之后、首次装配 prompt 前的计划审批）与 `tool-use.ts`（每个 loop step 调用 Provider 前） | free-mutation，受下方 Engine Seatbelt 约束 |
-| `postLLM` | `tool-use.ts`（每个 loop step 收到 Provider 响应后） | free-mutation；`usage` 恒以 Provider 真值为准，mutation 不能覆盖计费字段 |
-| `preToolUse` | `tool-use.ts`（每次工具调用前，无条件 fire，与既有 `onBeforeToolCall` 条件审批语义并存、互不替代） | `deny`/`abort` 时跳过真实执行，合成一条拒绝态 `ExecutedToolRecord` |
-| `postToolUse` | `tool-use.ts`（每次工具调用后，无论成败） | 允许 `modify`/`replace` 改写 `content`/`output`（如脱敏），但不允许翻转 `success` |
-| `preCompact` | `tool-use.ts`（per-step 上下文估算超过 `maxContextTokens * 0.85` 阈值时） | free-mutation；未处理或非法时套用默认压缩（丢最老一轮完整 assistant+tool 往返，替换为一条摘要 `system` 消息） |
-| `turnStop` | `engine.ts`（`validation` 之后、`output` 之前） | post-guard + Result Validation 挂载点；恒最后跑、fail-closed |
-| `preSubagent` | `engine.ts`（`Engine.runSubAgent` 内，真正 spawn 前） | `deny`/`abort` 短路，不 spawn、也不消耗 budget 决策 |
+| `turnStart` | `engine.ts`（`runStream` 进入 `session` 阶段前） | pre-guard；`guard`/`deny` 短路整轮 |
+| `preLLM` | `engine.ts`（`planMode` 下 tool-routing 之后、首次装配 prompt 前的计划审批）与 `tool-use.ts`（每个 loop step 调用 Provider 前） | free-mutation（`mutate`），受下方 Engine Seatbelt 约束 |
+| `postLLM` | `tool-use.ts`（每个 loop step 收到 Provider 响应后） | free-mutation（`mutate`）；`usage` 恒以 Provider 真值为准，mutation 不能覆盖计费字段 |
+| `preToolUse` | `tool-use.ts`（每次工具调用前，无条件 fire，与既有 `onBeforeToolCall` 条件审批语义并存、互不替代） | `approve`/`deny` 时跳过真实执行，合成一条拒绝态 `ExecutedToolRecord` |
+| `postToolUse` | `tool-use.ts`（每次工具调用后，无论成败） | 允许 `mutate` 改写 `content`/`output`（如脱敏），但不允许翻转 `success` |
+| `preCompact` | `tool-use.ts`（per-step 上下文估算超过 `maxContextTokens * 0.85` 阈值时） | free-mutation（`mutate`）；未处理或非法时套用默认压缩（丢最老一轮完整 assistant+tool 往返，替换为一条摘要 `system` 消息） |
+| `turnStop` | `engine.ts`（`validation` 之后、`output` 之前） | post-guard + Result Validation 挂载点；`guard`/`finding`；恒最后跑、fail-closed |
+| `preSubagent` | `engine.ts`（`Engine.runSubAgent` 内，真正 spawn 前） | `deny` 短路，不 spawn、也不消耗 budget 决策 |
 | `postSubagent` | `engine.ts`（`Engine.runSubAgent` 内，收敛后） | 只读订阅/审计，不支持改写 `AgentRunResult`（summary-only 契约由 runtime 自身保证） |
 
 `DefaultHookRegistry`（`packages/core/src/modules/hooks.ts`）在每次 `fire()` 后无条件 emit 一条 `hook_fired` observability 事件（含 `subscriberCount`/`registrarCount`/命中 `action` 类型），即使当前无人订阅/注册也留下可观测痕迹——用以避免"定义了却查不出是否真被触发"的死点问题（详见 §5.8）。
 
 #### Engine Seatbelt：free-mutation 下的引擎不变量
 
-`preLLM` / `postLLM` / `preCompact` 均为 free-mutation（host 可用 `modify` / `replace` 改写 conversation / response），但 `tool-use.ts` 在应用前做结构化校验，绝不把畸形数据交给 Provider：
+`preLLM` / `postLLM` / `preCompact` 均为 free-mutation（host 可用 `mutate` 改写 conversation / response），但 `tool-use.ts` 在应用前做结构化校验，绝不把畸形数据交给 Provider：
 
 - `applyConversationMutation` + `isValidConversationMutation`：mutation 结果必须是非空 `Message[]`，每条消息 `role ∈ {system,user,assistant,tool}`、`content` 类型合法；校验失败则丢弃 mutation、发 `warning` 事件，沿用 mutation 前的对话继续
 - `applyResponseMutation` + `isValidResponseMutation`：mutation 后的响应必须保留 `content: string`；`usage` 字段恒以 mutation 前的 Provider 真值覆盖，防止 host mutation 污染计费/预算
@@ -475,13 +476,13 @@ class TaskScheduler {
 
 ### 4.6 结果验证
 
-Result Validation 是**内置的 `turnStop` guardrail**（ADR-0006），语义从"独立 LLM 验证 phase"改为"loop 收尾后的判别式质量校验"：
+Result Validation 是**内置的 `turnStop` guard**（ADR-0006），语义从"独立 LLM 验证 phase"改为"loop 收尾后的判别式质量校验"：
 
 - `runValidationPhase`（`packages/core/src/engine/phases/validation/phase.ts`）通过 `ValidationRuleRegistry` 对 `candidateAnswer`（来自 `tool-use` 的 `terminalDraft`）跑一组**确定性 rule**（`policyMode` 默认 `deterministic-only`），聚合出 `ValidationFinding[]` 并 reduce 成 `ValidationOutcome`：`pass` / `retry`（`target: "retry-turn" | "tool-loop-finalize"`）/ `degrade` / `handoff`
 - `policyMode === "auto"` 时，若信号命中 `descriptorSemanticRequired` 或（`answerHasClaims && hasExternalSources`），额外触发可选的 `SemanticJudgeAdapter`（LLM judge，受 `JudgeBudget` 限流），产出的 finding 追加进确定性 finding 之后再 reduce；未注入 adapter 时行为与纯确定性完全等价
-- `Guardrail` / `GuardrailDecision` 判别联合契约（`packages/core/src/types/guardrail.ts`）：`{ kind: "pass" } | { kind: "block"; reason; userVisibleReason? } | { kind: "degrade"; reason; userVisibleReason } | { kind: "annotate"; prefix }`，恒 fail-closed，刻意不提供"静默重排版"语义——想改格式是显式 transform，不是 guard 的职责
-- `runGuardrails` 组合器（`packages/core/src/modules/guardrail.ts`）语义：任一 `block` 立即短路返回；否则若存在 `degrade` 取第一个；都没有则合并所有 `annotate` 前缀；全 `pass` 才返回 `pass`
-- 内置 `createResultValidationGuardrail` 把 `ValidationOutcome` 映射为 `GuardrailDecision`（`pass→pass`、`degrade→degrade`、`handoff→block`、`retry→pass`，因为 retry 属于 turn-level 重试循环职责，不在 guardrail 词汇表内）；`runOutputPhase` 按 `outcome.kind` 直接做 content 分支选取（pass 用 `candidateAnswer.content`；未通过则走确定性兜底文案），`createResultValidationGuardrail` 仍作为可复用工具导出，供自定义 Engine 组装或测试使用
+- 统一 guard seam：`HookAction` 的 `{ type: "guard"; decision: HookGuardDecision }`（`pass` / `block` / `degrade` / `annotate`，`types/hooks.ts`）与 `{ type: "finding"; findings }`（ValidationRule 产出）均在 `turnStop` 经 `HookRegistry.fire()` 合并；`reduceGuardDecisions` / `reduceGuardActions`（`modules/guardrail.ts`）组合多个 `guard` 决策：任一 `block` 立即短路；否则取第一个 `degrade`；否则合并 `annotate` 前缀
+- 内置 `createSafetyViolationsGuardAction` / `createResultValidationGuardAction` 把 SafetyModule violations 与 `ValidationOutcome` 映射为 `{ type: "guard", decision }`；宿主通过 `hooks.register("turnStart" | "turnStop", ...)` 追加 guard，不再使用已移除的 `EngineDependencies.guardrails`
+- `runOutputPhase` 按 `outcome.kind` 直接做 content 分支选取（pass 用 `candidateAnswer.content`；未通过则走确定性兜底文案）
 - 配置关闭（`policyMode: "off"`）时不触发 semantic judge，其余确定性 rule 仍执行；无法整体跳过 validation phase（deterministic rule 始终跑，保证 fail-closed）
 
 ### 4.7 编排控制面
@@ -639,7 +640,7 @@ CLI 默认注入 `@tachu/extensions` 提供的 `FsMemorySystem`，它组合一�
 ### 5.7 可观测性
 
 - `ObservabilityEmitter` 默认实现：基于 EventEmitter 模式
-- `EngineEvent.type`（`packages/core/src/types/events.ts`）覆盖 `phase_enter` / `phase_exit`（现围绕 6 个 `EnginePhase` 边界，语义从"9 阶段"改为"6 阶段"，事件形状不变）、`llm_call_start` / `llm_call_end`、`tool_call_start` / `tool_call_end`、`hook_fired`（ADR-0006 新增：每次 `HookRegistry.fire()` 无条件 emit 一次，携带 `subscriberCount`/`registrarCount`，即使当前无人挂载也留痕）、`tool_loop_step_start` / `tool_loop_step_end` / `tool_loop_failure_recovery_injected`、`context_budget`、`retry` / `degrade` / `handoff` / `provider_fallback` / `plan_switched`、`budget_warning` / `budget_exhausted`、`skill_activation*` / `memory_recall*` / `tool_activation*`、`warning` / `error` 等命名空间，均为 snake_case 扁平事件
+- `EngineEvent.type`（`packages/core/src/types/events.ts`）覆盖 `loop_step_enter` / `loop_step_exit`（6 个 `EnginePhase` 宏观边界；`phase_enter`/`phase_exit` 仍保留在类型 union 供旧消费端兼容，但引擎不再 emit）、`llm_call_start` / `llm_call_end`、`tool_call_start` / `tool_call_end`、`hook_fired`（每次 `HookRegistry.fire()` 无条件 emit 一次，携带 `subscriberCount`/`registrarCount`，即使当前无人挂载也留痕）、`tool_loop_step_start` / `tool_loop_step_end` / `tool_loop_failure_recovery_injected`、`context_budget`、`retry` / `degrade` / `handoff` / `provider_fallback` / `plan_switched`、`budget_warning` / `budget_exhausted`、`skill_activation*` / `memory_recall*` / `tool_activation*`、`warning` / `error` 等命名空间，均为 snake_case 扁平事件
 - 实时进度流：订阅 emitter，过滤后转为 `StreamChunk.progress` 推出；`Engine.emitPhaseStart` / `emitPhaseEnd` 额外 yield 结构化 `phase-enter` / `phase-exit` 顶层 StreamChunk，供下游按 `chunk.type` 做穷举式 switch，与 `progress` chunk 并存（不互斥）
 - 结构化追踪：扩展库提供 OTel 适配，将 EngineEvent 映射为 OTel Span
 
@@ -924,10 +925,10 @@ CLI 命令通过 `tachu` 调用：
 
 ### 12.2 重试与降级实现（当前范围，Tachu v1）
 
-> **ADR-0006 更新**：原 v1 描述的「Phase 8 validation 诊断信号」现由 `validation` 阶段承载，并升级为 `turnStop` guardrail 契约的一部分（`GuardrailDecision`：`pass/block/degrade/annotate`，详见 §4.6）。「任务级重试循环」已落地为 Engine 的 turn 级 do-while 重试（`decideTurnRetry`），不再是未实现项；下述 Provider Fallback 与系统级重试仍是路线图项，与本次 ADR-0006 塌陷无关，状态未变。
+> **ADR-0006 更新**：原 v1 描述的「Phase 8 validation 诊断信号」现由 `validation` 阶段承载，并升级为 `turnStop` guard seam 的一部分（`HookGuardDecision`：`pass/block/degrade/annotate`，详见 §4.6）。「任务级重试循环」已落地为 Engine 的 turn 级 do-while 重试（`decideTurnRetry`），不再是未实现项；下述 Provider Fallback 与系统级重试仍是路线图项，与本次 ADR-0006 塌陷无关，状态未变。
 
 - **Provider Fallback（未实现，v1.x+ 规划）**：`providerFallbackOrder` 配置存在，用于 `inferProviders()` 注册与 CLI 默认 provider target。**无** `ProviderError` 捕获后按序切换 Adapter 的逻辑；`provider_fallback` 事件类型预留。业务若需 failover 请在 host 层包装 Adapter 或手动切换 `capabilityMapping`。
-- **turnStop guardrail 诊断（已落地）**：`validation` 阶段对输出做**确定性失败扫描**（格式、schema、明显异常）+ 内置 Result Validation guard，命中即输出 `ValidationOutcome`/`GuardrailDecision` 携带 `diagnosis`；决策结果 emit 给 ObservabilityEmitter + StreamChunk
+- **turnStop guard 诊断（已落地）**：`validation` 阶段对输出做**确定性失败扫描**（格式、schema、明显异常）+ 内置 Result Validation guard，命中即输出 `ValidationOutcome`/`HookGuardDecision` 携带 `diagnosis`；决策结果 emit 给 ObservabilityEmitter + StreamChunk
 - **turn 级重试循环（已落地）**：`ValidationRuleRegistry` + `decideTurnRetry` 消费 `retry` / `degrade` / `handoff`；Engine 主循环依据 `decideTurnRetry` 在 `validation`/guardrail 判定需要重试时 `continue`，通过 `PreviousTurnAttempt` 把上一轮失败摘要注入下一轮 `tool-routing`，供其 emit 观测事件（路由本身仍是确定性的，不据此改变任务构造）；`provider-fallback` outcome 类型尚未进入 shipped `ValidationOutcome` union
 - **系统级重试（延后）**：跨 Provider 的智能重试策略（指数退避、调用模式感知、熔断保护）仍未实现，当前仅有上文所述的 Provider Fallback 配置注册能力，不做运行时自动切换
 

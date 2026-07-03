@@ -29,7 +29,7 @@ engine.useEmitter(new OtelEmitter());
 
 | Event Type | When |
 |-----------|------|
-| `phase_enter` / `phase_exit` | Every pipeline phase |
+| `loop_step_enter` / `loop_step_exit` | Every pipeline phase (6-phase outer skeleton) |
 | `llm_call_start` / `llm_call_end` | Every LLM invocation |
 | `tool_call_start` / `tool_call_end` | Every Tool execution |
 | `retry` | Task-level or system-level retry triggered |

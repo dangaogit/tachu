@@ -9,7 +9,6 @@ import { evidenceRequiredRule } from "./rules/evidence-required";
 import type { ValidationResult } from "../../../types";
 
 export { ValidationRuleRegistry } from "./registry";
-export type { ValidationRule, ValidationRuleContext } from "./registry";
 export { runValidationPhase } from "./phase";
 export type { ValidationPhaseOutput } from "./phase";
 export {

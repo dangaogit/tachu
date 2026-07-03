@@ -1,6 +1,8 @@
-import type { Guardrail, GuardrailContext, GuardrailDecision } from "../types/guardrail";
+import type { HookAction, HookGuardDecision } from "../types/hooks";
 import type { SafetyViolation } from "./safety";
 import type { ValidationOutcome } from "../types/result";
+
+type GuardAction = Extract<HookAction, { type: "guard" }>;
 
 /**
  * 组合运行一组 guardrail(ADR-0006 D4)。
@@ -12,15 +14,13 @@ import type { ValidationOutcome } from "../types/result";
  * - 都没有 `degrade` 时,若存在一个或多个 `annotate` → 合并前缀(空格分隔)返回。
  * - 全部 `pass` → 返回 `pass`。
  */
-export const runGuardrails = async (
-  guardrails: readonly Guardrail[],
-  ctx: GuardrailContext,
-): Promise<GuardrailDecision> => {
-  let degrade: Extract<GuardrailDecision, { kind: "degrade" }> | undefined;
+export const reduceGuardDecisions = (
+  decisions: readonly HookGuardDecision[],
+): HookGuardDecision => {
+  let degrade: Extract<HookGuardDecision, { kind: "degrade" }> | undefined;
   const annotations: string[] = [];
 
-  for (const guardrail of guardrails) {
-    const decision = await guardrail.run(ctx);
+  for (const decision of decisions) {
     if (decision.kind === "block") {
       return decision;
     }
@@ -39,6 +39,13 @@ export const runGuardrails = async (
   return { kind: "pass" };
 };
 
+export const reduceGuardActions = (
+  actions: readonly GuardAction[],
+): GuardAction => ({
+  type: "guard",
+  decision: reduceGuardDecisions(actions.map((action) => action.decision)),
+});
+
 /**
  * 内置默认 `turnStart` guard(ADR-0006 D4):把 `SafetyModule` 已产出的
  * warning 级违规(baseline prompt-injection + business policy)映射为
@@ -50,20 +57,17 @@ export const runGuardrails = async (
  * `runSafetyPhase` 重复调用同一策略(会导致 `emitWarning` 双发)。
  * error 级违规已经在 `runSafetyPhase` 内部通过 throw 处理,不会走到这里。
  */
-export const createSafetyViolationsGuardrail = (
+export const createSafetyViolationsGuardAction = (
   violations: readonly SafetyViolation[],
-): Guardrail => ({
-  id: "builtin.safety-violations",
-  run(): GuardrailDecision {
+): GuardAction => {
     if (violations.length === 0) {
-      return { kind: "pass" };
+    return { type: "guard", decision: { kind: "pass" } };
     }
     const prefix = violations
       .map((violation) => `[safety] ${violation.message}`)
       .join(" ");
-    return { kind: "annotate", prefix };
-  },
-});
+  return { type: "guard", decision: { kind: "annotate", prefix } };
+};
 
 /**
  * 内置默认 `turnStop` guard(ADR-0006 D4):把 Result Validation 已产出的
@@ -77,25 +81,28 @@ export const createSafetyViolationsGuardrail = (
  *   pass/block/degrade/annotate 词汇表内;guardrail 只在"已经是最后一次
  *   attempt、即将交付"时才有意义)
  */
-export const createResultValidationGuardrail = (
+export const createResultValidationGuardAction = (
   outcome: ValidationOutcome | undefined,
-): Guardrail => ({
-  id: "builtin.result-validation",
-  run(): GuardrailDecision {
+): GuardAction => {
     if (!outcome || outcome.kind === "pass" || outcome.kind === "retry") {
-      return { kind: "pass" };
+    return { type: "guard", decision: { kind: "pass" } };
     }
     if (outcome.kind === "degrade") {
       return {
-        kind: "degrade",
-        reason: outcome.reason,
-        userVisibleReason: outcome.userVisibleReason,
+      type: "guard",
+      decision: {
+          kind: "degrade",
+          reason: outcome.reason,
+          userVisibleReason: outcome.userVisibleReason,
+        },
       };
     }
     return {
-      kind: "block",
-      reason: outcome.reason,
-      userVisibleReason: outcome.userVisibleReason,
+    type: "guard",
+    decision: {
+        kind: "block",
+        reason: outcome.reason,
+        userVisibleReason: outcome.userVisibleReason,
+      },
     };
-  },
-});
+};

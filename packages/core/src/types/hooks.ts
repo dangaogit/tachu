@@ -1,4 +1,5 @@
 import type { ExecutionCorrelation, ExecutionSubject } from "./context";
+import type { ValidationFinding } from "./result";
 
 /**
  * 生命周期钩子点(ADR-0006 D2)。
@@ -40,21 +41,28 @@ export interface HookEvent<TData = unknown> {
   data: TData;
 }
 
+export type HookGuardDecision =
+  | { readonly kind: "pass" }
+  | { readonly kind: "block"; readonly reason: string; readonly userVisibleReason?: string }
+  | { readonly kind: "degrade"; readonly reason: string; readonly userVisibleReason: string }
+  | { readonly kind: "annotate"; readonly prefix: string };
+
 /**
  * Hook 返回动作。
  *
- * 与 detailed-design §9.8 对齐：
- * - `modify` 使用 `patch` 作为差量补丁字段名（而非通用的 `data`）。
- * - `approve` 本身仅承载"是否放行"，不再携带额外 `payload`。
+ * 这是唯一的 guard/hook firing seam：
+ * - `mutate` 只用于 `preLLM` / `postLLM`，由 Engine Seatbelt 重新校验。
+ * - `guard` 只承载 pass/block/degrade/annotate，不允许 free-mutation payload。
+ * - `finding` 承载 ValidationRule 产出的 deterministic/semantic findings。
+ * - `approve` / `deny` 对齐既有 `onBeforeToolCall` 工具审批语义。
  */
 export type HookAction =
   | { type: "continue" }
-  | { type: "abort"; reason: string }
-  | { type: "modify"; patch: unknown }
+  | { type: "mutate"; data: unknown }
+  | { type: "finding"; findings: readonly ValidationFinding[] }
+  | { type: "guard"; decision: HookGuardDecision }
   | { type: "approve" }
-  | { type: "deny"; reason: string }
-  | { type: "replace"; data: unknown }
-  | { type: "enrich"; data: Record<string, unknown> };
+  | { type: "deny"; reason: string };
 
 /**
  * 只读订阅处理器。

@@ -823,6 +823,7 @@ const executeSingleToolCallInner = async (
   call: ToolCallRequest,
   ctx: ToolUseContext,
   parentStepId: string,
+  approvedByPreToolUse = false,
 ): Promise<ExecutedToolRecord> => {
   let toolCallStartDelivered = false;
   let toolCallEndDelivered = false;
@@ -1068,7 +1069,7 @@ const executeSingleToolCallInner = async (
  // 全局策略 (`requireApprovalGlobal`) 与描述符 `requiresApproval` 任一命中即需要审批；
  // 但若本次调用已被 shell 自动审批白名单覆盖，或被当前 Active Skill 的
  // `allowed-tools` 豁免，则跳过 approval 回调。
-    const approvalNeeded = (descriptorApproval || globalApproval) && !autoApproved;
+    const approvalNeeded = (descriptorApproval || globalApproval) && !autoApproved && !approvedByPreToolUse;
     if (approvalNeeded && ctx.onBeforeToolCall) {
       const triggeredBy: ToolApprovalRequest["triggeredBy"] = descriptorApproval
         ? "descriptor"
@@ -1179,6 +1180,9 @@ const executeSingleToolCallInner = async (
  // 把"用户已明确授权本次调用"这个事实沿 TaskNode 往下带，宿主的
  // TaskExecutor 可据此豁免工作区沙箱等静态策略（用户已通过 argumentsPreview
  // 审阅过参数，包括任何路径字段）。
+      toolTask.metadata = { ...(toolTask.metadata ?? {}), approvalGranted: true };
+    }
+    if (approvedByPreToolUse) {
       toolTask.metadata = { ...(toolTask.metadata ?? {}), approvalGranted: true };
     }
 
@@ -1377,10 +1381,8 @@ const executeSingleToolCall = async (
     arguments: call.arguments,
     parentStepId,
   });
-  if (preAction?.type === "deny" || preAction?.type === "abort") {
-    const reason =
-      (preAction.type === "deny" || preAction.type === "abort" ? preAction.reason : undefined) ??
-      "preToolUse hook 拒绝了该工具调用。";
+  if (preAction?.type === "deny") {
+    const reason = preAction.reason ?? "preToolUse hook 拒绝了该工具调用。";
     return {
       call,
       content: `工具调用已被 preToolUse hook 拒绝："${reason}"。请改用其它工具或直接回答用户。`,
@@ -1393,15 +1395,20 @@ const executeSingleToolCall = async (
       },
     };
   }
-  const record = await executeSingleToolCallInner(call, ctx, parentStepId);
+  const record = await executeSingleToolCallInner(
+    call,
+    ctx,
+    parentStepId,
+    preAction?.type === "approve",
+  );
   const postAction = await fireHook(ctx, "postToolUse", {
     tool: call.name,
     callId: call.id,
     parentStepId,
     result: record,
   });
-  if (postAction?.type === "modify" || postAction?.type === "replace") {
-    const candidate = postAction.type === "modify" ? postAction.patch : postAction.data;
+  if (postAction?.type === "mutate") {
+    const candidate = postAction.data;
     if (
       typeof candidate === "object" &&
       candidate !== null &&
@@ -1862,8 +1869,7 @@ const applyConversationMutation = (
   if (!action) {
     return current;
   }
-  const candidate =
-    action.type === "modify" ? action.patch : action.type === "replace" ? action.data : undefined;
+  const candidate = action.type === "mutate" ? action.data : undefined;
   if (candidate === undefined) {
     return current;
   }
@@ -1908,8 +1914,7 @@ const applyResponseMutation = (
   if (!action) {
     return current;
   }
-  const candidate =
-    action.type === "modify" ? action.patch : action.type === "replace" ? action.data : undefined;
+  const candidate = action.type === "mutate" ? action.data : undefined;
   if (candidate === undefined) {
     return current;
   }
@@ -2226,11 +2231,8 @@ export const executeToolUse = async (
         step,
         stepId,
       });
-      if (preLlmAction?.type === "deny" || preLlmAction?.type === "abort") {
-        const reason =
-          preLlmAction.type === "deny" || preLlmAction.type === "abort"
-            ? preLlmAction.reason
-            : undefined;
+      if (preLlmAction?.type === "deny") {
+        const reason = preLlmAction.reason;
         emitStepEnd({
           step,
           stepId,

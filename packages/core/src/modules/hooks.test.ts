@@ -1,6 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { DefaultHookRegistry } from "./hooks";
 import { DefaultObservabilityEmitter } from "./observability";
+import type { HookAction } from "../types";
+
+const guardActionWithMutationPayload: HookAction = {
+  type: "guard",
+  decision: { kind: "pass" },
+  // @ts-expect-error guard 决策不能携带 free-mutation payload。
+  data: { content: "not allowed" },
+};
+void guardActionWithMutationPayload;
 
 const hookEvent = (traceId: string, sessionId: string) => ({
   point: "turnStart" as const,
@@ -115,6 +124,30 @@ describe("DefaultHookRegistry", () => {
     const action = await registry.fire("turnStart", hookEvent("t-action", "s-action"));
     expect(action?.type).toBe("deny");
     expect(called).toEqual(["first", "second"]);
+  });
+
+ test("aggregates guard decisions at the same point with most-restrictive-wins", async () => {
+    const registry = new DefaultHookRegistry(new DefaultObservabilityEmitter(), 200);
+    const called: string[] = [];
+    registry.register(
+      "turnStop",
+      async () => {
+        called.push("annotate");
+        return { type: "guard", decision: { kind: "annotate", prefix: "note" } };
+      },
+      { priority: 1 },
+    );
+    registry.register(
+      "turnStop",
+      async () => {
+        called.push("block");
+        return { type: "guard", decision: { kind: "block", reason: "deny" } };
+      },
+      { priority: 2 },
+    );
+    const action = await registry.fire("turnStop", { ...hookEvent("t-guard", "s-guard"), point: "turnStop" });
+    expect(called).toEqual(["annotate", "block"]);
+    expect(action).toEqual({ type: "guard", decision: { kind: "block", reason: "deny" } });
   });
 
  test("fire 无条件发 hook_fired observability 事件(ADR-0006 D2:防死面复发)，即便无人订阅/注册", async () => {

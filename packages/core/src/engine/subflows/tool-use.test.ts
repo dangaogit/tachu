@@ -1782,6 +1782,37 @@ describe("executeToolUse ( Agentic Loop)", () => {
     expect(capturedMetadata[0]).toEqual({ approvalGranted: true });
   });
 
+ test("preToolUse: approve 保持 onBeforeToolCall approve 语义并写入 approvalGranted metadata", async () => {
+    const { adapter } = createScriptedProvider([
+      {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [
+          { id: "c-1", name: "write-file", arguments: { path: "/tmp/x" } },
+        ],
+        usage: noopUsage,
+      },
+      { content: "写入完成。", finishReason: "stop", usage: noopUsage },
+    ]);
+    const capturedMetadata: Array<Record<string, unknown> | undefined> = [];
+    const hooks = new DefaultHookRegistry(new DefaultObservabilityEmitter());
+    hooks.register("preToolUse", async () => ({ type: "approve" }));
+    const ctx = buildCtx({
+      config: baseConfig(),
+      provider: adapter,
+      toolSet: [{ name: "write-file", requiresApproval: true, sideEffect: "write" }],
+      taskExecutor: async (task) => {
+        capturedMetadata.push(task.metadata);
+        return ok({ ok: true });
+      },
+      hooks,
+    });
+
+    await executeToolUse({ prompt: "写文件" }, ctx);
+    expect(capturedMetadata).toHaveLength(1);
+    expect(capturedMetadata[0]).toEqual({ approvalGranted: true });
+  });
+
  test("无需审批的工具 → TaskNode.metadata 不应携带 approvalGranted", async () => {
     const { adapter } = createScriptedProvider([
       {
@@ -2319,7 +2350,7 @@ describe("dispatch_agent 内置 Task-style 工具 (ADR-0006 D6)", () => {
 });
 
 describe("loop-lifecycle hooks (ADR-0006 D2)", () => {
- test("preLLM: fires每 step 一次，并可用 modify 改写 conversation", async () => {
+ test("preLLM: fires每 step 一次，并可用 mutate 改写 conversation", async () => {
     const { adapter, calls } = createScriptedProvider([
       { content: "ok", finishReason: "stop", usage: noopUsage },
     ]);
@@ -2329,8 +2360,8 @@ describe("loop-lifecycle hooks (ADR-0006 D2)", () => {
       seenPoints.push(event.point);
       const data = event.data as { conversation: Message[] };
       return {
-        type: "modify",
-        patch: [...data.conversation, { role: "system", content: "[preLLM injected]" }],
+        type: "mutate",
+        data: [...data.conversation, { role: "system", content: "[preLLM injected]" }],
       };
     });
     const ctx = buildCtx({
@@ -2371,7 +2402,7 @@ describe("loop-lifecycle hooks (ADR-0006 D2)", () => {
       { content: "ok", finishReason: "stop", usage: noopUsage },
     ]);
     const hooks = new DefaultHookRegistry(new DefaultObservabilityEmitter());
-    hooks.register("preLLM", async () => ({ type: "modify", patch: "not-an-array" }));
+    hooks.register("preLLM", async () => ({ type: "mutate", data: "not-an-array" }));
     const ctx = buildCtx({
       config: baseConfig(),
       provider: adapter,
@@ -2385,7 +2416,7 @@ describe("loop-lifecycle hooks (ADR-0006 D2)", () => {
     expect(calls.length).toBe(1);
   });
 
- test("postLLM: fires 且 replace 改写的 content 会回灌进 conversation 历史", async () => {
+ test("postLLM: fires 且 mutate 改写的 content 会回灌进 conversation 历史", async () => {
     const { adapter, calls } = createScriptedProvider([
       {
         content: "",
@@ -2405,7 +2436,7 @@ describe("loop-lifecycle hooks (ADR-0006 D2)", () => {
       if (data.response.toolCalls) {
         return { type: "continue" };
       }
-      return { type: "replace", data: { ...data.response, content: "[postLLM redacted]" } };
+      return { type: "mutate", data: { ...data.response, content: "[postLLM redacted]" } };
     });
     const ctx = buildCtx({
       config: baseConfig(),
@@ -2424,7 +2455,7 @@ describe("loop-lifecycle hooks (ADR-0006 D2)", () => {
     const { adapter } = createScriptedProvider([{ content: "ok", finishReason: "stop", usage }]);
     const hooks = new DefaultHookRegistry(new DefaultObservabilityEmitter());
     hooks.register("postLLM", async () => ({
-      type: "replace",
+      type: "mutate",
       data: { content: "ok", usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 } },
     }));
     let observedUsage: unknown;
@@ -2477,7 +2508,7 @@ describe("loop-lifecycle hooks (ADR-0006 D2)", () => {
     expect(executed).toBe(false);
   });
 
- test("postToolUse: fires 且 modify 可改写 tool 输出内容(如脱敏)", async () => {
+ test("postToolUse: fires 且 mutate 可改写 tool 输出内容(如脱敏)", async () => {
     const { adapter } = createScriptedProvider([
       {
         content: "",
@@ -2491,7 +2522,7 @@ describe("loop-lifecycle hooks (ADR-0006 D2)", () => {
     const seenPoints: string[] = [];
     hooks.register("postToolUse", async (event) => {
       seenPoints.push(event.point);
-      return { type: "modify", patch: { content: "[REDACTED]" } };
+      return { type: "mutate", data: { content: "[REDACTED]" } };
     });
     const ctx = buildCtx({
       config: baseConfig(),
@@ -2507,7 +2538,7 @@ describe("loop-lifecycle hooks (ADR-0006 D2)", () => {
     expect(toolMessage).toBeDefined();
   });
 
- test("preCompact: 上下文超阈值时 fire，host replace 生效则不套用默认压缩", async () => {
+ test("preCompact: 上下文超阈值时 fire，host mutate 生效则不套用默认压缩", async () => {
     const { adapter } = createScriptedProvider([
       { content: "ok", finishReason: "stop", usage: noopUsage },
     ]);
@@ -2517,7 +2548,7 @@ describe("loop-lifecycle hooks (ADR-0006 D2)", () => {
       fired = true;
       const data = event.data as { conversation: Message[] };
       return {
-        type: "replace",
+        type: "mutate",
         data: [{ role: "system", content: "[compacted by host]" }, ...data.conversation.slice(-1)],
       };
     });

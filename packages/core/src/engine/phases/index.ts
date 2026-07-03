@@ -103,7 +103,7 @@ export interface PreviousTurnAttempt {
   lastOutcomeKind: string;
  /** 上一轮 outcome 的 `target`（`retry-turn` / `tool-loop-finalize`），供观测 / 审计。 */
   target?: string | undefined;
- /** 上一轮 outcome.reason；planner 与观测都用得上。 */
+  /** 上一轮 outcome.reason；loop-route 观测与候选策略都用得上。 */
   reason?: string | undefined;
  /** 上一轮 validation diagnosis（如有）；调试用。 */
   diagnosis?: string | undefined;

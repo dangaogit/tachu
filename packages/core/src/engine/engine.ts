@@ -292,7 +292,7 @@ export interface EngineDependencies {
 /**
  * Tachu 核心引擎。
  *
- * 该类负责组装运行时依赖并串联 6 阶段主干流程（深单 agentic loop，ADR-0006），
+ * 该类负责组装运行时依赖并串联深单 agentic loop 主干（ADR-0006），
  * 支持流式与非流式执行、会话级取消传播、Hook 扩展以及资源释放。
  */
 export class Engine {
@@ -318,7 +318,7 @@ export class Engine {
  /**
  * 活跃 runStream 的预组装 Prompt 缓存，按 `traceId` 索引。
  *
- * 由 `runStream` 在 Phase 6 预热阶段写入、在 `finally` 里清理；`buildLayeredTaskExecutor`
+ * 由 `runStream` 在主 loop 的 prompt 装配步骤写入、在 `finally` 里清理；`buildLayeredTaskExecutor`
  * 读取它并作为 `prebuiltPrompt` 传递给内置 Sub-flow（`tool-use`）。
  *
  * 以 `traceId` 为键而非 `sessionId`：同一 session 可能有并发取消后的重试，
@@ -441,7 +441,7 @@ export class Engine {
  /**
  * 共享的 tool-use 执行器。
  *
- * 主 Engine planning/validation 走 orchestrator；sub-agent runtime 通过该执行器
+ * 主 Engine 路由/guard 步骤走 orchestrator；sub-agent runtime 通过该执行器
  * 复用同一份多轮 tool-use loop 实现，并以 `ctx.agentRunId = invocation.id`
  * 作为 history-scope 隔离键，避免父子调度的工具历史互相串扰。
  */
@@ -659,7 +659,7 @@ export class Engine {
   ): Promise<ContextBudgetDecision> {
     const providerMaxContextTokens = await this.resolveProviderContextTokens(route);
     return this.contextBudgetBroker.decide({
-      phase: "planning",
+      phase: "preLLM",
       scope: "main-agent",
       purpose: "assemble main prompt",
       model: route.model,
@@ -1745,7 +1745,7 @@ export class Engine {
 
 // Turn-level retry loop. ValidationPhase 输出 `outcome.kind === "retry"`
  // 时回到 tool-routing 重新执行；受 runtime.maxTurnRetries 与 decideTurnRetry 反死循环约束。
- // 默认 maxTurnRetries=0 时本 do-while 仅执行一次，等价于先前的线性 planning→output。
+ // 默认 maxTurnRetries=0 时本 do-while 仅执行一次，等价于先前的线性 route→output。
       const maxTurnRetries = this.config.runtime.maxTurnRetries ?? 0;
       let turnAttemptCount = 0;
       const previousOutcomeKinds: string[] = [];
@@ -1769,7 +1769,7 @@ export class Engine {
           generatedMediaBucket.length = 0;
         }
 
-// 深单 loop 塌陷(ADR-0006 D1):原 intent 分类 phase + precheck phase 的
+// 深单 loop 塌陷(ADR-0006 D1):原 intent 分类步骤 + precheck 步骤的
 // LLM 猜测已删除,`runToolRoutingPhase` 用确定性规则(turnPolicy 规范化 +
 // 显式 @agent/@tool 名称匹配 + visibleTools 收窄)一次性替代四个死 phase 点
 // (intent / precheck / planning / graph-check)。放在重试循环内部重新计算,
@@ -1792,7 +1792,7 @@ export class Engine {
           { type: "plan-preview", phase: "tool-routing", route: toolRoutingState.route },
           normalizedContext,
         );
-// planMode 的计划审批曾挂在死点 `afterPlanning`;塌陷为深单 loop 后
+// planMode 的计划审批曾挂在已删除的计划后置点;塌陷为深单 loop 后
 // (ADR-0006 D1)该 gate 语义上就是"loop 首次调用 LLM 前的最后一次审批",
 // 故归位到 `preLLM`。
         const action = await this.hooks.fire("preLLM", {
@@ -2153,7 +2153,7 @@ export class Engine {
             turnAttemptCount = decision.nextRetryCount;
             shouldRetryTurn = true;
  // 把上一轮 outcome 摘要写入 PhaseEnvironment，
- // 供下一轮 PlanningPhase emit + planner 候选策略消费。
+ // 供下一轮 tool-routing 观测事件与候选策略消费。
             phaseEnv.previousAttempt = {
               retryCount: turnAttemptCount,
               lastOutcomeKind: validationOutcome.kind,
@@ -2410,7 +2410,7 @@ export class Engine {
       engineEventFromContext(context, {
         timestamp: Date.now(),
         phase,
-        type: "phase_enter",
+        type: "loop_step_enter",
         payload: {},
       }),
     );
@@ -2444,7 +2444,7 @@ export class Engine {
       engineEventFromContext(context, {
         timestamp: Date.now(),
         phase,
-        type: "phase_exit",
+        type: "loop_step_exit",
         payload: {},
       }),
     );

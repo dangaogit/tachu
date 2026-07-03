@@ -13,7 +13,7 @@ import { PlanningError } from "../../errors";
 import { topologicalSort } from "../../utils";
 
 /**
- * 确定性工具路由(ADR-0006 D1/D5,取代 intent 分类 + planning 路由 + graph-check)。
+ * 确定性工具路由(ADR-0006 D1/D5,取代旧的 intent 分类、计划路由与图校验步骤)。
  *
  * 深单 loop 塌陷后,不再有 LLM 分类 simple/complex,也不再有 direct-answer /
  * tool-use 两条路由分支 —— **所有请求统一构造单个 `tool-use` 任务**,工具集通过
@@ -130,7 +130,7 @@ const collectKnownSkillNames = (env: PhaseEnvironment): Set<string> =>
   ]);
 
 /**
- * 单任务 DAG 的最小图校验(取代原 graph-check phase):校验任务引用的
+ * 单任务 DAG 的最小图校验(取代原独立 graph-check 步骤):校验任务引用的
  * tool/agent 存在于 registry,并跑一次拓扑排序(单任务/单边场景恒通过,
  * 保留是为了在未来任务数增多时仍有真实校验)。
  */
@@ -159,8 +159,7 @@ export interface ToolRoutingPhaseOutput extends SafetyPhaseOutput {
 }
 
 /**
- * 确定性工具路由阶段(取代 intent 分类 phase + precheck phase + planning phase
- * 的 simple/complex 路由分支 + graph-check phase)。
+ * 确定性工具路由步骤(取代 intent 分类、precheck、计划分支与图校验步骤)。
  *
  * 输出约束:
  * 1. plans.length === 1, plans[0].tasks.length >= 1
@@ -177,8 +176,8 @@ export const runToolRoutingPhase = async (
 
 // Engine 触发 turn-level retry 时,PhaseEnvironment.previousAttempt 会被填充。
 // 路由本身是确定性的,不会因上一轮 outcome 改变任务构造,这里仅 emit 一条
-// progress 事件保留观测/审计能力(迁自原 planning.ts 的同名机制,避免随
-// intent/planning phase 删除一并悄悄丢失该诊断信号)。
+// progress 事件保留观测/审计能力(迁自旧计划步骤的同名机制,避免随
+// 旧前置步骤删除一并悄悄丢失该诊断信号)。
   if (env.previousAttempt) {
     env.observability.emit(engineEventFromContext(state.context, {
       timestamp: Date.now(),

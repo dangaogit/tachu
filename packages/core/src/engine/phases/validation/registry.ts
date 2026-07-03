@@ -4,9 +4,9 @@ import type { ExecutionPhaseOutput } from "../execution";
 import type { CandidateAnswer, EvidenceEntry } from "../../../types/evidence";
 
 /**
- * Phase-8 ValidationRule 接入契约。
+ * Turn-stop validation guard 的 ValidationRule 接入契约。
  *
- * Phase 8（result validation）的设计原则：
+ * Result validation guard 的设计原则：
  * - 每条 rule 都是 **structural / metadata-driven**，禁止字符串关键词正则。
  * - 每条 rule 都是 **deterministic** 或 **semantic** —— 二者由 `kind` 区分；
  * deterministic 规则必须可在毫秒级、无网络调用下完成评估。

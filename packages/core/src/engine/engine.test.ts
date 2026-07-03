@@ -276,7 +276,7 @@ describe("Engine", () => {
     expect(chunkTypes.filter((type) => type === "tool-call-end")).toHaveLength(1);
   });
 
- test("runStream emits structured phase-enter / phase-exit per 6-phase pipeline(ADR-0006 塌陷后:intent/precheck/planning/graph-check → 单一 tool-routing)", async () => {
+ test("runStream emits structured phase-enter / phase-exit around loop-spine boundaries", async () => {
     const engine = new Engine(config);
     const phaseEnters: string[] = [];
     const phaseExits: { phase: string; ok: boolean }[] = [];
@@ -302,7 +302,7 @@ describe("Engine", () => {
         throw chunk.error;
       }
     }
- // 6 阶段全部进入且全部以 ok=true 退出
+ // loop 主干边界全部进入且全部以 ok=true 退出
     expect(phaseEnters).toEqual([
       "session",
       "safety",

@@ -129,7 +129,7 @@ const buildEnv = (
   return { env, events };
 };
 
-describe("runToolRoutingPhase (ADR-0006 D1/D5 — 取代 intent 分类 + planning 路由 + graph-check)", () => {
+describe("runToolRoutingPhase (ADR-0006 D1/D5 — 取代旧前置分类、计划路由与图校验步骤)", () => {
   test("无匹配工具时仍产出单步 tool-use 任务(subsumes direct-answer:零工具由 loop 自然承接)", async () => {
     const { env } = buildEnv();
     const state = buildState("你好");

@@ -2025,7 +2025,7 @@ export const executeToolUse = async (
     engineEventFromContext(ctx.executionContext, {
       timestamp: Date.now(),
       phase: "tool-use",
-      type: "phase_enter",
+      type: "loop_step_enter",
       payload: {
         provider: adapter.id,
         model: route.model,

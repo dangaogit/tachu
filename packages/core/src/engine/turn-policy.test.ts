@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { emptyTurnPolicy, normalizeTurnPolicy, readTurnPolicy, withTurnPolicyMetadata } from "./turn-policy";
 
 describe("normalizeTurnPolicy", () => {
- test("no LLM turnPolicy + scope explicitSkillNames → stable shell with explicitSkills", () => {
+ test("scope explicitSkillNames → stable shell with explicitSkills", () => {
     const policy = normalizeTurnPolicy({
       scope: { explicitSkillNames: ["chart-output"] },
       knownSkillNames: new Set(["chart-output"]),
@@ -19,8 +19,11 @@ describe("normalizeTurnPolicy", () => {
 
  test("dedupes and ignores unknown registry names", () => {
     const policy = normalizeTurnPolicy({
-      llm: {
+      preseed: {
         excludeTools: ["image.qwen", "image.qwen", "unknown.tool"],
+        includeTools: [],
+        explicitSkills: [],
+        excludeSkills: [],
         pinSkills: ["chart-output", "missing-skill"],
         visualization: "data-chart",
       },
@@ -42,7 +45,14 @@ describe("readTurnPolicy", () => {
 
  test("round-trips via withTurnPolicyMetadata", () => {
     const policy = normalizeTurnPolicy({
-      llm: { includeTools: ["image.qwen"] },
+      preseed: {
+        excludeTools: [],
+        includeTools: ["image.qwen"],
+        explicitSkills: [],
+        excludeSkills: [],
+        pinSkills: [],
+        visualization: "",
+      },
       knownToolNames: new Set(["image.qwen"]),
     });
     const input = withTurnPolicyMetadata({ content: "draw", metadata: {} }, policy);

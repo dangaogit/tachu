@@ -1,3 +1,4 @@
+import { Glob } from "bun";
 import { ValidationError } from "../errors";
 import type {
   Message,
@@ -28,7 +29,6 @@ export interface TrimmedSkillRecord {
  * Prompt 组装参数。
  */
 export interface AssembleParams {
-  phase: RuleDescriptor["scope"][number];
   model: string;
   tokenizer: Tokenizer;
   modelCapabilities: ModelCapabilities;
@@ -48,6 +48,18 @@ export interface AssembleParams {
   finalOutputConstraint?: string;
   reserveOutputTokens?: number;
   systemInstruction?: string;
+  /**
+   * manual-activation 规则的显式点名集合;仅这些名字对应的 `manual` 规则会注入。
+   */
+  explicitRuleNames?: readonly string[];
+  /**
+   * 本轮上下文中的文件路径,供 `path`-activation 规则与其 globs 匹配。
+   */
+  contextFilePaths?: readonly string[];
+  /**
+   * 调用方判定为语义相关的规则名集合,供 `semantic`-activation 规则注入。
+   */
+  semanticActiveRuleNames?: readonly string[];
   onCompressContext?: () => Promise<void>;
  /**
  * 来自 ContextBudgetBroker 的裁剪优先级序列。
@@ -100,11 +112,37 @@ const isMessageContentParts = (value: unknown): value is MessageContentPart[] =>
         (p as MessageContentPart).type === "file"),
   );
 
-const filterRulesByPhase = (
+/**
+ * 规则激活上下文——供 assembler 判定每条规则本轮是否注入 prompt。
+ * 全部字段都是**调用方提供的确定性输入**;assembler 不做语义检索、
+ * 也不自行判断文件上下文,只按输入过滤(fail-closed:缺省即不注入)。
+ */
+export interface RuleActivationContext {
+  explicitRuleNames: ReadonlySet<string>;
+  contextFilePaths: readonly string[];
+  semanticActiveRuleNames: ReadonlySet<string>;
+}
+
+const isRuleActivated = (rule: RuleDescriptor, ctx: RuleActivationContext): boolean => {
+  const activation = rule.activation;
+  switch (activation.mode) {
+    case "always":
+      return true;
+    case "manual":
+      return ctx.explicitRuleNames.has(rule.name);
+    case "semantic":
+      return ctx.semanticActiveRuleNames.has(rule.name);
+    case "path":
+      return ctx.contextFilePaths.some((path) =>
+        activation.globs.some((glob) => new Glob(glob).match(path)),
+      );
+  }
+};
+
+const filterRulesByActivation = (
   rules: RuleDescriptor[],
-  phase: RuleDescriptor["scope"][number],
-): RuleDescriptor[] =>
-  rules.filter((rule) => rule.scope.includes("*") || rule.scope.includes(phase));
+  ctx: RuleActivationContext,
+): RuleDescriptor[] => rules.filter((rule) => isRuleActivated(rule, ctx));
 
 const toToolDefinition = (tool: ToolDescriptor): ToolDefinition => ({
   name: tool.name,
@@ -280,7 +318,11 @@ export class DefaultPromptAssembler implements PromptAssembler {
     const skillBudget = params.skillBudget ?? 0.8;
     const skillTokenLimit = Math.floor(limit * skillBudget);
 
-    const activeRules = filterRulesByPhase(params.activeRules, params.phase);
+    const activeRules = filterRulesByActivation(params.activeRules, {
+      explicitRuleNames: new Set(params.explicitRuleNames ?? []),
+      contextFilePaths: params.contextFilePaths ?? [],
+      semanticActiveRuleNames: new Set(params.semanticActiveRuleNames ?? []),
+    });
     let skillEntries = buildSkillEntries(params);
     let recallEntries = [...params.recalledEntries];
     let tools = [...params.availableTools];

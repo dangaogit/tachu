@@ -21,7 +21,6 @@ kind: rule
 name: test-rule
 description: desc
 type: rule
-scope: [output]
 ---
 
 content`,
@@ -86,7 +85,89 @@ skill instructions`,
     expect(registry.get("skill", "explain-code")?.instructions).toContain("skill instructions");
   });
 
- test("rejects invalid frontmatter structure", async () => {
+  test("parses rule activation and defaults to always when omitted", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tachu-loader-activation-"));
+    await mkdir(join(root, "rules"), { recursive: true });
+    await writeFile(
+      join(root, "rules", "default.md"),
+      `---
+kind: rule
+name: rule-default
+description: d
+type: rule
+---
+
+body`,
+      "utf8",
+    );
+    await writeFile(
+      join(root, "rules", "path.md"),
+      `---
+kind: rule
+name: rule-path
+description: d
+type: rule
+activation:
+  mode: path
+  globs: ["src/**/*.ts"]
+---
+
+body`,
+      "utf8",
+    );
+    const registry = new DescriptorRegistry();
+    const loader = new RegistryLoader(registry);
+    await loader.loadFromDirectory(root);
+    expect(registry.get("rule", "rule-default")?.activation).toEqual({ mode: "always" });
+    expect(registry.get("rule", "rule-path")?.activation).toEqual({
+      mode: "path",
+      globs: ["src/**/*.ts"],
+    });
+  });
+
+  test("fail-closes on unknown activation mode", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tachu-loader-bad-activation-"));
+    await mkdir(join(root, "rules"), { recursive: true });
+    await writeFile(
+      join(root, "rules", "bad.md"),
+      `---
+kind: rule
+name: rule-bad
+description: d
+type: rule
+activation:
+  mode: turnStop
+---
+
+body`,
+      "utf8",
+    );
+    const loader = new RegistryLoader(new DescriptorRegistry());
+    await expect(loader.loadFromDirectory(root)).rejects.toBeInstanceOf(ValidationError);
+  });
+
+  test("fail-closes on path activation without globs", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tachu-loader-path-noglob-"));
+    await mkdir(join(root, "rules"), { recursive: true });
+    await writeFile(
+      join(root, "rules", "bad.md"),
+      `---
+kind: rule
+name: rule-path-bad
+description: d
+type: rule
+activation:
+  mode: path
+---
+
+body`,
+      "utf8",
+    );
+    const loader = new RegistryLoader(new DescriptorRegistry());
+    await expect(loader.loadFromDirectory(root)).rejects.toBeInstanceOf(ValidationError);
+  });
+
+  test("rejects invalid frontmatter structure", async () => {
     const root = await mkdtemp(join(tmpdir(), "tachu-loader-invalid-"));
     await writeFile(
       join(root, "bad.md"),

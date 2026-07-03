@@ -1953,7 +1953,6 @@ export class Engine {
             : {}),
         });
         const assembled = await this.promptAssembler.assemble({
-          phase: "preLLM",
           model: route.model,
           tokenizer: this.tokenizer,
           modelCapabilities: {
@@ -1992,6 +1991,9 @@ export class Engine {
             : {}),
           ...(scope?.systemInstruction !== undefined
             ? { systemInstruction: scope.systemInstruction }
+            : {}),
+          ...(scope?.explicitRuleNames !== undefined
+            ? { explicitRuleNames: scope.explicitRuleNames }
             : {}),
         });
         assembled.tools = mergeInternalToolDefinitions(assembled.tools, {

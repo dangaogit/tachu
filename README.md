@@ -24,7 +24,7 @@ Tachu ships as a Bun-native TypeScript monorepo with three published packages �
 
 ## Project Status
 
-**Current release:** `1.0.0-rc.10` on the `rc` dist-tag.
+**Current release:** `1.0.0-rc.11` on the `rc` dist-tag.
 
 **Version terminology:** The product line is **Tachu v1**. Release candidates are stabilization builds for `1.0.0`, not a separate framework generation. HTTP paths like `/v1/extract` are API versions only. See [detailed-design § version glossary](docs/detailed-design.md#版本与发布术语必读).
 
@@ -128,7 +128,7 @@ bun add -g @tachu/cli@rc
 After global installation, verify with:
 
 ```bash
-tachu --version   # expect 1.0.0-rc.10 or newer
+tachu --version   # expect 1.0.0-rc.11 or newer
 ```
 
 ---

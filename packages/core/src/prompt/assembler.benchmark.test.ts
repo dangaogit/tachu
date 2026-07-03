@@ -136,7 +136,6 @@ describe(" P2 ε — estimator vs assembler self-consistency benchmark (±8%)", 
       );
 
       const assembled = await assembler.assemble({
-        phase: "preLLM",
         model: "bench-model",
         tokenizer: localTokenizer,
         modelCapabilities: {

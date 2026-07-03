@@ -122,19 +122,20 @@ interface DependencyRef {
 ```typescript
 interface RuleDescriptor extends BaseDescriptor {
   type: 'rule' | 'preference';   // 硬约束 vs 软偏好
-  scope: RuleScope[];             // 作用阶段
+  activation: RuleActivation;     // 激活条件：规则正文何时被注入 prompt
   content: string;                // 规则正文（注入 Prompt 的文本）
 }
 
-// ADR-0006 D5：RuleScope 塌陷为 loop-lifecycle 子集，与 §7.3 的 `HookPoint`
-// 共用同一套词汇；旧 7 个 phase 名（safety/intent/precheck/planning/execution/
-// validation/output）随 9 阶段流水线一并废弃。映射：safety/intent/precheck →
-// turnStart；planning/execution → preLLM；validation/output → turnStop。
-type RuleScope =
-  | 'turnStart'        // 前置守卫：safety/intent/precheck 原本承载的准入类规则
-  | 'preLLM'           // loop 每步 LLM 调用前：planning/execution 原本承载的输出塑形类规则
-  | 'turnStop'         // 后置守卫：validation/output 原本承载的质量把关类规则（只 check/block/annotate，不 reformat）
-  | '*';               // 全部生命周期事件
+// Rule 激活轴——回答「何时进 prompt」，终点永远是 prompt。它**不是**生命周期
+// 挂载点：block/annotate/validate 属于 §7.3 的 `HookPoint` / `Guardrail` /
+// `ValidationRule`，不由 Rule 承担（旧的 turnStart/preLLM/turnStop 生命周期式
+// scope 已废弃——那是把 rule 与 hook 混为一谈）。语义对齐业界 rule 系统
+// （Cursor / Copilot / Continue / Cline）的激活模型。
+type RuleActivation =
+  | { mode: 'always' }                          // 总是注入（≈ Cursor alwaysApply）
+  | { mode: 'manual' }                          // 仅当被显式点名（SessionScope.explicitRuleNames）
+  | { mode: 'semantic' }                        // 依据 description 语义相关（调用方提供活跃集；缺省 fail-closed 不注入）
+  | { mode: 'path'; globs: readonly string[] }; // 命中 globs 的文件出现在本轮上下文时
 ```
 
 **优先级合并**：
@@ -1337,8 +1338,9 @@ interface PromptAssembler {
 }
 
 interface AssembleParams {
-  // —— 阶段与匹配元素（必填）
-  phase: RuleScope;                          // 当前阶段（决定 Rules scope 筛选）
+  // —— 匹配元素（必填）
+  // 规则激活由调用方提供的确定性输入决定（explicitRuleNames / contextFilePaths /
+  // semanticActiveRuleNames）；assembler 不做语义检索、也不自判文件上下文。
   activeRules: RuleDescriptor[];
   activeSkills: SkillDescriptor[];
   availableTools: ToolDescriptor[];

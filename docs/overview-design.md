@@ -387,7 +387,7 @@ Plan 不是核心抽象；ADR-0006 塌陷深单 loop 后也**不再有「规划�
 
 刻意不提供"静默重排版"语义——想改格式是显式 transform，不是 guard 的职责。内置默认 guard：`turnStart` = `SafetyModule` baseline（前置安全检查产出的 violations 映射为 annotate/degrade/block）+ 业务通过 `EngineDependencies.guardrails.turnStart` 追加的策略；`turnStop` = Result Validation（evidence/claims → deliver/retry/degrade）。
 
-**RuleScope 复用 loop-lifecycle 词汇**：`RuleScope` 从 7 个 phase 名塌陷为 `{ turnStart, preLLM, turnStop, "*" }`，与 `HookPoint` 共用同一套词汇表。映射关系：原 `safety`/`intent`/`precheck` → `turnStart`；原 `planning`/`execution` → `preLLM`（输出格式类规则从这里直接塑形 `terminalDraft`，从根上治理格式漂移）；原 `validation`/`output` → `turnStop`（只做 check/block/annotate，不 reformat）。
+**Rule 激活轴与生命周期挂载面正交**：Rule 的唯一产物是注入 prompt 的文本，`RuleDescriptor.activation` 只回答「规则正文**何时**进 prompt」（`always` / `manual` / `semantic` / `path`），终点永远是 prompt。`block`/`annotate`/`validate` 这类阶段动作属于本节的对称 Guardrail seam 与 `HookPoint`，由它们承担——**Rule 不是生命周期挂载点**，不要把 rule 与 hook 混为一谈。输出格式类约束用 `always` 规则常驻 system prompt（每步都在 → 直接塑形 `terminalDraft`）；`turnStart`/`turnStop` 的准入与质量把关交给 Guardrail / `ValidationRule`，不写成 rule。该激活模型对齐业界 rule 系统（Cursor / Copilot / Continue / Cline）。
 
 **subagent 派发（Single-Writer Rule）**：loop 内 LLM 可通过内置 Task-style 工具 `dispatch_agent` 自决派发只读子代理，复用既有 Agent runtime（`agentRunId` history-scope 隔离、`decideSubAgentBudget`、同一 `toolUseExecutor`），零新增架构面：
 
@@ -854,16 +854,16 @@ MCP（Model Context Protocol）工具通过 **McpToolAdapter**
 | 压缩策略实现      | H-M-T  | 上下文压缩策略，可替换              |
 | ...               | ...    | 持续扩充                            |
 
-### 规则作用域
+### 规则激活条件
 
-> **ADR-0006**：`RuleScope` 由 7 个 phase 名收敛为 4 个 loop-lifecycle 词汇，与 `HookPoint` 共用同一套词。
+> **激活轴**：`RuleDescriptor.activation` 回答「规则正文**何时**被注入 prompt」，与业界 rule 系统（Cursor / Copilot / Continue / Cline）的激活模型对齐。它**不是**生命周期挂载点——`turnStart`/`turnStop` 的阶段动作（block/annotate/validate）属于 `HookPoint` / `Guardrail` / `ValidationRule`，不由 Rule 表达。缺省无活跃输入时 fail-closed 不注入；loader 对未知 `mode` 显式报错。
 
-| `RuleScope` | 原对应 phase | 引擎内置 | 业务可控 |
-| ------------ | -------- | -------- | -------- |
-| `turnStart`  | 最小安全准入 / 意图分析 / 前置校验 | ✓        | ✓        |
-| `preLLM`     | 任务拆分 / 任务执行（输出格式塑形）| ✓        | ✓        |
-| `turnStop`   | 结果验证 / 输出规范                | ✓        | ✓        |
-| `*`          | 全部生命周期事件                   | ✓        | ✓        |
+| `activation.mode` | 含义 | 注入条件 |
+| ----------------- | ---- | -------- |
+| `always`   | 总是注入（≈ Cursor `alwaysApply`）| 恒进 system prompt |
+| `manual`   | 手动点名（≈ `@rule` 引用）        | 命中 `SessionScope.explicitRuleNames` |
+| `semantic` | 语义相关（≈ agent-requested）      | 命中调用方给出的活跃集（缺省不注入）|
+| `path`     | 路径匹配（≈ `globs` 自动附着）     | 命中 `globs` 的文件出现在本轮上下文 |
 
 ### Descriptor 协议扩展契约（MUST）
 

@@ -445,7 +445,6 @@ describe("skill-activation R1-R12", () => {
  test("R12 omits empty Available Skills section in prompt", async () => {
     const assembler = new DefaultPromptAssembler();
     const result = await assembler.assemble({
-      phase: "preLLM",
       model: "dev-large",
       tokenizer,
       modelCapabilities: {

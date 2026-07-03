@@ -42,7 +42,7 @@ The requirement that the candidate-answer phase's final-answer writer receives t
 _Avoid_: Re-activating skills, copying the whole system prompt
 
 **Final-Answer Skill Scope**:
-_(0.2.0 · ADR-0006: superseded with the final-answer writer. Output-format contracts are now carried by `preLLM`-scoped **Loop-Scoped Rule**s and Active Skills that shape the **Terminal Draft** directly. Historical below.)_
+_(0.2.0 · ADR-0006: superseded with the final-answer writer. Output-format contracts are now carried by `always`-activated **Rule**s and Active Skills that shape the **Terminal Draft** directly. Historical below.)_
 Which active skills are passed into final-answer synthesis. Default scope is all active skills; an experimental scope may restrict inheritance to output-format skills only (for example chart rendering contracts). Output-format skills are identified by descriptor tag `output-format`. Configured via `runtime.finalAnswerSkillScope` (`all-active` default; `output-format-only` experimental). When the experimental scope matches no active skills, the engine emits a warning rather than failing silently.
 _Avoid_: Final-answer mode, skill filter flag (as domain terms)
 
@@ -134,9 +134,9 @@ _Avoid_: a fixed compliance stage separate from validation; a guard that rewrite
 The invariants the engine still enforces even when a host freely mutates messages/response at `preLLM`/`postLLM`: after each mutation hook the engine runs a structural normalize/re-validate (repair or reject dangling tool-calls, bad role ordering, invalid provider protocol) so a malformed conversation never reaches the Provider; `turnStop` guards always run last and fail-closed so mutation cannot bypass compliance; mutations are audited.
 _Avoid_: raw caller-beware passthrough, letting a mutation hook bypass the post-guard
 
-**Loop-Scoped Rule**:
-A `RuleDescriptor` whose `scope` uses the Loop Lifecycle vocabulary `turnStart | preLLM | turnStop | *` (replaces the seven pipeline-phase scope names). Output-**format** rules live at `preLLM` (present every step → shape the Terminal Draft directly); `turnStop`-scoped rules feed exit guards only (check/block/annotate, never reformat).
-_Avoid_: phase-named rule scope (safety/intent/planning/execution/validation/output); putting output-format rules at `turnStop`
+**Rule Activation**:
+A `RuleDescriptor` carries an `activation` that answers *when the rule text is injected into the prompt* — `always | manual | semantic | { path, globs }` — mirroring industry rule systems (Cursor/Copilot/Continue/Cline). A rule's only product is prompt text; its terminal is always the prompt. Output-**format** rules use `always` (present every step → shape the Terminal Draft directly).
+_Avoid_: treating a rule's scope as a lifecycle stage; expressing block/annotate/validate via rules (those belong to HookPoint/Guardrail/ValidationRule); the retired pipeline-phase or loop-lifecycle scope names on a rule (safety/intent/planning/execution/validation/output, turnStart/turnStop)
 
 **Per-Step Compaction**:
 Context-window management performed inside the loop: each step re-checks the context budget and auto-compacts the conversation when it approaches the window (tool outputs accumulate as the loop runs). Fires `preCompact`. Replaces the single pre-loop budget decision. The hard budget (token/time/tool cumulative cut-off) stays turn-level.

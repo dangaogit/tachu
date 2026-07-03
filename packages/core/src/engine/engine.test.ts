@@ -747,7 +747,7 @@ describe("Engine", () => {
       name: "registry-baseline-rule",
       description: "from registry",
       type: "rule",
-      scope: ["*"],
+      activation: { mode: "always" },
       content: "REGISTRY-BASELINE-MARKER",
     });
 
@@ -789,7 +789,7 @@ describe("Engine", () => {
             name: "session-extra-rule",
             description: "from session scope",
             type: "rule",
-            scope: ["*"],
+            activation: { mode: "always" },
             content: "SESSION-EXTRA-MARKER",
           },
         ],
@@ -811,7 +811,92 @@ describe("Engine", () => {
     await engine.dispose();
   });
 
- test("runStream forwards scope.systemInstruction so PromptAssembler injects it into the assembled system message", async () => {
+  test("runStream gates a manual-activation rule on scope.explicitRuleNames", async () => {
+    const runWithExplicit = async (
+      explicitRuleNames?: readonly string[],
+    ): Promise<string> => {
+      const captured: string[] = [];
+      const captureProvider: ProviderAdapter = {
+        id: "capture",
+        name: "CaptureProvider",
+        async listAvailableModels() {
+          return [];
+        },
+        async chat(request: ChatRequest, _ctx: AdapterCallContext): Promise<ChatResponse> {
+          for (const m of request.messages) {
+            if (m.role === "system" && typeof m.content === "string") {
+              captured.push(m.content);
+            }
+          }
+          return {
+            content: "ok",
+            usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+          };
+        },
+        async *chatStream(_request: ChatRequest, _ctx: AdapterCallContext) {
+          yield { type: "text-delta", delta: "ok" } as const;
+          yield { type: "finish", finishReason: "stop" } as const;
+        },
+      };
+
+      const registry = new DescriptorRegistry();
+      await registry.register({
+        kind: "rule",
+        name: "manual-only-rule",
+        description: "manual",
+        type: "rule",
+        activation: { mode: "manual" },
+        content: "MANUAL-ONLY-MARKER",
+      });
+
+      const engine = new Engine(
+        {
+          ...config,
+          runtime: { ...config.runtime, streamingOutput: false },
+          models: {
+            capabilityMapping: {
+              intent: { provider: "capture", model: "capture-chat" },
+              planning: { provider: "capture", model: "capture-chat" },
+              validation: { provider: "capture", model: "capture-chat" },
+              "fast-cheap": { provider: "capture", model: "capture-chat" },
+              "high-reasoning": { provider: "capture", model: "capture-chat" },
+            },
+            providerFallbackOrder: ["capture"],
+          },
+        },
+        { providers: [captureProvider], registry },
+      );
+
+      for await (const chunk of engine.runStream(
+        { content: "hi", metadata: { modality: "text", size: 2 } },
+        {
+          correlation: {
+            traceId: "t-manual-rule",
+            requestId: "r-manual-rule",
+            sessionId: "s-manual-rule",
+            turnId: "turn-r-manual-rule",
+          },
+          principal: {},
+          budget: {},
+          scopes: ["*"],
+        },
+        explicitRuleNames ? { explicitRuleNames } : {},
+      )) {
+        if (chunk.type === "error") throw chunk.error;
+      }
+
+      await engine.dispose();
+      return captured.join("\n");
+    };
+
+    const withoutExplicit = await runWithExplicit();
+    expect(withoutExplicit).not.toContain("MANUAL-ONLY-MARKER");
+
+    const withExplicit = await runWithExplicit(["manual-only-rule"]);
+    expect(withExplicit).toContain("MANUAL-ONLY-MARKER");
+  });
+
+  test("runStream forwards scope.systemInstruction so PromptAssembler injects it into the assembled system message", async () => {
     const capturedSystemContents: string[] = [];
     const captureProvider: ProviderAdapter = {
       id: "capture",

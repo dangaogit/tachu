@@ -77,9 +77,17 @@ export interface SessionScope {
  * Planning forces tool-use with these names even when intent is simple.
  */
   explicitToolNames?: string[];
- /**
- * Host-detected explicit skill invocation (e.g. `/chart-output`, @mention, UI pick).
- * Copied to turnPolicy.explicitSkills during intent normalization; highest pin priority.
- */
+  /**
+   * Host-detected explicit skill invocation (e.g. `/chart-output`, @mention, UI pick).
+   * Copied to turnPolicy.explicitSkills during intent normalization; highest pin priority.
+   */
   explicitSkillNames?: string[];
+  /**
+   * 本轮被显式点名的 rule 名称(与 `explicitSkillNames` 对称)。
+   *
+   * 仅 `activation.mode === "manual"` 的规则在命中此集合时才注入 prompt;
+   * `always` 规则始终注入、`manual` 规则未命中则不注入。承载 `@rule` 手动引用、
+   * UI 勾选等宿主侧显式激活信号。
+   */
+  explicitRuleNames?: readonly string[];
 }

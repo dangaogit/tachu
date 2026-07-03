@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-rc.11] - 2026-07-03
+
+### Changed
+
+#### `@tachu/core` (BREAKING)
+
+- **`RuleScope` → `RuleActivation`**: a rule's scope is now an *activation axis* (when the rule text enters the prompt), not a lifecycle stage. `RuleDescriptor.scope: RuleScope[]` is replaced by `RuleDescriptor.activation: RuleActivation` where `RuleActivation = { mode: "always" } | { mode: "manual" } | { mode: "semantic" } | { mode: "path"; globs }`. The retired loop-lifecycle scope names (`turnStart`/`preLLM`/`turnStop`/`*`) conflated rule (prompt text) with hook (lifecycle action); block/annotate/validate stay with `HookPoint` / `Guardrail` / `ValidationRule`. The model mirrors industry rule systems (Cursor/Copilot/Continue/Cline). No backward compatibility is kept.
+- `PromptAssembler` no longer takes a lifecycle `phase`; it filters `activeRules` by activation using caller-provided deterministic inputs `explicitRuleNames` / `contextFilePaths` / `semanticActiveRuleNames` (fail-closed: no input ⇒ not injected). `always` is unconditional; `manual` is gated by `SessionScope.explicitRuleNames`; `path` matches globs against `contextFilePaths`; `semantic` is gated by the caller-supplied active set.
+- `SessionScope.explicitRuleNames` added (symmetric with `explicitSkillNames`) so hosts can manually activate `manual`-mode rules per turn.
+- `RegistryLoader` parses `activation` frontmatter and **fail-closes** on unknown modes or a `path` mode without non-empty `globs` (previously an unknown `scope` string was silently kept).
+
 ## [1.0.0-rc.10] - 2026-07-03
 
 ### Changed

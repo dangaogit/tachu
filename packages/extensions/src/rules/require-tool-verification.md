@@ -3,7 +3,8 @@ kind: rule
 name: require-tool-verification
 description: 对事实性判断必须先调用工具验证
 type: rule
-scope: [planning, execution]
+activation:
+  mode: always
 tags: [accuracy]
 version: 1.0.0
 ---

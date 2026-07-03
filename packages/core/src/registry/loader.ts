@@ -5,6 +5,7 @@ import { ValidationError } from "../errors";
 import type {
   AgentDescriptor,
   AnyDescriptor,
+  RuleActivation,
   RuleDescriptor,
   SkillDescriptor,
   ToolDescriptor,
@@ -66,6 +67,51 @@ const normalizeTrigger = (
   return { type: "semantic" };
 };
 
+/**
+ * 解析并 **fail-closed** 校验 rule 的激活条件(activation)。
+ *
+ * - 未声明 → 默认 `{ mode: "always" }`(未限定的规则默认总是注入)。
+ * - `always` / `manual` / `semantic` → 原样返回。
+ * - `path` → 必须带非空字符串数组 `globs`,否则报错。
+ * - 其它一律报错(旧的 `turnStart`/`preLLM`/`turnStop`/`*` 生命周期式 scope
+ *   已废弃;误用会在加载期显式失败,而非静默丢弃)。
+ */
+const normalizeRuleActivation = (
+  raw: unknown,
+  ruleName: string,
+  filePath?: string,
+): RuleActivation => {
+  const where = filePath ?? "?";
+  if (raw === undefined || raw === null) {
+    return { mode: "always" };
+  }
+  if (typeof raw !== "object") {
+    throw ValidationError.invalidConfig(
+      `rule "${ruleName}" (${where}): activation 必须是对象（形如 { mode: "always" }）`,
+    );
+  }
+  const mode = (raw as { mode?: unknown }).mode;
+  if (mode === "always" || mode === "manual" || mode === "semantic") {
+    return { mode };
+  }
+  if (mode === "path") {
+    const globs = (raw as { globs?: unknown }).globs;
+    if (
+      !Array.isArray(globs) ||
+      globs.length === 0 ||
+      !globs.every((g): g is string => typeof g === "string" && g.length > 0)
+    ) {
+      throw ValidationError.invalidConfig(
+        `rule "${ruleName}" (${where}): activation.mode="path" 必须带非空字符串数组 globs`,
+      );
+    }
+    return { mode: "path", globs: [...globs] };
+  }
+  throw ValidationError.invalidConfig(
+    `rule "${ruleName}" (${where}): 未知 activation.mode "${String(mode)}"（合法值：always/manual/semantic/path）`,
+  );
+};
+
 const requireString = (value: unknown, field: string): string => {
   if (typeof value !== "string" || value.length === 0) {
     throw ValidationError.invalidConfig(`frontmatter 字段 ${field} 必须是非空字符串`);
@@ -92,7 +138,7 @@ const toDescriptor = async (
     "requires",
     "kind",
     "type",
-    "scope",
+    "activation",
     "sideEffect",
     "idempotent",
     "requiresApproval",
@@ -140,9 +186,7 @@ const toDescriptor = async (
       ...base,
       kind: "rule",
       type: (type === "preference" ? "preference" : "rule") as "rule" | "preference",
-      scope: Array.isArray(data.scope)
-        ? data.scope.filter((item): item is RuleDescriptor["scope"][number] => typeof item === "string")
-        : ["*"],
+      activation: normalizeRuleActivation(data.activation, name, sourceFile),
       content,
     };
     warnOnDescriptorIdentityMismatch("rule", descriptor.name, sourceFile);

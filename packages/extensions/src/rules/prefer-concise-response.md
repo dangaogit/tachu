@@ -3,7 +3,8 @@ kind: rule
 name: prefer-concise-response
 description: 偏好简洁回答风格
 type: preference
-scope: [output]
+activation:
+  mode: always
 tags: [style]
 version: 1.0.0
 ---

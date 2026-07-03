@@ -30,15 +30,27 @@ export interface BaseDescriptor {
 }
 
 /**
- * Rule 的作用阶段(ADR-0006 D5)。
+ * Rule 激活条件——回答「规则正文**何时**被注入 prompt」,即激活轴。
  *
- * 7 个 phase 名塌陷为 loop-lifecycle 子集,与 `HookPoint` 共用一套词汇。
- * 映射:`safety`/`intent`/`precheck` → `turnStart`;`planning`/`execution`
- * → `preLLM`(输出格式类规则从这里直接塑形 terminalDraft,根治 chart-output
- * 格式漂移);`validation`/`output` → `turnStop`(只做 check/block/annotate,
- * 不 reformat)。
+ * 关键约束:Rule 的唯一产物是 prompt 文本,终点永远是 prompt。它**不是**
+ * 生命周期挂载点:block / annotate / validate / modify 这类阶段动作属于
+ * `HookPoint` / `Guardrail` / `ValidationRule`,由它们承担,绝不由 Rule 表达。
+ * (旧的 `turnStart`/`preLLM`/`turnStop` 生命周期式 scope 已废弃——那是把
+ * rule 与 hook 混为一谈。)
+ *
+ * 语义对齐业界 rule 系统(Cursor / Copilot / Continue / Cline …)的激活模型:
+ * - `always`:总是注入(对应 Cursor `alwaysApply: true`)。
+ * - `manual`:仅当本轮被显式点名(`SessionScope.explicitRuleNames`)时注入
+ *   (对应 `@rule` 手动引用)。
+ * - `semantic`:由调用方依据 `description` 判定语义相关后注入(对应
+ *   agent-requested);缺省无活跃集时 fail-closed 不注入。
+ * - `path`:当命中 `globs` 的文件出现在本轮上下文时注入(对应 `globs` 自动附着)。
  */
-export type RuleScope = "turnStart" | "preLLM" | "turnStop" | "*";
+export type RuleActivation =
+  | { mode: "always" }
+  | { mode: "manual" }
+  | { mode: "semantic" }
+  | { mode: "path"; globs: readonly string[] };
 
 /**
  * Rule 描述符。
@@ -46,7 +58,7 @@ export type RuleScope = "turnStart" | "preLLM" | "turnStop" | "*";
 export interface RuleDescriptor extends BaseDescriptor {
   kind: "rule";
   type: "rule" | "preference";
-  scope: RuleScope[];
+  activation: RuleActivation;
   content: string;
 }
 

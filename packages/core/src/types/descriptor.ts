@@ -46,11 +46,13 @@ export interface BaseDescriptor {
  *   agent-requested);缺省无活跃集时 fail-closed 不注入。
  * - `path`:当命中 `globs` 的文件出现在本轮上下文时注入(对应 `globs` 自动附着)。
  */
-export type RuleActivation =
+export type Activation =
   | { mode: "always" }
   | { mode: "manual" }
   | { mode: "semantic" }
   | { mode: "path"; globs: readonly string[] };
+
+export type RuleActivation = Activation;
 
 /**
  * Rule 描述符。

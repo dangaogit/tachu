@@ -1,4 +1,3 @@
-import { Glob } from "bun";
 import { ValidationError } from "../errors";
 import type {
   Message,
@@ -12,6 +11,7 @@ import type {
 } from "../types";
 import type { ContextWindow, MemoryEntry } from "../modules/memory";
 import type { ModelCapabilities } from "../modules/provider";
+import { createActivation, createRuleActivationProfile } from "../engine/activation";
 import type { Tokenizer } from "./tokenizer";
 import { renderActiveSkills } from "./render-skills";
 import { stripTrailingCurrentTurn } from "./turn-tail";
@@ -112,37 +112,26 @@ const isMessageContentParts = (value: unknown): value is MessageContentPart[] =>
         (p as MessageContentPart).type === "file"),
   );
 
-/**
- * 规则激活上下文——供 assembler 判定每条规则本轮是否注入 prompt。
- * 全部字段都是**调用方提供的确定性输入**;assembler 不做语义检索、
- * 也不自行判断文件上下文,只按输入过滤(fail-closed:缺省即不注入)。
- */
-export interface RuleActivationContext {
-  explicitRuleNames: ReadonlySet<string>;
-  contextFilePaths: readonly string[];
-  semanticActiveRuleNames: ReadonlySet<string>;
-}
+const ruleActivation = createActivation({
+  profiles: {
+    rule: createRuleActivationProfile(),
+  },
+});
 
-const isRuleActivated = (rule: RuleDescriptor, ctx: RuleActivationContext): boolean => {
-  const activation = rule.activation;
-  switch (activation.mode) {
-    case "always":
-      return true;
-    case "manual":
-      return ctx.explicitRuleNames.has(rule.name);
-    case "semantic":
-      return ctx.semanticActiveRuleNames.has(rule.name);
-    case "path":
-      return ctx.contextFilePaths.some((path) =>
-        activation.globs.some((glob) => new Glob(glob).match(path)),
-      );
-  }
-};
-
-const filterRulesByActivation = (
+const activateRules = async (
   rules: RuleDescriptor[],
-  ctx: RuleActivationContext,
-): RuleDescriptor[] => rules.filter((rule) => isRuleActivated(rule, ctx));
+  params: Pick<AssembleParams, "explicitRuleNames" | "contextFilePaths" | "semanticActiveRuleNames">,
+): Promise<RuleDescriptor[]> => {
+  const result = await ruleActivation.activate("rule", {
+    registry: {
+      list: () => rules,
+    },
+    explicitNames: new Set(params.explicitRuleNames ?? []),
+    contextFilePaths: params.contextFilePaths ?? [],
+    semanticActiveNames: new Set(params.semanticActiveRuleNames ?? []),
+  });
+  return result.active;
+};
 
 const toToolDefinition = (tool: ToolDescriptor): ToolDefinition => ({
   name: tool.name,
@@ -318,11 +307,7 @@ export class DefaultPromptAssembler implements PromptAssembler {
     const skillBudget = params.skillBudget ?? 0.8;
     const skillTokenLimit = Math.floor(limit * skillBudget);
 
-    const activeRules = filterRulesByActivation(params.activeRules, {
-      explicitRuleNames: new Set(params.explicitRuleNames ?? []),
-      contextFilePaths: params.contextFilePaths ?? [],
-      semanticActiveRuleNames: new Set(params.semanticActiveRuleNames ?? []),
-    });
+    const activeRules = await activateRules(params.activeRules, params);
     let skillEntries = buildSkillEntries(params);
     let recallEntries = [...params.recalledEntries];
     let tools = [...params.availableTools];

@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-rc.13] - 2026-07-04
+
+Concept-alignment follow-through: completes rc.12 by unifying the descriptor **activation field** itself (not just the activation logic), extending fail-closed parsing to the CLI loader, and retiring the remaining `trigger` / `TurnPolicy` vocabulary.
+
+### Changed
+
+#### `@tachu/core` (BREAKING)
+
+- **One activation field**: skill activation moves from `BaseDescriptor.trigger` to the shared `activation` axis. `TriggerCondition` and `BaseDescriptor.trigger` are removed with **no legacy compatibility** — all four descriptor kinds now declare activation through the single `Activation` vocabulary (`always` / `manual` / `semantic` / `path`). `RegistryQuery.trigger` becomes `RegistryQuery.activation`; skill frontmatter must use `activation:` (a `trigger:` key is no longer read).
+- **`TurnPolicy` → `GatingPolicy`**: the `types/turn-policy` and `engine/turn-policy` modules are renamed to `gating-policy`; the pinning strategy, observability reason strings (`gating-policy:*`, `gating-policy-include`), and internal identifiers drop the residual `intent` / `turn-policy` / `always-trigger` dead words.
+
+#### `@tachu/cli`
+
+- **Fail-closed descriptor scanner**: the `.tachu/` scanner now rejects unknown `sideEffect` / `activation.mode` and ambiguous `kind` instead of silently downgrading (e.g. an unknown `sideEffect` no longer falls back to the loosest `readonly`), reaching parity with the core loader hardened in rc.12.
+- Stream renderers surface the loop-lifecycle `lifecycle` chunk (`turnStart` / `turnStop`) as coarse turn milestones.
+
+### Docs
+
+- Record the deliberate phase-internalization vs loop-lifecycle boundary decision (the deep `tool-use` loop is the spine; the 6 phases are an internal orchestration skeleton, never public API), and align descriptor examples to `activation` / `gatingPolicy`.
+
 ## [1.0.0-rc.12] - 2026-07-03
 
 Concept-alignment pass: after `RuleActivation` (rc.11) fixed the rule scope drift, this release generalizes the fix and removes the same class of drift across the other core concepts (unified activation seam, one guard seam, loop-spine observability, fail-closed loader, dead intent-LLM vocabulary).

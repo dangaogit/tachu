@@ -1,6 +1,6 @@
 {
   "name": "@tachu/host-defaults",
-  "version": "1.0.0-rc.12",
+  "version": "1.0.0-rc.13",
   "description": "Default host wiring for Tachu — provider inference, semantic retrieval facade, capability checks. Shared by CLI and non-CLI hosts.",
   "type": "module",
   "main": "./dist/index.js",

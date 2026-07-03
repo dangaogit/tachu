@@ -26,7 +26,7 @@ Tachu 以 Bun 原生 TypeScript Monorepo 形式发布，包含三个已发布包
 
 ## 项目状态（Project Status）
 
-**当前发布版本：** `1.0.0-rc.12`（`rc` dist-tag）
+**当前发布版本：** `1.0.0-rc.13`（`rc` dist-tag）
 
 **版本术语：** 当前产品线为 **Tachu v1**。Release candidate 是 `1.0.0` 的稳定化构建，不是新的框架代际；`/v1/extract` 等仅为 HTTP API 版本。详见 [详细设计 · 版本与发布术语](docs/detailed-design.md#版本与发布术语必读)。
 
@@ -129,7 +129,7 @@ bun add -g @tachu/cli@rc
 安装完成后验证：
 
 ```bash
-tachu --version   # 预期输出 1.0.0-rc.12 或更新
+tachu --version   # 预期输出 1.0.0-rc.13 或更新
 ```
 
 ---

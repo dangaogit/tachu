@@ -1,6 +1,6 @@
 {
   "name": "@tachu/extensions",
-  "version": "1.0.0-rc.13",
+  "version": "1.0.0-rc.14",
   "description": "Tachu extensions (release candidate) — OpenAI/Anthropic/Mock providers, 22 built-in tools, execution backends, MCP adapters (stdio+SSE), vector stores (local/Qdrant), observability emitters, input transformers and common rules.",
   "type": "module",
   "main": "./dist/index.js",

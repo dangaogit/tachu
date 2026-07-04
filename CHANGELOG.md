@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-rc.14] - 2026-07-04
+
+_TODO: summarize the changes in this release._
+
 ## [1.0.0-rc.13] - 2026-07-04
 
 Concept-alignment follow-through: completes rc.12 by unifying the descriptor **activation field** itself (not just the activation logic), extending fail-closed parsing to the CLI loader, and retiring the remaining `trigger` / `TurnPolicy` vocabulary.

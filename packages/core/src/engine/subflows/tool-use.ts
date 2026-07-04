@@ -139,6 +139,7 @@ export interface ToolUseContext {
   sessionManager?: SessionManager;
   stickyManager?: StickyManager;
   searchSkills?: InternalToolContext["searchSkills"];
+  loadSkill?: InternalToolContext["loadSkill"];
  /**
  * 当前 turn 的 retry 计数（来源于 orchestrator turn-level retry loop）。
  *
@@ -941,6 +942,7 @@ const executeSingleToolCallInner = async (
           observability: ctx.observability,
           adapterContext: ctx.adapterContext,
           ...(ctx.searchSkills !== undefined ? { searchSkills: ctx.searchSkills } : {}),
+          ...(ctx.loadSkill !== undefined ? { loadSkill: ctx.loadSkill } : {}),
         });
         const durationMs = Date.now() - startedAt;
         const content = serializeToolOutput(output, call.name);

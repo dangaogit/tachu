@@ -8,6 +8,7 @@ import {
   type MemoryEntry,
   type MemorySystem,
   type ProviderAdapter,
+  type SessionScope,
 } from "../index";
 import { DescriptorRegistry } from "../registry";
 import type { AdapterCallContext } from "../types/context";
@@ -1892,5 +1893,304 @@ describe("guardrail seam (ADR-0006 D4) — 对称 turnStart/turnStop guardrail �
     expect(output.content).toContain("safety");
     expect(output.content).toContain("host-note");
     await engine.dispose();
+  });
+});
+
+describe("Engine — host skillDiscovery provider (SessionScope, per-turn tenant-scoped)", () => {
+  const usage = { promptTokens: 1, completionTokens: 1, totalTokens: 2 };
+  const recModel = {
+    modelName: "rec-chat",
+    capabilities: {
+      supportedModalities: ["text"],
+      maxContextTokens: 128_000,
+      supportsStreaming: true,
+      supportsFunctionCalling: true,
+    },
+  };
+  const modelsFor = (providerId: string) => ({
+    capabilityMapping: {
+      intent: { provider: providerId, model: "rec-chat" },
+      planning: { provider: providerId, model: "rec-chat" },
+      validation: { provider: providerId, model: "rec-chat" },
+      "fast-cheap": { provider: providerId, model: "rec-chat" },
+      "high-reasoning": { provider: providerId, model: "rec-chat" },
+    },
+    providerFallbackOrder: [providerId],
+  });
+  const runContext = (traceId: string) => ({
+    correlation: {
+      traceId,
+      requestId: `r-${traceId}`,
+      sessionId: `s-${traceId}`,
+      turnId: `turn-${traceId}`,
+    },
+    principal: {},
+    budget: { maxTokens: 2_000, maxDurationMs: 5_000 },
+    scopes: ["*"],
+  });
+
+  test("list() surfaces host skills under Available Skills; concurrent run without provider stays isolated", async () => {
+    const dumps = new Map<string, string[]>();
+    const record = (traceId: string, messages: Message[]): void => {
+      const bucket = dumps.get(traceId) ?? [];
+      bucket.push(JSON.stringify(messages));
+      dumps.set(traceId, bucket);
+    };
+    const provider: ProviderAdapter = {
+      id: "rec",
+      name: "rec",
+      async listAvailableModels() {
+        return [recModel];
+      },
+      async chat(req, ctx) {
+        record(ctx.correlation.traceId, req.messages);
+        return { content: "final answer", finishReason: "stop", usage };
+      },
+      async *chatStream(req, ctx) {
+        record(ctx.correlation.traceId, req.messages);
+        yield { type: "text-delta", delta: "final answer" } as const;
+        yield { type: "finish", finishReason: "stop", usage } as const;
+      },
+    };
+    const engine = new Engine({ ...config, models: modelsFor("rec") }, { providers: [provider] });
+
+    const scopeWithShelf: SessionScope = {
+      skillDiscovery: {
+        list: async () => [{ name: "my-shelf-skill", description: "charts from my shelf" }],
+      },
+    };
+    const drain = async (traceId: string, scope?: SessionScope): Promise<void> => {
+      for await (const chunk of engine.runStream(
+        { content: "hello", metadata: { modality: "text", size: 5 } },
+        runContext(traceId),
+        scope,
+      )) {
+        if (chunk.type === "error") {
+          throw chunk.error;
+        }
+      }
+    };
+
+    await Promise.all([drain("t-disc-a", scopeWithShelf), drain("t-disc-b")]);
+    await engine.dispose();
+
+    const dumpA = (dumps.get("t-disc-a") ?? []).join("\n");
+    const dumpB = (dumps.get("t-disc-b") ?? []).join("\n");
+    expect(dumpA).toContain("Available Skills");
+    expect(dumpA).toContain("my-shelf-skill");
+    // tenant/turn isolation: the concurrent run without a provider never sees it
+    expect(dumpB).not.toContain("my-shelf-skill");
+  });
+
+  /**
+   * 驱动一次「intent(chat) → tool_calls(chatStream) → stop(chatStream)」的真实回合，
+   * 让内置工具（search_skills / load_skill）在流式 tool-use loop 内被实际调用。
+   * 沿用 fetch-news 测试已验证的 provider 脚本形态。
+   */
+  const runInternalToolTurn = async (args: {
+    toolName: "search_skills" | "load_skill";
+    toolArgs: Record<string, unknown>;
+    scope: SessionScope;
+    enableSearchSkillsTool?: boolean;
+    registrySkill?: { name: string; description: string; instructions: string };
+  }): Promise<string> => {
+    const dump: string[] = [];
+    let streamCalls = 0;
+    const provider: ProviderAdapter = {
+      id: "rec",
+      name: "rec",
+      async listAvailableModels() {
+        return [recModel];
+      },
+      async chat(req) {
+        dump.push(JSON.stringify(req.messages));
+        return {
+          content: JSON.stringify({
+            complexity: "complex",
+            intent: "use an internal skill tool",
+            contextRelevance: "unrelated",
+          }),
+          finishReason: "stop",
+          usage,
+        };
+      },
+      async *chatStream(req) {
+        dump.push(JSON.stringify(req.messages));
+        streamCalls += 1;
+        if (streamCalls === 1) {
+          yield {
+            type: "tool-call-complete",
+            call: { id: "call-1", name: args.toolName, arguments: args.toolArgs },
+          } as const;
+          yield { type: "finish", finishReason: "tool_calls", usage } as const;
+          return;
+        }
+        yield { type: "text-delta", delta: "done" } as const;
+        yield { type: "finish", finishReason: "stop", usage } as const;
+      },
+    };
+    const registry = new DescriptorRegistry();
+    if (args.registrySkill) {
+      await registry.register({
+        kind: "skill",
+        name: args.registrySkill.name,
+        description: args.registrySkill.description,
+        instructions: args.registrySkill.instructions,
+        activation: { mode: "semantic" },
+      });
+    }
+    const engine = new Engine(
+      {
+        ...config,
+        runtime: {
+          ...config.runtime,
+          streamingOutput: true,
+          ...(args.enableSearchSkillsTool === true ? { enableSearchSkillsTool: true } : {}),
+        },
+        models: modelsFor("rec"),
+      },
+      { providers: [provider], registry },
+    );
+    for await (const chunk of engine.runStream(
+      { content: "please use a skill", metadata: { modality: "text", size: 18 } },
+      runContext(`t-${args.toolName}`),
+      args.scope,
+    )) {
+      if (chunk.type === "error") {
+        throw chunk.error;
+      }
+    }
+    await engine.dispose();
+    return dump.join("\n");
+  };
+
+  test("search_skills merges registry hits with skillDiscovery.search (union by name)", async () => {
+    const joined = await runInternalToolTurn({
+      toolName: "search_skills",
+      toolArgs: { query: "charts" },
+      enableSearchSkillsTool: true,
+      registrySkill: { name: "charts", description: "system chart tool", instructions: "draw charts" },
+      scope: {
+        skillDiscovery: {
+          search: async () => [{ name: "my-shelf-skill", description: "shelf chart", score: 0.95 }],
+        },
+      },
+    });
+    // both the registry hit and the host shelf hit must appear in the merged tool result
+    expect(joined).toContain("my-shelf-skill");
+    expect(joined).toContain("charts");
+  });
+
+  test("load_skill resolves instructions via skillDiscovery.load when not in the registry", async () => {
+    const joined = await runInternalToolTurn({
+      toolName: "load_skill",
+      toolArgs: { name: "my-shelf-skill" },
+      scope: {
+        skillDiscovery: {
+          load: async (name) => ({
+            kind: "skill",
+            name,
+            description: "host shelf skill",
+            instructions: "SHELF-INSTRUCTIONS-XYZ",
+            activation: { mode: "semantic" },
+          }),
+        },
+      },
+    });
+    expect(joined).toContain("SHELF-INSTRUCTIONS-XYZ");
+  });
+
+  test("a skill loaded in one turn persists as an Active Skill into the next turn without re-loading (session sticky)", async () => {
+    const TURN1 = "t-persist-1";
+    const TURN2 = "t-persist-2";
+    const streamCallsByTrace = new Map<string, number>();
+    const loadCallTurns: string[] = [];
+    const turn2StreamMessages: string[] = [];
+    const provider: ProviderAdapter = {
+      id: "rec",
+      name: "rec",
+      async listAvailableModels() {
+        return [recModel];
+      },
+      async chat() {
+        return {
+          content: JSON.stringify({
+            complexity: "complex",
+            intent: "use a shelf skill",
+            contextRelevance: "unrelated",
+          }),
+          finishReason: "stop",
+          usage,
+        };
+      },
+      async *chatStream(req, ctx) {
+        const traceId = ctx.correlation.traceId;
+        const n = (streamCallsByTrace.get(traceId) ?? 0) + 1;
+        streamCallsByTrace.set(traceId, n);
+        if (traceId === TURN2) {
+          turn2StreamMessages.push(JSON.stringify(req.messages));
+        }
+        // only turn 1 explicitly loads the skill; turn 2 must NOT re-load it
+        if (traceId === TURN1 && n === 1) {
+          yield {
+            type: "tool-call-complete",
+            call: { id: "l1", name: "load_skill", arguments: { name: "my-shelf-skill" } },
+          } as const;
+          yield { type: "finish", finishReason: "tool_calls", usage } as const;
+          return;
+        }
+        yield { type: "text-delta", delta: "done" } as const;
+        yield { type: "finish", finishReason: "stop", usage } as const;
+      },
+    };
+    const engine = new Engine(
+      { ...config, runtime: { ...config.runtime, streamingOutput: true }, models: modelsFor("rec") },
+      { providers: [provider] },
+    );
+    const scope: SessionScope = {
+      skillDiscovery: {
+        load: async (name) => {
+          loadCallTurns.push(name);
+          return {
+            kind: "skill",
+            name,
+            description: "host shelf skill",
+            instructions: "SHELF-PERSIST-XYZ",
+            activation: { mode: "semantic" },
+          };
+        },
+      },
+    };
+    const ctxFor = (traceId: string) => ({
+      correlation: {
+        traceId,
+        requestId: `r-${traceId}`,
+        sessionId: "s-persist",
+        turnId: `turn-${traceId}`,
+      },
+      principal: {},
+      budget: { maxTokens: 2_000, maxDurationMs: 5_000 },
+      scopes: ["*"],
+    });
+    const drain = async (traceId: string): Promise<void> => {
+      for await (const chunk of engine.runStream(
+        { content: "go", metadata: { modality: "text", size: 2 } },
+        ctxFor(traceId),
+        scope,
+      )) {
+        if (chunk.type === "error") {
+          throw chunk.error;
+        }
+      }
+    };
+
+    await drain(TURN1);
+    await drain(TURN2);
+    await engine.dispose();
+
+    // turn 2's assembled prompt already carries the skill's instructions as an Active Skill,
+    // even though turn 2 never emitted a load_skill call — persistence, not re-load.
+    expect(turn2StreamMessages.join("\n")).toContain("SHELF-PERSIST-XYZ");
+    expect(streamCallsByTrace.get(TURN2) ?? 0).toBeGreaterThanOrEqual(1);
   });
 });

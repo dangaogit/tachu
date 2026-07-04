@@ -63,7 +63,28 @@ export interface InternalToolContext {
   observability: ObservabilityEmitter;
   adapterContext: AdapterCallContext;
   searchSkills?: (query: string, topK?: number) => Promise<Array<{ name: string; score: number; description: string }>>;
+ /**
+  * 宿主提供的按需技能正文解析入口（来自 `SessionScope.skillDiscovery.load`）。
+  * `load_skill` / `read_skill_resource` 在进程 `registry` 未命中某技能时回落到它，
+  * 使 registry 之外（如宿主「我的技能」）的技能也能取回正文/资源。缺省时行为不变。
+  */
+  loadSkill?: (name: string) => Promise<SkillDescriptor | null>;
 }
+
+/** 先查进程 registry，未命中再回落宿主 `loadSkill`（discovery.load）。 */
+const resolveSkill = async (
+  ctx: InternalToolContext,
+  name: string,
+): Promise<SkillDescriptor | null> => {
+  const fromRegistry = ctx.registry.get("skill", name);
+  if (fromRegistry) {
+    return fromRegistry;
+  }
+  if (ctx.loadSkill) {
+    return ctx.loadSkill(name);
+  }
+  return null;
+};
 
 const resolveSkillResourcePath = (
   skill: SkillDescriptor,
@@ -100,7 +121,7 @@ export const executeInternalTool = async (
     if (!name) {
       return { ok: false, error: "name is required" };
     }
-    const skill = ctx.registry.get("skill", name);
+    const skill = await resolveSkill(ctx, name);
     if (!skill) {
       return { ok: false, error: `skill "${name}" not found` };
     }
@@ -163,7 +184,7 @@ export const executeInternalTool = async (
   if (!skillName || !resourcePath) {
     return { ok: false, error: "name and path are required" };
   }
-  const skill = ctx.registry.get("skill", skillName);
+  const skill = await resolveSkill(ctx, skillName);
   if (!skill) {
     return { ok: false, error: `skill "${skillName}" not found` };
   }

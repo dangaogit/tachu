@@ -36,6 +36,22 @@ _Avoid_: Vector search, semantic index (as user-facing outcome labels)
 A skill whose full instructions are pinned into the current turn's main system prompt (T0 tier). Active skills define behavioral and output-format contracts the agent must follow while executing the turn.
 _Avoid_: Available skill, loaded skill, pinned descriptor (as interchangeable labels)
 
+**Available Skill**:
+A skill surfaced to a turn as a discovery entry — name + description only, no instructions — rendered under the prompt's "Available Skills" section so the agent knows the capability exists and may choose to load it. Metadata only; never behavior-binding on its own.
+_Avoid_: Active skill, loaded skill (as the same thing); putting instructions into an available entry
+
+**Loaded Skill**:
+A skill whose full instructions the agent pulled into the current turn on demand via the `load_skill` tool; the tool result carries the instructions for that turn. Loading also marks the skill sticky (see **Loaded Skill Persistence**).
+_Avoid_: Active skill (a loaded skill only becomes Active from the *next* turn, via sticky); a one-shot read with no persistence
+
+**Loaded Skill Persistence**:
+Loading a skill carries it into later turns as an **Active Skill** through the session sticky window (TTL + LRU slots) until it ages out. Source-agnostic: a **Host Skill Discovery** skill persists identically to a registry skill, and persistence always reflects the host's latest owner-aware instructions rather than a snapshot cached in the engine. A skill that has aged out of the window falls back to **Available Skill** (the agent may load it again).
+_Avoid_: a one-shot load that vanishes next turn; the engine caching loaded instructions; discovery skills persisting differently from registry skills; a separate `unload` step as the only way a loaded skill leaves context (aging-out is the default)
+
+**Host Skill Discovery**:
+A per-turn, host-scoped (e.g. tenant + user) provider (`SessionScope.skillDiscovery`) that supplies **Available Skill**s (`list`), `search_skills` hits (`search`), and on-demand instructions (`load`) from outside the process registry — never written into the shared registry, so discovery stays tenant-isolated and unbounded cross-session accumulation is avoided. It only changes *where* skill data comes from; the Available → Loaded → Active model is unchanged. When absent, every mechanism falls back to registry-only behavior.
+_Avoid_: writing host/tenant skills into the global process registry; a registry that accumulates per-tenant skills across sessions; treating discovery as a separate activation tier
+
 **Final-Answer Skill Inheritance**:
 _(0.2.0 · ADR-0006: superseded — the separate final-answer writer is removed. The loop's **Terminal Draft** is written under the full assembled prompt and inherits Active Skills natively, so there is no final-answer seam to lose inheritance at. Historical below.)_
 The requirement that the candidate-answer phase's final-answer writer receives the same active skill instructions that were visible to the main execution path (planning / tool-use). Skill activation alone does not satisfy delivery if this inheritance is missing at the final-answer seam.
@@ -199,3 +215,15 @@ Domain expert: "Explicit Skill Mention wins — check explicitSkills on Turn Pol
 Dev: "User asked for charts but the run called image.qwen. Was Turn Policy wrong?"
 
 Domain expert: "Check intent output — were the right names in excludeTools and pinSkills? That is host/intent LLM responsibility. If the lists were correct but image.qwen still ran, ToolActivator exclude failed in tachu — that is an enforcement bug, not a model preference issue."
+
+Dev: "A user's own shelf skill isn't in the registry. How does the agent even know it exists?"
+
+Domain expert: "Through Host Skill Discovery — its name and description appear as an Available Skill. The instructions aren't in context yet; the agent calls load_skill to pull them, and that turn it's a Loaded Skill."
+
+Dev: "If it loaded that shelf skill last turn, is it gone this turn?"
+
+Domain expert: "No — Loaded Skill Persistence makes it an Active Skill on the following turns via sticky, exactly like a registry skill, until it ages out of the sticky window. The only difference is where the instructions come from, and they always reflect the owner's latest version, never a cached copy."
+
+Dev: "So do we need an unload_skill to get rid of it?"
+
+Domain expert: "Not for the common case — TTL and LRU slots age it out automatically. Explicit unload is a separate, orthogonal capability, not part of how a loaded skill leaves context by default."

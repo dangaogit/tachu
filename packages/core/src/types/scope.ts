@@ -84,4 +84,57 @@ export interface SessionScope {
    * UI 勾选等宿主侧显式激活信号。
    */
   explicitRuleNames?: readonly string[];
+  /**
+   * 按回合传入、由宿主作用域（如 tenant + user）解析的技能发现 + 加载 provider。
+   *
+   * 存在的意义：让原生的 `search_skills` / `load_skill` / `read_skill_resource`
+   * 与 "Available Skills" 索引能由**宿主**提供数据源，而**不写入进程级共享
+   * `registry`**——从而天然避免跨租户/跨会话泄漏与无界累积。三个通道各自独立、
+   * 全部可选；任一缺省时对应机制退回「仅 registry」的既有行为，完全向后兼容。
+   *
+   * 语义分层（对齐渐进式披露三层模型）：
+   * - `list`（L2 索引）：只回 name+description(+tags)，并入本轮 `availableSkills`
+   *   候选池，仅作为「可发现目录」呈现（元数据级），**不自动激活**、不注入正文。
+   * - `search`（L2 检索）：`search_skills` 工具的后端；结果与 registry 命中**取并集、
+   *   按 name 去重**后返回。仅当 `runtime.enableSearchSkillsTool === true`（工具已暴露）
+   *   时生效。
+   * - `load`（L3 正文）：`load_skill` / `read_skill_resource` 在 `registry.get` 未命中
+   *   时的回落解析入口，用于把某个技能的完整正文/资源按需取回。
+   *
+   * 隔离保证：provider 仅在本轮执行内被消费（按 traceId 作用域），回合结束即释放；
+   * 并发的其它 runStream（未传或传入各自 provider）互不可见。
+   *
+   * 生命周期备注：`load` 取回的技能是否**跨回合**持续 Active（sticky 再物化）属于
+   * 尚未拍板的产品/架构决策（见交接文档 §7.1 L3 语义、§7.2 生命周期）。当前实现为
+   * 「按回合解析」：命中即在本轮返回正文；跨回合再物化不在此改动范围内。
+   */
+  skillDiscovery?: SkillDiscoveryProvider;
+}
+
+/** {@link SkillDiscoveryProvider.list} 的返回项：技能元数据（L2 索引）。 */
+export interface SkillDiscoveryEntry {
+  name: string;
+  description: string;
+  tags?: string[] | undefined;
+}
+
+/** {@link SkillDiscoveryProvider.search} 的返回项：带相关性分数的命中。 */
+export interface SkillDiscoverySearchHit {
+  name: string;
+  description: string;
+  score: number;
+}
+
+/**
+ * 宿主提供的按回合、租户/用户作用域的技能发现 + 加载 provider。
+ *
+ * 三个方法全部可选；见 {@link SessionScope.skillDiscovery} 的分层语义说明。
+ */
+export interface SkillDiscoveryProvider {
+  /** L2 索引：仅回 name+description(+tags)，并入 availableSkills（不自动激活）。 */
+  list?: () => Promise<SkillDiscoveryEntry[]>;
+  /** `search_skills` 后端：与 registry 结果取并集、按 name 去重。 */
+  search?: (query: string, topK?: number) => Promise<SkillDiscoverySearchHit[]>;
+  /** L3 正文：`registry.get("skill", name)` 未命中时回落到此解析完整描述符。 */
+  load?: (name: string) => Promise<SkillDescriptor | null>;
 }

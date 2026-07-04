@@ -150,6 +150,11 @@ export interface InternalSubflowContext {
   searchSkills?: (query: string, topK?: number) => Promise<
     Array<{ name: string; score: number; description: string }>
   >;
+  /**
+   * 宿主 `SessionScope.skillDiscovery.load` 的 registry 未命中回落入口，仅 `tool-use`
+   * 消费，透传给 `load_skill` / `read_skill_resource`。缺省时行为不变。
+   */
+  loadSkill?: (name: string) => Promise<import("../../types").SkillDescriptor | null>;
   /** normalized turn policy for tool-use tail constraints. */
   gatingPolicy?: GatingPolicy;
   /**
@@ -267,6 +272,7 @@ export class InternalSubflowRegistry {
           : {}),
         ...(ctx.stickyManager !== undefined ? { stickyManager: ctx.stickyManager } : {}),
         ...(ctx.searchSkills !== undefined ? { searchSkills: ctx.searchSkills } : {}),
+        ...(ctx.loadSkill !== undefined ? { loadSkill: ctx.loadSkill } : {}),
         ...(ctx.gatingPolicy !== undefined ? { gatingPolicy: ctx.gatingPolicy } : {}),
         ...(ctx.hooks !== undefined ? { hooks: ctx.hooks } : {}),
         ...(ctx.dispatchAgent !== undefined ? { dispatchAgent: ctx.dispatchAgent } : {}),

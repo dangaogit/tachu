@@ -43,6 +43,7 @@ import type {
   ModelRoute,
   OutputMetadata,
   SessionScope,
+  SkillDiscoveryProvider,
   StreamChunk,
   ToolCallRecord,
 } from "../types";
@@ -63,6 +64,7 @@ import { ExecutionOrchestrator } from "./orchestrator";
 import { TaskScheduler, type TaskExecutor } from "./scheduler";
 import {
   applyTurnOutcome,
+  engineEventFromAdapterContext,
   engineEventFromContext,
   streamEnvelopeFromContext,
   validationOutcomeToEvent,
@@ -324,6 +326,15 @@ export class Engine {
  */
   private readonly activeRunPrompts = new Map<string, AssembledPrompt>();
   private readonly activeRunTurnPolicies = new Map<string, import("../types").GatingPolicy>();
+
+ /**
+ * 活跃 runStream 的宿主技能发现 provider（`SessionScope.skillDiscovery`），按
+ * `traceId` 索引。与 `activeRunPrompts` 同生命周期：`runStream` 起始写入、`finally`
+ * 清理。`buildLayeredTaskExecutor` 据此为内置 `tool-use` 装配 `search_skills` 的并集
+ * 后端与 `load_skill` 的 registry 未命中回落。以 traceId 作用域 = 天然租户/会话隔离，
+ * **绝不**写入进程级共享 `registry`；未传时对应机制退回「仅 registry」既有行为。
+ */
+  private readonly activeRunSkillDiscovery = new Map<string, SkillDiscoveryProvider>();
 
  /**
  * 活跃 runStream 的 usage 回流回调缓存，按 `traceId` 索引。
@@ -1035,13 +1046,16 @@ export class Engine {
     return Object.keys(known).length > 0 ? known : undefined;
   }
 
-  private buildSearchSkillsHandler(): (
+  private buildSearchSkillsHandler(
+    skillDiscovery?: SkillDiscoveryProvider,
+    adapterContext?: AdapterCallContext,
+  ): (
     query: string,
     topK?: number,
   ) => Promise<Array<{ name: string; score: number; description: string }>> {
     return async (query, topK = 10) => {
       const normalized = query.toLowerCase();
-      const hits = [];
+      const hits: Array<{ name: string; score: number; description: string }> = [];
       for (const skill of this.registry.list("skill")) {
         if (skill.deprecated === true) {
           continue;
@@ -1060,6 +1074,47 @@ export class Engine {
           }
         }
       }
+
+     // 与宿主 `skillDiscovery.search` 结果取并集：按 name 去重（同名取较高分，
+     // registry 命中优先保留其描述），再按分数降序截断 topK。search 抛错时降级为
+     // 「仅 registry」，绝不阻断工具调用。
+      if (skillDiscovery?.search !== undefined) {
+        const byName = new Map(hits.map((hit) => [hit.name, hit]));
+        try {
+          for (const hit of await skillDiscovery.search(query, topK)) {
+            if (
+              typeof hit?.name !== "string" ||
+              hit.name.length === 0 ||
+              typeof hit.description !== "string"
+            ) {
+              continue;
+            }
+            const existing = byName.get(hit.name);
+            if (existing === undefined) {
+              const merged = { name: hit.name, score: hit.score, description: hit.description };
+              byName.set(hit.name, merged);
+              hits.push(merged);
+            } else if (hit.score > existing.score) {
+              existing.score = hit.score;
+            }
+          }
+        } catch (error) {
+          if (adapterContext !== undefined) {
+            this.observability.emit(
+              engineEventFromAdapterContext(adapterContext, {
+                timestamp: Date.now(),
+                phase: "tool-use",
+                type: "warning",
+                payload: {
+                  reason: "skill_discovery_search_failed",
+                  error: error instanceof Error ? error.message : String(error),
+                },
+              }),
+            );
+          }
+        }
+      }
+
       return hits.sort((left, right) => right.score - left.score).slice(0, topK);
     };
   }
@@ -1295,6 +1350,7 @@ export class Engine {
           this.activeRunCurrentPhaseStepIds.get(context.correlation.traceId);
         const nextStreamId = this.activeRunIdFactories.get(context.correlation.traceId);
         const executionContext = this.activeRunExecutionContexts.get(context.correlation.traceId);
+        const skillDiscovery = this.activeRunSkillDiscovery.get(context.correlation.traceId);
         const eventOutbox = this.activeRunEventOutbox.get(context.correlation.traceId);
         const toolCallSink = this.activeRunToolCallSinks.get(context.correlation.traceId);
         const deltaQueue = this.activeRunDeltaOutbox.get(context.correlation.traceId);
@@ -1405,7 +1461,17 @@ export class Engine {
           sessionManager: this.sessionManager,
           stickyManager: this.stickyManager,
           ...(this.config.runtime.enableSearchSkillsTool === true
-            ? { searchSkills: this.buildSearchSkillsHandler() }
+            ? {
+                searchSkills: this.buildSearchSkillsHandler(
+                  skillDiscovery,
+                  adapterCallContextFromExecution(context),
+                ),
+              }
+            : {}),
+         // `load_skill` / `read_skill_resource` 的 registry 未命中回落：仅当宿主提供
+         // `skillDiscovery.load` 时注入；缺省时两个内置工具行为与既有完全一致。
+          ...(skillDiscovery?.load !== undefined
+            ? { loadSkill: (name: string) => skillDiscovery.load!(name) }
             : {}),
           ...(gatingPolicy !== undefined ? { gatingPolicy } : {}),
         });
@@ -1628,6 +1694,12 @@ export class Engine {
  // SessionScope.modelOverride 在本轮内覆盖 capabilityMapping；未提供时直接返回原 router。
     const effectiveRouter = applyModelOverride(this.modelRouter, scope?.modelOverride);
     this.activeRunModelRouters.set(normalizedContext.correlation.traceId, effectiveRouter);
+    if (scope?.skillDiscovery !== undefined) {
+      this.activeRunSkillDiscovery.set(
+        normalizedContext.correlation.traceId,
+        scope.skillDiscovery,
+      );
+    }
     const phaseEnv: PhaseEnvironment = {
       config: this.config,
       registry: this.registry as DescriptorRegistry,
@@ -2381,6 +2453,7 @@ export class Engine {
       this.activeRunGeneratedMedia.delete(normalizedContext.correlation.traceId);
       this.activeRunToolLoopTimingControls.delete(normalizedContext.correlation.traceId);
       this.activeRunModelRouters.delete(normalizedContext.correlation.traceId);
+      this.activeRunSkillDiscovery.delete(normalizedContext.correlation.traceId);
     }
   }
 

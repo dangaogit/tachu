@@ -223,6 +223,37 @@ const writePackageVersion = (pkg: string, from: string, to: string): void => {
   writeFileSync(path, text.replace(pattern, `$1${to}$2`));
 };
 
+/**
+ * Sync workspace versions inside bun.lock. `bun install` does NOT rewrite these
+ * on an internal-only version bump (the `workspace:*` dependency graph is
+ * unchanged, so bun considers the lockfile current), which leaves the release
+ * validator failing with "package.json version X does not match bun.lock". We
+ * rewrite the `@tachu/*` workspace entries' `version` fields directly. The
+ * name-anchored match keeps us from touching any third-party dependency version.
+ */
+const updateLockfile = (from: string, to: string): boolean => {
+  const path = join(ROOT, "bun.lock");
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    return false;
+  }
+  const probe = new RegExp(
+    `"name":\\s*"@tachu/[^"]+",\\s*"version":\\s*"${escapeRegExp(from)}"`,
+  );
+  if (!probe.test(text)) return false;
+  const next = text.replace(
+    new RegExp(
+      `("name":\\s*"@tachu/[^"]+",\\s*"version":\\s*")${escapeRegExp(from)}(")`,
+      "g",
+    ),
+    `$1${to}$2`,
+  );
+  writeFileSync(path, next);
+  return true;
+};
+
 const updateChangelog = (to: string, note: string | undefined): boolean => {
   const path = join(ROOT, "CHANGELOG.md");
   let text: string;
@@ -331,6 +362,13 @@ const main = async (): Promise<void> => {
     writePackageVersion(pkg, from, to);
   }
   console.log(`${GREEN}✓${RESET} wrote version ${to} to ${WORKSPACE_PACKAGES.length} package.json files`);
+
+  const lockSynced = updateLockfile(from, to);
+  console.log(
+    lockSynced
+      ? `${GREEN}✓${RESET} synced @tachu/* workspace versions in bun.lock to ${to}`
+      : `${YELLOW}⚠${RESET} bun.lock not updated (no @tachu/* ${from} entries found)`,
+  );
 
   if (!args.noChangelog) {
     const note = args.note ?? (interactive ? (await promptChangelogNote()) : undefined);

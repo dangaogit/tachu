@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 #
-# Tachu monorepo one-shot publish script.
+# Tachu monorepo one-shot release script.
 #
 # Workflow:
+# 0. interactive version bump (unless --no-bump / --dry-run): pick a semver
+#    release type (major/minor/patch/pre*/prerelease/release — rc.N -> rc.N+1),
+#    write every workspace package.json, prepend a CHANGELOG entry, bun install
+#    to sync the lockfile, and commit the bump.
 # 1. git working tree clean check (unless --skip-git-check)
 # 2. bun install --frozen-lockfile
-# 3. bun run typecheck (all 3 workspaces)
+# 3. bun run typecheck (all workspaces)
 # 4. bun test (full suite must pass; hard blocker per release policy)
 # 5. bun run build (emit dist/ for all workspaces) + artifact validation
 # 6. bun publish in dependency order: core -> extensions -> host-defaults -> cli
@@ -13,13 +17,20 @@
 # does not fail with "This package has been marked as private")
 #
 # Usage:
-# scripts/publish.sh # publish with default tag "rc"
-# scripts/publish.sh --dry-run # inspect tarball contents only
-# scripts/publish.sh --tag=latest # promote to stable (manual decision; blocked for pre-release versions)
-# scripts/publish.sh --tag=rc # publish to the release-candidate channel
+# scripts/publish.sh # interactive bump, then publish (tag inferred from version)
+# scripts/publish.sh --release-as=prerelease # non-interactive rc.N -> rc.N+1
+# scripts/publish.sh --release-as=minor # non-interactive minor bump
+# scripts/publish.sh --release-as=1.2.3 # non-interactive explicit version
+# scripts/publish.sh --no-bump # publish the current version as-is (no bump/commit)
+# scripts/publish.sh --yes # skip the bump confirmation prompt
+# scripts/publish.sh --dry-run # inspect tarball contents only (no bump/commit)
+# scripts/publish.sh --tag=latest # force dist-tag (default: rc for pre-release, latest for stable)
 # scripts/publish.sh --tag=next # publish to a preview channel
 # scripts/publish.sh --access=restricted # override (scoped private releases)
 # scripts/publish.sh --skip-git-check # skip dirty workspace gate
+#
+# Tag inference: when --tag is omitted, a pre-release version (contains "-")
+# publishes under "rc" and a stable version under "latest".
 #
 # Requirements:
 # - bun >= 1.3.14
@@ -36,9 +47,13 @@ BOLD=$'\033[1m'
 RESET=$'\033[0m'
 
 DRY_RUN=""
-TAG="rc"
+TAG=""
+TAG_EXPLICIT=0
 ACCESS="public"
 SKIP_GIT_CHECK=0
+NO_BUMP=0
+RELEASE_AS=""
+ASSUME_YES=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -48,10 +63,12 @@ while [[ $# -gt 0 ]]; do
       ;;
     --tag)
       TAG="$2"
+      TAG_EXPLICIT=1
       shift 2
       ;;
     --tag=*)
       TAG="${1#*=}"
+      TAG_EXPLICIT=1
       shift
       ;;
     --access)
@@ -60,6 +77,22 @@ while [[ $# -gt 0 ]]; do
       ;;
     --access=*)
       ACCESS="${1#*=}"
+      shift
+      ;;
+    --release-as)
+      RELEASE_AS="$2"
+      shift 2
+      ;;
+    --release-as=*)
+      RELEASE_AS="${1#*=}"
+      shift
+      ;;
+    --no-bump)
+      NO_BUMP=1
+      shift
+      ;;
+    --yes|-y)
+      ASSUME_YES=1
       shift
       ;;
     --skip-git-check)
@@ -122,6 +155,30 @@ else
   log_warn "skipped per --skip-git-check"
 fi
 
+# ---- version bump (interactive semver + CHANGELOG + lockfile + commit) --------
+if [[ $NO_BUMP -eq 0 && -z "$DRY_RUN" ]]; then
+  log_step "version bump (semver + CHANGELOG + lockfile + commit)"
+  BUMP_ARGS=()
+  [[ -n "$RELEASE_AS" ]] && BUMP_ARGS+=("$RELEASE_AS")
+  [[ $ASSUME_YES -eq 1 ]] && BUMP_ARGS+=("--yes")
+  bun scripts/bump-version.ts ${BUMP_ARGS[@]+"${BUMP_ARGS[@]}"}
+
+  NEW_VERSION="$(bun --print 'JSON.parse(await Bun.file("packages/core/package.json").text()).version')"
+
+  log_step "bun install (sync lockfile to ${NEW_VERSION})"
+  bun install
+  log_ok "lockfile synced"
+
+  log_step "git commit — chore(release): bump workspace to ${NEW_VERSION}"
+  git add packages/*/package.json CHANGELOG.md bun.lock
+  git commit -m "chore(release): bump workspace to ${NEW_VERSION}"
+  log_ok "committed bump ${NEW_VERSION}"
+elif [[ -n "$DRY_RUN" ]]; then
+  log_warn "version bump skipped (dry-run — publishing current version)"
+else
+  log_warn "version bump skipped (--no-bump — publishing current version)"
+fi
+
 # ---- 2/6 bun install ---------------------------------------------------------
 log_step "2/6 bun install --frozen-lockfile"
 bun install --frozen-lockfile
@@ -152,6 +209,17 @@ if [[ "$VERSION" != "$EXT_VERSION" || "$VERSION" != "$HOST_DEFAULTS_VERSION" || 
   log_fail "Version mismatch: core=$VERSION extensions=$EXT_VERSION host-defaults=$HOST_DEFAULTS_VERSION cli=$CLI_VERSION"
   log_fail "All public packages must share the same version. Aborting."
   exit 1
+fi
+
+# Infer the dist-tag from the version when the caller did not force one:
+# a pre-release (contains "-") goes to "rc", a stable version to "latest".
+if [[ $TAG_EXPLICIT -eq 0 ]]; then
+  if [[ "$VERSION" == *"-"* ]]; then
+    TAG="rc"
+  else
+    TAG="latest"
+  fi
+  log_ok "dist-tag inferred: ${TAG} (from version ${VERSION})"
 fi
 
 if [[ "$TAG" == "latest" && "$VERSION" == *"-"* ]]; then

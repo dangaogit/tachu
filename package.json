@@ -69,9 +69,10 @@
     "check:semantic-index-port": "bun scripts/check-semantic-index-port.ts",
     "check:final-answer-phase": "bun scripts/check-final-answer-phase.ts",
     "release": "bash scripts/publish.sh",
+    "release:bump": "bun scripts/bump-version.ts",
     "release:dry": "bash scripts/publish.sh --dry-run",
-    "release:rc": "bash scripts/publish.sh --tag=rc",
-    "release:latest": "bash scripts/publish.sh --tag=latest"
+    "release:rc": "bash scripts/publish.sh --release-as=prerelease",
+    "release:latest": "bash scripts/publish.sh --release-as=release"
   },
   "devDependencies": {
     "@types/bun": "catalog:",
